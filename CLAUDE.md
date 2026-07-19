@@ -60,3 +60,7 @@ Default seeded accounts: `admin` / `staff`, password `password` (override via `S
 
 `./vendor/bin/pint`, `php artisan test`, `npm run lint`, `npm run type-check` all pass;
 UI verified at 375px and desktop; keyboard-navigable.
+
+**Docs stay in sync:** any change to roles, the cheque lifecycle, a workflow, an API route, or the
+data model MUST update `docs/DOCUMENTATION.md` and its Mermaid flow-charts in the SAME change, and
+bump the "Last reviewed" date there. The docs are hand-maintained, not generated.
