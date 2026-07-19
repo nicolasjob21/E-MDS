@@ -36,4 +36,11 @@ class UserFactory extends Factory
             'role' => UserRole::Admin,
         ]);
     }
+
+    public function teller(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'role' => UserRole::Teller,
+        ]);
+    }
 }

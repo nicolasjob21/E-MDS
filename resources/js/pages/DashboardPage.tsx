@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Layers, CircleDot, CheckCheck } from 'lucide-react';
+import { Layers, CircleDot, CheckCheck, BadgeCheck } from 'lucide-react';
 import { ChequeApi, toApiError } from '../lib/api';
 import type { Summary } from '../lib/types';
 import { useAuth } from '../auth/AuthContext';
@@ -10,6 +10,7 @@ const CARDS = [
     { key: 'total', label: 'Total cheques', icon: Layers, color: 'text-fg' },
     { key: 'available', label: 'Available', icon: CircleDot, color: 'text-brandink' },
     { key: 'used', label: 'Used', icon: CheckCheck, color: 'text-accent-400' },
+    { key: 'received', label: 'Received', icon: BadgeCheck, color: 'text-success-fg' },
 ] as const;
 
 export default function DashboardPage() {
@@ -41,7 +42,7 @@ export default function DashboardPage() {
 
             {summary && (
                 <div className="space-y-8">
-                    <div className="grid grid-cols-1 gap-px overflow-hidden rounded-xs border border-line bg-line sm:grid-cols-3">
+                    <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xs border border-line bg-line sm:grid-cols-4">
                         {CARDS.map(({ key, label, icon: Icon, color }) => (
                             <div key={key} className="bg-card p-6">
                                 <div className="flex items-center justify-between">

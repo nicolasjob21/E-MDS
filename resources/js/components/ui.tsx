@@ -44,14 +44,15 @@ export function PageHeader({ title, subtitle, action }: { title: string; subtitl
 }
 
 export function StatusBadge({ status }: { status: ChequeStatus }) {
-    const styles =
-        status === 'available'
-            ? 'border-brand-400/40 text-brandink bg-brand-500/10'
-            : 'border-slate-600/50 text-muted bg-slate-500/10';
+    const config = {
+        available: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300', label: 'Available' },
+        used: { styles: 'border-slate-600/50 text-muted bg-slate-500/10', dot: 'bg-slate-400', label: 'Used' },
+        received: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success', label: 'Received' },
+    }[status];
     return (
-        <span className={`inline-flex items-center gap-1.5 rounded-xs border px-2 py-0.5 text-xs font-medium ${styles}`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${status === 'available' ? 'bg-brand-300' : 'bg-slate-400'}`} />
-            {status === 'available' ? 'Available' : 'Used'}
+        <span className={`inline-flex items-center gap-1.5 rounded-xs border px-2 py-0.5 text-xs font-medium ${config.styles}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${config.dot}`} />
+            {config.label}
         </span>
     );
 }

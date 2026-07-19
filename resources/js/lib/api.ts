@@ -3,9 +3,9 @@ import type {
     Cheque,
     ChequeDetails,
     ChequeLog,
-    EncashmentDetails,
     Paginated,
     Summary,
+    UpdateRequest,
     User,
 } from './types';
 
@@ -86,9 +86,9 @@ export const ChequeApi = {
         });
         return data.data as Cheque;
     },
-    async cash(chequeId: number, details: EncashmentDetails): Promise<Cheque> {
+    async confirmReceipt(chequeId: number): Promise<Cheque> {
         await ensureCsrf();
-        const { data } = await http.post(`/cheques/${chequeId}/cash`, details);
+        const { data } = await http.post(`/cheques/${chequeId}/receive`);
         return data.data as Cheque;
     },
     async addRange(count: number, startAt?: number): Promise<{ from: number; to: number; count: number; message: string }> {
@@ -98,6 +98,41 @@ export const ChequeApi = {
             start_at: startAt ?? null,
         });
         return data.data;
+    },
+    async requestUpdate(chequeId: number, payload: ProposedUpdate): Promise<UpdateRequest> {
+        await ensureCsrf();
+        const { data } = await http.post(`/cheques/${chequeId}/update-requests`, payload);
+        return data.data as UpdateRequest;
+    },
+};
+
+export interface ProposedUpdate {
+    payee_name: string;
+    amount: number;
+    cheque_date: string;
+    reason: string;
+}
+
+export const UpdateRequestApi = {
+    async list(status = 'pending', page = 1, perPage = 50): Promise<Paginated<UpdateRequest>> {
+        const { data } = await http.get('/update-requests', {
+            params: { status, page, per_page: perPage },
+        });
+        return data as Paginated<UpdateRequest>;
+    },
+    async forCheque(chequeId: number): Promise<UpdateRequest[]> {
+        const { data } = await http.get(`/cheques/${chequeId}/update-requests`);
+        return data.data as UpdateRequest[];
+    },
+    async approve(id: number, reviewNote?: string): Promise<UpdateRequest> {
+        await ensureCsrf();
+        const { data } = await http.post(`/update-requests/${id}/approve`, { review_note: reviewNote ?? null });
+        return data.data as UpdateRequest;
+    },
+    async reject(id: number, reviewNote?: string): Promise<UpdateRequest> {
+        await ensureCsrf();
+        const { data } = await http.post(`/update-requests/${id}/reject`, { review_note: reviewNote ?? null });
+        return data.data as UpdateRequest;
     },
 };
 

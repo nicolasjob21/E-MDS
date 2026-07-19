@@ -3,6 +3,7 @@
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ChequeController;
 use App\Http\Controllers\ChequeLogController;
+use App\Http\Controllers\ChequeUpdateRequestController;
 use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
 
@@ -19,11 +20,24 @@ Route::prefix('v1')->group(function () {
         Route::get('cheques/summary', [ChequeController::class, 'summary']);
         Route::get('cheques/next', [ChequeController::class, 'next']);
         Route::post('cheques/use', [ChequeController::class, 'use']);
-        Route::post('cheques/{cheque}/cash', [ChequeController::class, 'cash']);
+
+        // Teller only: confirm a used cheque has been received.
+        Route::middleware('teller')->group(function () {
+            Route::post('cheques/{cheque}/receive', [ChequeController::class, 'confirmReceipt']);
+        });
+
+        // Staff request a correction to a cheque's details (authorized in the Form Request).
+        Route::post('cheques/{cheque}/update-requests', [ChequeUpdateRequestController::class, 'store']);
+        // Anyone authenticated can read a cheque's update-request history (with outcomes).
+        Route::get('cheques/{cheque}/update-requests', [ChequeUpdateRequestController::class, 'forCheque']);
 
         // Admin only
         Route::middleware('admin')->group(function () {
             Route::post('cheques/add-range', [ChequeController::class, 'addRange']);
+
+            Route::get('update-requests', [ChequeUpdateRequestController::class, 'index']);
+            Route::post('update-requests/{updateRequest}/approve', [ChequeUpdateRequestController::class, 'approve']);
+            Route::post('update-requests/{updateRequest}/reject', [ChequeUpdateRequestController::class, 'reject']);
 
             Route::get('logs', [ChequeLogController::class, 'index']);
 

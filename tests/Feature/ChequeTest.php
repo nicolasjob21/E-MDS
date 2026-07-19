@@ -25,6 +25,11 @@ class ChequeTest extends TestCase
         return User::factory()->create(['role' => UserRole::Staff]);
     }
 
+    private function teller(): User
+    {
+        return User::factory()->teller()->create();
+    }
+
     private function seedCheques(int $count, int $startAt = 1): void
     {
         app(ChequeService::class)->addRange($this->admin(), $count, $startAt);
@@ -129,7 +134,7 @@ class ChequeTest extends TestCase
             ->assertJsonValidationErrors(['payee_name', 'amount', 'cheque_date']);
     }
 
-    public function test_a_used_cheque_can_be_cashed(): void
+    public function test_a_teller_can_confirm_a_used_cheque_as_received(): void
     {
         $this->seedCheques(3, 1);
         Sanctum::actingAs($this->staff());
@@ -137,40 +142,50 @@ class ChequeTest extends TestCase
 
         $cheque = Cheque::where('cheque_number', 1)->first();
 
-        $this->postJson("/api/v1/cheques/{$cheque->id}/cash", [
-            'teller_name' => 'Jane Teller',
-            'cashed_at' => '2026-07-20',
-        ])
+        Sanctum::actingAs($this->teller());
+        $this->postJson("/api/v1/cheques/{$cheque->id}/receive")
             ->assertOk()
-            ->assertJsonPath('data.is_cashed', true)
-            ->assertJsonPath('data.teller_name', 'Jane Teller');
+            ->assertJsonPath('data.is_received', true)
+            ->assertJsonPath('data.status', 'received');
 
-        $this->assertDatabaseHas('cheque_logs', ['action' => 'cashed_cheque', 'cheque_number' => 1]);
+        $this->assertDatabaseHas('cheque_logs', ['action' => 'received_cheque', 'cheque_number' => 1]);
     }
 
-    public function test_an_available_cheque_cannot_be_cashed(): void
+    public function test_a_non_teller_cannot_confirm_receipt(): void
     {
         $this->seedCheques(3, 1);
         Sanctum::actingAs($this->staff());
+        $this->postJson('/api/v1/cheques/use', $this->usePayload(1))->assertOk();
+        $cheque = Cheque::where('cheque_number', 1)->first();
+
+        // Staff is still acting; confirming receipt is teller-only.
+        $this->postJson("/api/v1/cheques/{$cheque->id}/receive")->assertForbidden();
+
+        // Admin cannot either.
+        Sanctum::actingAs($this->admin());
+        $this->postJson("/api/v1/cheques/{$cheque->id}/receive")->assertForbidden();
+    }
+
+    public function test_an_available_cheque_cannot_be_confirmed_as_received(): void
+    {
+        $this->seedCheques(3, 1);
+        Sanctum::actingAs($this->teller());
 
         $cheque = Cheque::where('cheque_number', 1)->first(); // still available
 
-        $this->postJson("/api/v1/cheques/{$cheque->id}/cash", [
-            'teller_name' => 'Jane Teller',
-            'cashed_at' => '2026-07-20',
-        ])->assertStatus(422);
+        $this->postJson("/api/v1/cheques/{$cheque->id}/receive")->assertStatus(422);
     }
 
-    public function test_a_cheque_cannot_be_cashed_twice(): void
+    public function test_a_cheque_cannot_be_confirmed_as_received_twice(): void
     {
         $this->seedCheques(3, 1);
         Sanctum::actingAs($this->staff());
         $this->postJson('/api/v1/cheques/use', $this->usePayload(1))->assertOk();
         $cheque = Cheque::where('cheque_number', 1)->first();
 
-        $payload = ['teller_name' => 'Jane Teller', 'cashed_at' => '2026-07-20'];
-        $this->postJson("/api/v1/cheques/{$cheque->id}/cash", $payload)->assertOk();
-        $this->postJson("/api/v1/cheques/{$cheque->id}/cash", $payload)->assertStatus(422);
+        Sanctum::actingAs($this->teller());
+        $this->postJson("/api/v1/cheques/{$cheque->id}/receive")->assertOk();
+        $this->postJson("/api/v1/cheques/{$cheque->id}/receive")->assertStatus(422);
     }
 
     public function test_staff_cannot_add_a_range(): void

@@ -6,8 +6,9 @@ use App\Enums\ChequeStatus;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['cheque_number', 'payee_name', 'amount', 'cheque_date', 'status', 'used_by', 'used_at', 'teller_name', 'cashed_at', 'created_by'])]
+#[Fillable(['cheque_number', 'payee_name', 'amount', 'cheque_date', 'status', 'used_by', 'used_at', 'received_by', 'received_at', 'created_by'])]
 class Cheque extends Model
 {
     protected function casts(): array
@@ -18,13 +19,13 @@ class Cheque extends Model
             'cheque_date' => 'date',
             'status' => ChequeStatus::class,
             'used_at' => 'datetime',
-            'cashed_at' => 'date',
+            'received_at' => 'datetime',
         ];
     }
 
-    public function isCashed(): bool
+    public function isReceived(): bool
     {
-        return $this->cashed_at !== null;
+        return $this->status === ChequeStatus::Received;
     }
 
     public function usedBy(): BelongsTo
@@ -32,8 +33,18 @@ class Cheque extends Model
         return $this->belongsTo(User::class, 'used_by');
     }
 
+    public function receivedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'received_by');
+    }
+
     public function createdBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function updateRequests(): HasMany
+    {
+        return $this->hasMany(ChequeUpdateRequest::class);
     }
 }

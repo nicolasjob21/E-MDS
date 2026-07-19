@@ -4,11 +4,11 @@ namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
 
-class CashChequeRequest extends FormRequest
+class RejectUpdateRequestRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return true;
+        return true; // Route is gated by the `admin` middleware.
     }
 
     /**
@@ -17,8 +17,7 @@ class CashChequeRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'teller_name' => ['required', 'string', 'max:255'],
-            'cashed_at' => ['required', 'date'],
+            'review_note' => ['nullable', 'string', 'max:1000'],
         ];
     }
 }

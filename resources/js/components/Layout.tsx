@@ -6,6 +6,7 @@ import {
     PlusSquare,
     Users,
     ScrollText,
+    ClipboardCheck,
     LogOut,
     Menu,
     X,
@@ -26,6 +27,7 @@ interface NavItem {
 const NAV: NavItem[] = [
     { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { to: '/cheques', label: 'Cheques', icon: ListChecks },
+    { to: '/admin/update-requests', label: 'Update Requests', icon: ClipboardCheck, adminOnly: true },
     { to: '/admin/add-range', label: 'Add Range', icon: PlusSquare, adminOnly: true },
     { to: '/admin/users', label: 'Users', icon: Users, adminOnly: true },
     { to: '/admin/logs', label: 'Audit Log', icon: ScrollText, adminOnly: true },

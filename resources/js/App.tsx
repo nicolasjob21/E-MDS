@@ -7,6 +7,7 @@ import ChequesPage from './pages/ChequesPage';
 import AddRangePage from './pages/AddRangePage';
 import UsersPage from './pages/UsersPage';
 import LogsPage from './pages/LogsPage';
+import UpdateRequestsPage from './pages/UpdateRequestsPage';
 
 export default function App() {
     return (
@@ -27,6 +28,14 @@ export default function App() {
                     element={
                         <RequireAdmin>
                             <AddRangePage />
+                        </RequireAdmin>
+                    }
+                />
+                <Route
+                    path="/admin/update-requests"
+                    element={
+                        <RequireAdmin>
+                            <UpdateRequestsPage />
                         </RequireAdmin>
                     }
                 />

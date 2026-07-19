@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Enums\ChequeStatus;
 use App\Models\Cheque;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -26,10 +27,16 @@ class ChequeResource extends JsonResource
             'used_by' => $this->whenLoaded('usedBy', fn () => $this->usedBy?->only(['id', 'name', 'username'])),
             'used_by_name' => $this->whenLoaded('usedBy', fn () => $this->usedBy?->name),
             'used_at' => $this->used_at,
-            // Bank encashment (separate lifecycle event).
-            'teller_name' => $this->teller_name,
-            'cashed_at' => $this->cashed_at?->toDateString(),
-            'is_cashed' => $this->cashed_at !== null,
+            // Teller receipt confirmation (separate lifecycle event).
+            'received_by' => $this->whenLoaded('receivedBy', fn () => $this->receivedBy?->only(['id', 'name', 'username'])),
+            'received_by_name' => $this->whenLoaded('receivedBy', fn () => $this->receivedBy?->name),
+            'received_at' => $this->received_at,
+            'is_received' => $this->status === ChequeStatus::Received,
+            // Present only when the pending count was loaded (list view).
+            'has_pending_update' => $this->when(
+                $this->pending_update_count !== null,
+                fn () => (int) $this->pending_update_count > 0,
+            ),
         ];
     }
 }

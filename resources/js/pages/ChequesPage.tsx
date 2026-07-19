@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Lock, Banknote } from 'lucide-react';
+import { Lock, BadgeCheck, Clock } from 'lucide-react';
 import { ChequeApi, toApiError } from '../lib/api';
 import type { Cheque, Paginated, Summary } from '../lib/types';
 import { PageHeader, Spinner, Alert, StatusBadge, EmptyState } from '../components/ui';
@@ -7,13 +7,13 @@ import NextChequePanel from '../components/NextChequePanel';
 import ChequeDetailModal from '../components/ChequeDetailModal';
 import { formatDate, formatMoney } from '../lib/format';
 
-type Tab = 'all' | 'available' | 'used' | 'cashed';
+type Tab = 'all' | 'available' | 'used' | 'received';
 
 const TABS: { key: Tab; label: string }[] = [
     { key: 'all', label: 'All' },
     { key: 'available', label: 'Available' },
     { key: 'used', label: 'Used' },
-    { key: 'cashed', label: 'Cashed' },
+    { key: 'received', label: 'Received' },
 ];
 
 export default function ChequesPage() {
@@ -110,7 +110,7 @@ export default function ChequesPage() {
                                         <th className="px-4 py-3 font-semibold">Payee</th>
                                         <th className="px-4 py-3 text-right font-semibold">Amount</th>
                                         <th className="px-4 py-3 font-semibold">Used by</th>
-                                        <th className="px-4 py-3 font-semibold">Encashment</th>
+                                        <th className="px-4 py-3 font-semibold">Receipt</th>
                                         <th className="px-4 py-3 text-right font-semibold">Action</th>
                                     </tr>
                                 </thead>
@@ -147,19 +147,26 @@ export default function ChequesPage() {
                                                     {cheque.payee_name ?? '—'}
                                                 </td>
                                                 <td className="px-4 py-3 text-right font-mono text-muted">
-                                                    {cheque.status === 'used' ? formatMoney(cheque.amount) : '—'}
+                                                    {cheque.status !== 'available' ? formatMoney(cheque.amount) : '—'}
                                                 </td>
                                                 <td className="px-4 py-3 text-muted">
                                                     {cheque.used_by?.name ?? cheque.used_by_name ?? '—'}
                                                 </td>
                                                 <td className="px-4 py-3">
-                                                    {cheque.is_cashed ? (
+                                                    {cheque.status === 'received' ? (
                                                         <span className="inline-flex items-center gap-1 rounded-xs border border-success/40 bg-success/10 px-2 py-0.5 text-xs font-medium text-success-fg">
-                                                            <Banknote className="h-3 w-3" />
-                                                            {formatDate(cheque.cashed_at)}
+                                                            <BadgeCheck className="h-3 w-3" />
+                                                            {formatDate(cheque.received_at)}
                                                         </span>
                                                     ) : cheque.status === 'used' ? (
-                                                        <span className="text-xs text-subtle">Pending</span>
+                                                        cheque.has_pending_update ? (
+                                                            <span className="inline-flex items-center gap-1 rounded-xs border border-accent-400/50 bg-accent-400/10 px-2 py-0.5 text-xs font-medium text-accent-400">
+                                                                <Clock className="h-3 w-3" />
+                                                                On hold
+                                                            </span>
+                                                        ) : (
+                                                            <span className="text-xs text-subtle">Pending</span>
+                                                        )
                                                     ) : (
                                                         <span className="text-muted">—</span>
                                                     )}

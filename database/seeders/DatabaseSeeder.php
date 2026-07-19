@@ -3,8 +3,10 @@
 namespace Database\Seeders;
 
 use App\Enums\UserRole;
+use App\Models\Cheque;
 use App\Models\User;
 use App\Services\ChequeService;
+use App\Services\UpdateRequestService;
 use Illuminate\Database\Seeder;
 
 class DatabaseSeeder extends Seeder
@@ -23,12 +25,23 @@ class DatabaseSeeder extends Seeder
         );
 
         // A sample staff account for testing the non-admin experience.
-        User::updateOrCreate(
+        $staff = User::updateOrCreate(
             ['username' => 'staff'],
             [
                 'name' => 'Sample Staff',
                 'password' => 'password',
                 'role' => UserRole::Staff,
+                'is_active' => true,
+            ],
+        );
+
+        // A sample teller account — confirms that used cheques have been received.
+        $teller = User::updateOrCreate(
+            ['username' => 'teller'],
+            [
+                'name' => 'Sample Teller',
+                'password' => 'password',
+                'role' => UserRole::Teller,
                 'is_active' => true,
             ],
         );
@@ -47,16 +60,26 @@ class DatabaseSeeder extends Seeder
                     'cheque_date' => now()->subDays(8 - $i)->toDateString(),
                 ]);
 
-                // Mark the earliest few as already cashed at the bank, for sample encashment data.
+                // The teller confirms the earliest few as received, for sample receipt data.
                 if ($i < 4) {
-                    $cheques->cashCheque($admin, $used, [
-                        'teller_name' => ['Teller A. Cruz', 'Teller B. Santos', 'Teller C. Reyes', 'Teller D. Lim'][$i],
-                        'cashed_at' => now()->subDays(4 - $i)->toDateString(),
-                    ]);
+                    $cheques->confirmReceipt($teller, $used);
                 }
             }
+
+            // A sample pending update request, so the admin approvals queue has data.
+            $target = Cheque::where('cheque_number', 6)->first();
+            app(UpdateRequestService::class)->create(
+                $staff,
+                $target,
+                [
+                    'payee_name' => $target->payee_name.' (corrected)',
+                    'amount' => $target->amount,
+                    'cheque_date' => $target->cheque_date->toDateString(),
+                ],
+                'The payee name was misspelled on this cheque — please correct it.',
+            );
         }
 
-        $this->command?->info('Seeded admin (username: '.$admin->username.') and staff (username: staff). Default password: password');
+        $this->command?->info('Seeded admin, staff and teller accounts. Default password: password');
     }
 }

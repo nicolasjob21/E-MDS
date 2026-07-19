@@ -10,7 +10,10 @@ enum ChequeAction: string
     case Login = 'login';
     case Logout = 'logout';
     case UsedCheque = 'used_cheque';
-    case CashedCheque = 'cashed_cheque';
+    case ReceivedCheque = 'received_cheque';
+    case RequestedUpdate = 'requested_update';
+    case ApprovedUpdate = 'approved_update';
+    case RejectedUpdate = 'rejected_update';
     case AddedChequeRange = 'added_cheque_range';
     case CreatedUser = 'created_user';
     case UpdatedUser = 'updated_user';

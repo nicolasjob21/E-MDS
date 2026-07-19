@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\ChequeAction;
 use App\Enums\ChequeStatus;
+use App\Enums\RequestStatus;
 use App\Models\Cheque;
 use App\Models\User;
 use Illuminate\Support\Carbon;
@@ -28,7 +29,7 @@ class ChequeService
     /**
      * Aggregate counts for dashboard cards.
      *
-     * @return array{total:int, available:int, used:int}
+     * @return array{total:int, available:int, used:int, received:int}
      */
     public function counts(): array
     {
@@ -39,11 +40,13 @@ class ChequeService
 
         $available = (int) ($rows[ChequeStatus::Available->value] ?? 0);
         $used = (int) ($rows[ChequeStatus::Used->value] ?? 0);
+        $received = (int) ($rows[ChequeStatus::Received->value] ?? 0);
 
         return [
-            'total' => $available + $used,
+            'total' => $available + $used + $received,
             'available' => $available,
             'used' => $used,
+            'received' => $received,
         ];
     }
 
@@ -104,40 +107,52 @@ class ChequeService
     }
 
     /**
-     * Record that a used cheque was received by a bank teller and turned into money.
-     * This is a separate lifecycle event from using/issuing the cheque.
-     *
-     * @param  array{teller_name: string, cashed_at: mixed}  $details
+     * A teller confirms that a used cheque has been received, moving it used -> received.
+     * This is a separate lifecycle event from using/issuing the cheque, and records which
+     * teller confirmed it and when.
      *
      * @throws ValidationException
      */
-    public function cashCheque(User $user, Cheque $cheque, array $details): Cheque
+    public function confirmReceipt(User $teller, Cheque $cheque): Cheque
     {
-        if ($cheque->status !== ChequeStatus::Used) {
+        if ($cheque->status === ChequeStatus::Received) {
             throw ValidationException::withMessages([
-                'cheque' => 'Only a used cheque can be marked as cashed.',
+                'cheque' => "Cheque #{$cheque->cheque_number} has already been confirmed as received.",
             ]);
         }
 
-        if ($cheque->isCashed()) {
+        if ($cheque->status !== ChequeStatus::Used) {
             throw ValidationException::withMessages([
-                'cheque' => "Cheque #{$cheque->cheque_number} has already been cashed.",
+                'cheque' => 'Only a used cheque can be confirmed as received.',
+            ]);
+        }
+
+        // A cheque with a pending detail-update request is on hold: the teller cannot confirm
+        // receipt until an admin has approved or rejected the requested change.
+        $onHold = $cheque->updateRequests()
+            ->where('status', RequestStatus::Pending)
+            ->exists();
+
+        if ($onHold) {
+            throw ValidationException::withMessages([
+                'cheque' => "Cheque #{$cheque->cheque_number} is on hold — a detail update request is awaiting admin approval and must be resolved first.",
             ]);
         }
 
         $cheque->update([
-            'teller_name' => $details['teller_name'],
-            'cashed_at' => $details['cashed_at'],
+            'status' => ChequeStatus::Received,
+            'received_by' => $teller->id,
+            'received_at' => Carbon::now(),
         ]);
 
         $this->logger->log(
-            $user,
-            ChequeAction::CashedCheque,
+            $teller,
+            ChequeAction::ReceivedCheque,
             $cheque->cheque_number,
-            "Cheque number {$cheque->cheque_number} cashed by teller {$details['teller_name']}.",
+            "Cheque number {$cheque->cheque_number} confirmed as received by teller {$teller->name}.",
         );
 
-        return $cheque->fresh(['usedBy']);
+        return $cheque->fresh(['usedBy', 'receivedBy']);
     }
 
     /**

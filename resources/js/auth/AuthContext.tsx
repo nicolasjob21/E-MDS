@@ -14,6 +14,7 @@ interface AuthContextValue {
     user: User | null;
     loading: boolean;
     isAdmin: boolean;
+    isTeller: boolean;
     login: (username: string, password: string) => Promise<void>;
     logout: () => Promise<void>;
 }
@@ -61,6 +62,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             user,
             loading,
             isAdmin: user?.role === 'admin',
+            isTeller: user?.role === 'teller',
             login,
             logout,
         }),

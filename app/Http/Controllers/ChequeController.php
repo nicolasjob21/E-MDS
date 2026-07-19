@@ -4,7 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Enums\ChequeStatus;
 use App\Http\Requests\AddChequeRangeRequest;
-use App\Http\Requests\CashChequeRequest;
 use App\Http\Requests\UseChequeRequest;
 use App\Http\Resources\ChequeResource;
 use App\Models\Cheque;
@@ -18,20 +17,23 @@ class ChequeController extends Controller
     public function __construct(private readonly ChequeService $cheques) {}
 
     /**
-     * List cheques, optionally filtered by view (all | available | used | cashed), paginated.
+     * List cheques, optionally filtered by view (all | available | used | received), paginated.
      */
     public function index(Request $request): AnonymousResourceCollection
     {
         $status = $request->query('status', 'all');
 
         $query = Cheque::query()
-            ->with('usedBy')
+            ->with(['usedBy', 'receivedBy'])
+            ->withCount(['updateRequests as pending_update_count' => fn ($q) => $q->where('status', 'pending')])
             ->orderBy('cheque_number');
 
-        if (in_array($status, [ChequeStatus::Available->value, ChequeStatus::Used->value], true)) {
+        if (in_array($status, [
+            ChequeStatus::Available->value,
+            ChequeStatus::Used->value,
+            ChequeStatus::Received->value,
+        ], true)) {
             $query->where('status', $status);
-        } elseif ($status === 'cashed') {
-            $query->whereNotNull('cashed_at');
         }
 
         return ChequeResource::collection(
@@ -85,14 +87,11 @@ class ChequeController extends Controller
     }
 
     /**
-     * Record a used cheque as cashed (received by a bank teller and turned into money).
+     * Teller only: confirm a used cheque has been received (used -> received).
      */
-    public function cash(CashChequeRequest $request, Cheque $cheque): JsonResponse
+    public function confirmReceipt(Request $request, Cheque $cheque): JsonResponse
     {
-        $cheque = $this->cheques->cashCheque($request->user(), $cheque, [
-            'teller_name' => $request->string('teller_name')->toString(),
-            'cashed_at' => $request->date('cashed_at'),
-        ]);
+        $cheque = $this->cheques->confirmReceipt($request->user(), $cheque);
 
         return response()->json(['data' => new ChequeResource($cheque)]);
     }

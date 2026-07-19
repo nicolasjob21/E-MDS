@@ -6,4 +6,5 @@ enum ChequeStatus: string
 {
     case Available = 'available';
     case Used = 'used';
+    case Received = 'received';
 }
