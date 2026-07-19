@@ -1,0 +1,233 @@
+@import url('https://fonts.bunny.net/css?family=inter:300,400,500,600,700|syne:600,700,800');
+@import 'tailwindcss';
+@plugin '@tailwindcss/forms';
+
+@source '../js/**/*.{ts,tsx}';
+
+@theme {
+    --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    --font-display: 'Syne', ui-sans-serif, system-ui, sans-serif;
+
+    /* Brand cyan */
+    --color-brand-50: #f1f9fc;
+    --color-brand-100: #d9eff7;
+    --color-brand-200: #b9e2ef;
+    --color-brand-300: #7ec8e3;
+    --color-brand-400: #54b0d1;
+    --color-brand-500: #4a9bb5;
+    --color-brand-600: #35748a;
+    --color-brand-700: #2c5f72;
+    --color-brand-800: #294e5e;
+    --color-brand-900: #26414f;
+    --color-brand-950: #172a34;
+
+    /* Accent coral */
+    --color-accent-50: #fef4f0;
+    --color-accent-100: #fde7de;
+    --color-accent-200: #facdbd;
+    --color-accent-300: #f7ab90;
+    --color-accent-400: #f4845f;
+    --color-accent-500: #ea6c44;
+    --color-accent-600: #c85f3a;
+    --color-accent-700: #a54a2e;
+    --color-accent-800: #883f29;
+    --color-accent-900: #6f3626;
+    --color-accent-950: #3c1a11;
+
+    /* Semantic surfaces + text (dark-first defaults; overridden for light below) */
+    --color-page: #1c1c1e;
+    --color-card: #242428;
+    --color-well: #141416;
+    --color-line: #7ec8e326;
+    --color-fg: #eaeaea;
+    --color-muted: #94a3b8;
+    --color-subtle: #6b7280;
+    --color-brandink: #7ec8e3;
+
+    --color-danger: #e06a5a;
+    --color-danger-fg: #fecaca;
+    --color-success: #3fbf8f;
+    --color-success-fg: #bbf7d0;
+}
+
+/* Light theme (opt-in via <html data-theme="light">) */
+:root[data-theme='light'] {
+    --color-page: #f4f5f6;
+    --color-card: #ffffff;
+    --color-well: #eceef0;
+    --color-line: rgba(42, 143, 181, 0.22);
+    --color-fg: #141416;
+    --color-muted: #4b5563;
+    --color-subtle: #6b7280;
+    --color-brandink: #2c6d84;
+
+    --color-danger: #dc2626;
+    --color-danger-fg: #b91c1c;
+    --color-success: #16a34a;
+    --color-success-fg: #15803d;
+
+    color-scheme: light;
+}
+
+:root,
+:root[data-theme='dark'] {
+    color-scheme: dark;
+}
+
+@layer base {
+    body {
+        font-family: var(--font-sans);
+        background: var(--color-page);
+        color: var(--color-fg);
+        transition:
+            background-color 200ms ease,
+            color 200ms ease;
+    }
+
+    * {
+        scrollbar-width: thin;
+        scrollbar-color: var(--color-brand-500) transparent;
+    }
+
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: var(--color-brand-700);
+        border-radius: 4px;
+    }
+}
+
+@layer components {
+    .eyebrow {
+        font-family: var(--font-display);
+        font-size: 0.7rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.2em;
+        color: var(--color-brandink);
+        display: inline-flex;
+        align-items: center;
+        gap: 0.6rem;
+    }
+
+    .eyebrow::before {
+        content: '';
+        height: 1px;
+        width: 1.5rem;
+        background: var(--color-brand-500);
+    }
+
+    .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        padding: 0.6rem 1.25rem;
+        border-radius: 0;
+        font-family: var(--font-display);
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        cursor: pointer;
+        transition: all 200ms ease;
+        border: 1px solid transparent;
+        white-space: nowrap;
+    }
+
+    .btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+
+    .btn-primary {
+        background: var(--color-accent-400);
+        color: #fff;
+    }
+
+    .btn-primary:not(:disabled):hover {
+        background: var(--color-accent-500);
+        transform: translateY(-1px);
+    }
+
+    .btn-outline {
+        border-color: var(--color-brand-400);
+        color: var(--color-brandink);
+        background: transparent;
+    }
+
+    .btn-outline:not(:disabled):hover {
+        background: var(--color-brand-400);
+        color: #fff;
+    }
+
+    .btn-ghost {
+        color: var(--color-muted);
+        background: transparent;
+    }
+
+    .btn-ghost:not(:disabled):hover {
+        color: var(--color-fg);
+        background: var(--color-well);
+    }
+
+    .card {
+        background: var(--color-card);
+        border: 1px solid var(--color-line);
+        border-radius: 2px;
+    }
+
+    .field {
+        width: 100%;
+        background: var(--color-well);
+        border: 1px solid var(--color-line);
+        border-radius: 2px;
+        color: var(--color-fg);
+        padding: 0.6rem 0.8rem;
+        font-size: 0.9rem;
+        transition: border-color 150ms ease;
+    }
+
+    .field::placeholder {
+        color: var(--color-subtle);
+    }
+
+    .field:focus {
+        outline: none;
+        border-color: var(--color-brand-400);
+        box-shadow: 0 0 0 1px var(--color-brand-500);
+    }
+
+    .label {
+        display: block;
+        font-family: var(--font-display);
+        font-size: 0.7rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--color-muted);
+        margin-bottom: 0.4rem;
+    }
+
+    .alert {
+        border-radius: 2px;
+        border: 1px solid;
+        padding: 0.75rem 1rem;
+        font-size: 0.875rem;
+    }
+
+    .alert-error {
+        border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+        background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+        color: var(--color-danger-fg);
+    }
+
+    .alert-success {
+        border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+        background: color-mix(in srgb, var(--color-success) 12%, transparent);
+        color: var(--color-success-fg);
+    }
+}
