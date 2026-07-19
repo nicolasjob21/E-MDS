@@ -4,6 +4,7 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ChequeController;
 use App\Http\Controllers\ChequeLogController;
 use App\Http\Controllers\ChequeUpdateRequestController;
+use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
 
@@ -15,6 +16,11 @@ Route::prefix('v1')->group(function () {
     Route::middleware('auth:sanctum')->group(function () {
         Route::post('logout', [AuthController::class, 'logout']);
         Route::get('me', [AuthController::class, 'me']);
+
+        // In-app notifications (bell dropdown) — available to any authenticated user.
+        Route::get('notifications', [NotificationController::class, 'index']);
+        Route::post('notifications/read-all', [NotificationController::class, 'markAllRead']);
+        Route::post('notifications/{notification}/read', [NotificationController::class, 'markRead']);
 
         Route::get('cheques', [ChequeController::class, 'index']);
         Route::get('cheques/summary', [ChequeController::class, 'summary']);

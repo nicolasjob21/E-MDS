@@ -7,8 +7,10 @@ use App\Enums\ChequeStatus;
 use App\Enums\RequestStatus;
 use App\Models\Cheque;
 use App\Models\User;
+use App\Notifications\ActivityNotification;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Validation\ValidationException;
 
 class ChequeService
@@ -100,6 +102,18 @@ class ChequeService
                 ChequeAction::UsedCheque,
                 $next->cheque_number,
                 $description,
+            );
+
+            // Let admins know a number was consumed (skip the actor if they are an admin).
+            Notification::send(
+                User::query()->activeAdmins()->whereKeyNot($user->id)->get(),
+                new ActivityNotification(
+                    kind: 'used',
+                    title: "Cheque #{$next->cheque_number} used",
+                    message: "{$user->name} used cheque #{$next->cheque_number}".($payee ? " for {$payee}" : '').'.',
+                    url: '/admin/logs',
+                    chequeNumber: $next->cheque_number,
+                ),
             );
 
             return $next->fresh(['usedBy']);

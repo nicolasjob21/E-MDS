@@ -27,6 +27,28 @@ export function formatMoney(amount?: string | number | null): string {
     return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+const RELATIVE_UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
+    ['year', 60 * 60 * 24 * 365],
+    ['month', 60 * 60 * 24 * 30],
+    ['day', 60 * 60 * 24],
+    ['hour', 60 * 60],
+    ['minute', 60],
+];
+
+/** "3 minutes ago", "2 days ago", or "just now" for very recent timestamps. */
+export function formatRelative(iso?: string | null): string {
+    if (!iso) return '';
+    const diffSeconds = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (diffSeconds < 45) return 'just now';
+    const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+    for (const [unit, secondsInUnit] of RELATIVE_UNITS) {
+        if (diffSeconds >= secondsInUnit) {
+            return rtf.format(-Math.floor(diffSeconds / secondsInUnit), unit);
+        }
+    }
+    return 'just now';
+}
+
 const ACTION_LABELS: Record<string, string> = {
     login: 'Signed in',
     logout: 'Signed out',

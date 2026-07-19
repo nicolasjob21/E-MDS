@@ -63,6 +63,24 @@ export interface Summary {
     next: Cheque | null;
 }
 
+export type NotificationKind = 'request' | 'approved' | 'rejected' | 'used';
+
+export interface AppNotification {
+    id: string;
+    kind: NotificationKind;
+    title: string;
+    message: string;
+    url?: string | null;
+    cheque_number?: number | null;
+    read: boolean;
+    created_at: string;
+}
+
+export interface NotificationFeed {
+    data: AppNotification[];
+    unread_count: number;
+}
+
 export interface ChequeLog {
     id: number;
     user_id: number | null;

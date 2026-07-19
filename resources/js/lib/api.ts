@@ -1,8 +1,10 @@
 import axios, { AxiosError } from 'axios';
 import type {
+    AppNotification,
     Cheque,
     ChequeDetails,
     ChequeLog,
+    NotificationFeed,
     Paginated,
     Summary,
     UpdateRequest,
@@ -133,6 +135,22 @@ export const UpdateRequestApi = {
         await ensureCsrf();
         const { data } = await http.post(`/update-requests/${id}/reject`, { review_note: reviewNote ?? null });
         return data.data as UpdateRequest;
+    },
+};
+
+export const NotificationApi = {
+    async list(limit = 15): Promise<NotificationFeed> {
+        const { data } = await http.get('/notifications', { params: { limit } });
+        return data as NotificationFeed;
+    },
+    async markRead(id: string): Promise<AppNotification> {
+        await ensureCsrf();
+        const { data } = await http.post(`/notifications/${id}/read`);
+        return data.data as AppNotification;
+    },
+    async markAllRead(): Promise<void> {
+        await ensureCsrf();
+        await http.post('/notifications/read-all');
     },
 };
 

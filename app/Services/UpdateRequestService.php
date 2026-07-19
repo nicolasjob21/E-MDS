@@ -8,8 +8,10 @@ use App\Enums\RequestStatus;
 use App\Models\Cheque;
 use App\Models\ChequeUpdateRequest;
 use App\Models\User;
+use App\Notifications\ActivityNotification;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Validation\ValidationException;
 
 class UpdateRequestService
@@ -74,6 +76,19 @@ class UpdateRequestService
             "Requested an update to cheque number {$cheque->cheque_number}: {$reason}",
         );
 
+        // Notify every active admin (except the requester, if they happen to be one) so the
+        // pending request surfaces in their bell dropdown.
+        Notification::send(
+            User::query()->activeAdmins()->whereKeyNot($staff->id)->get(),
+            new ActivityNotification(
+                kind: 'request',
+                title: "Update requested · Cheque #{$cheque->cheque_number}",
+                message: "{$staff->name} asked to correct cheque #{$cheque->cheque_number}: {$reason}",
+                url: '/admin/update-requests',
+                chequeNumber: $cheque->cheque_number,
+            ),
+        );
+
         return $request->fresh(['requestedBy']);
     }
 
@@ -122,6 +137,15 @@ class UpdateRequestService
                     .($changes !== '' ? " Changes: {$changes}." : ' No field changes.'),
             );
 
+            $request->requestedBy?->notify(new ActivityNotification(
+                kind: 'approved',
+                title: "Update approved · Cheque #{$cheque->cheque_number}",
+                message: "{$admin->name} approved your update to cheque #{$cheque->cheque_number}."
+                    .($note ? " Note: {$note}" : ''),
+                url: '/cheques',
+                chequeNumber: $cheque->cheque_number,
+            ));
+
             return $request->fresh(['requestedBy', 'reviewedBy', 'cheque']);
         });
     }
@@ -149,6 +173,15 @@ class UpdateRequestService
             "Rejected update request for cheque number {$request->cheque->cheque_number}."
                 .($note ? " Reason: {$note}" : ''),
         );
+
+        $request->requestedBy?->notify(new ActivityNotification(
+            kind: 'rejected',
+            title: "Update rejected · Cheque #{$request->cheque->cheque_number}",
+            message: "{$admin->name} rejected your update to cheque #{$request->cheque->cheque_number}."
+                .($note ? " Reason: {$note}" : ''),
+            url: '/cheques',
+            chequeNumber: $request->cheque->cheque_number,
+        ));
 
         return $request->fresh(['requestedBy', 'reviewedBy', 'cheque']);
     }

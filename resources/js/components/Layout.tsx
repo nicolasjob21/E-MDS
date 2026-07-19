@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { ThemeToggle } from './ui';
+import NotificationsBell from './NotificationsBell';
 
 interface NavItem {
     to: string;
@@ -121,6 +122,7 @@ export default function Layout() {
                         {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
                     </button>
                     <div className="ml-auto flex items-center gap-3">
+                        <NotificationsBell />
                         <ThemeToggle />
                         <div className="hidden text-right sm:block">
                             <div className="text-sm font-medium text-fg">{user?.name}</div>

@@ -107,6 +107,7 @@ sequenceDiagram
     Staff->>API: POST /cheques/use (number + payee/amount/date)
     API->>DB: lock lowest available FOR UPDATE
     API-->>Staff: cheque marked USED (audit: used_cheque)
+    API->>DB: notify admins (bell: kind "used", section 8)
 
     Teller->>API: POST /cheques/{id}/receive
     API->>API: reject if a request is pending (ON HOLD)
@@ -144,6 +145,7 @@ flowchart TD
 - A request that's already approved/rejected cannot be reviewed again.
 - Approval applies the **staff-proposed** values exactly; rejection changes nothing.
 - The cheque modal shows the full **request history** with each outcome (who, when, note).
+- Creating a request notifies **admins**; approving/rejecting notifies the **requester** (section 8).
 
 ---
 
@@ -156,7 +158,27 @@ Actions (`app/Enums/ChequeAction.php`): `login`, `logout`, `used_cheque`, `recei
 
 ---
 
-## 8. API reference (`/api/v1`)
+## 8. Notifications
+
+Workflow events raise **in-app notifications**, stored per-user in the `notifications` table
+(Laravel database notifications) and surfaced in a **bell dropdown** in the header. Each carries a
+`kind` that drives its coloured dot, a title, a message, and an optional deep-link. The bell shows
+an unread badge; the SPA polls every 30s. Opening an item marks it read and navigates to its link.
+
+| Event | Raised in | Recipients | `kind` | Links to |
+|---|---|---|---|---|
+| Cheque used | `ChequeService::useNext` | Active admins (except the actor) | `used` | `/admin/logs` |
+| Update requested | `UpdateRequestService::create` | Active admins (except the actor) | `request` | `/admin/update-requests` |
+| Request approved | `UpdateRequestService::approve` | The requester | `approved` | `/cheques` |
+| Request rejected | `UpdateRequestService::reject` | The requester | `rejected` | `/cheques` |
+
+Notifications are a **convenience layer only** — the authoritative record of every action remains
+the append-only audit log (section 7). Delivery is best-effort and does not affect the outcome of
+the action that raised it.
+
+---
+
+## 9. API reference (`/api/v1`)
 
 | Method & path | Access | Purpose |
 |---|---|---|
@@ -175,11 +197,14 @@ Actions (`app/Enums/ChequeAction.php`): `login`, `logout`, `used_cheque`, `recei
 | `POST /update-requests/{id}/approve` | **Admin** | Approve (apply proposed values) |
 | `POST /update-requests/{id}/reject` | **Admin** | Reject (no change) |
 | `GET /logs` | **Admin** | Audit log |
+| `GET /notifications` | Auth | Current user's feed + unread count |
+| `POST /notifications/{id}/read` | Auth | Mark one notification read |
+| `POST /notifications/read-all` | Auth | Mark all read |
 | `GET/POST/PUT/DELETE /users` | **Admin** | Manage users |
 
 ---
 
-## 9. Data model
+## 10. Data model
 
 ```mermaid
 erDiagram
@@ -188,6 +213,7 @@ erDiagram
     CHEQUES ||--o{ CHEQUE_UPDATE_REQUESTS : "has"
     CHEQUES ||--o{ CHEQUE_LOGS : "audited in"
     USERS ||--o{ CHEQUE_LOGS : "acts in"
+    USERS ||--o{ NOTIFICATIONS : "notified via"
 
     USERS {
         string name
@@ -221,6 +247,13 @@ erDiagram
         int    cheque_number
         enum   action
         text   description
+    }
+    NOTIFICATIONS {
+        uuid   id
+        string type
+        string notifiable "morph → users"
+        json   data "kind, title, message, url"
+        datetime read_at "null until read"
     }
 ```
 
