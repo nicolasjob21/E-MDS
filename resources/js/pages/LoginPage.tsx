@@ -41,8 +41,8 @@ export default function LoginPage() {
                     <div className="mb-4 grid h-14 w-14 place-items-center rounded-xs border border-line bg-brand-500/10">
                         <ShieldCheck className="h-7 w-7 text-brandink" />
                     </div>
-                    <h1 className="font-display text-2xl font-bold tracking-tight text-fg">ChequeWatch</h1>
-                    <p className="mt-1 text-sm text-muted">Cheque Number Monitoring &amp; Tracking</p>
+                    <h1 className="font-display text-2xl font-bold tracking-tight text-fg">E-MDS</h1>
+                    <p className="mt-1 text-sm text-muted">Electronic Monitoring &amp; Disbursement System</p>
                 </div>
 
                 <form onSubmit={handleSubmit} className="card space-y-5 p-6">

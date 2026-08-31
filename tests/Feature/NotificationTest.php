@@ -17,7 +17,7 @@ class NotificationTest extends TestCase
 
     private function seedRange(User $admin, int $count = 3): void
     {
-        app(ChequeService::class)->addRange($admin, $count, 1);
+        app(ChequeService::class)->addRange($admin, 1, $count);
     }
 
     public function test_using_a_cheque_notifies_admins_but_not_the_actor(): void

@@ -31,7 +31,7 @@ class ChequeService
     /**
      * Aggregate counts for dashboard cards.
      *
-     * @return array{total:int, available:int, used:int, received:int}
+     * @return array{total:int, available:int, used:int, received:int, approved:int, complies:int, disapproved:int}
      */
     public function counts(): array
     {
@@ -40,16 +40,12 @@ class ChequeService
             ->groupBy('status')
             ->pluck('aggregate', 'status');
 
-        $available = (int) ($rows[ChequeStatus::Available->value] ?? 0);
-        $used = (int) ($rows[ChequeStatus::Used->value] ?? 0);
-        $received = (int) ($rows[ChequeStatus::Received->value] ?? 0);
+        $counts = [];
+        foreach (ChequeStatus::cases() as $case) {
+            $counts[$case->value] = (int) ($rows[$case->value] ?? 0);
+        }
 
-        return [
-            'total' => $available + $used + $received,
-            'available' => $available,
-            'used' => $used,
-            'received' => $received,
-        ];
+        return ['total' => array_sum($counts)] + $counts;
     }
 
     /**
@@ -170,35 +166,146 @@ class ChequeService
     }
 
     /**
-     * Extend the sequence by `count` cheques, always continuing from the last existing number.
+     * An admin records the review outcome for an issued cheque, moving it to its final
+     * status: approved, complies, or disapproved.
      *
-     * `startAt` is honoured only for the very first range (empty table); afterwards the start is
-     * forced to last+1 so the sequence can never have gaps or duplicates. The whole thing runs
-     * inside a locked transaction so two admins can't extend concurrently.
+     * Approved and Disapproved are final and cannot be revisited. "Returned" is not:
+     * it hands the cheque back to the staff member to fix what the note describes, and the
+     * cheque can be reviewed again once they have. A cheque with a pending detail-update
+     * request is on hold, exactly as it is for teller receipt, so the details are settled
+     * before anyone signs off on them.
+     *
+     * @throws ValidationException
+     */
+    public function review(User $admin, Cheque $cheque, ChequeStatus $outcome, ?string $note = null): Cheque
+    {
+        if (! in_array($outcome, ChequeStatus::reviewOutcomes(), true)) {
+            throw ValidationException::withMessages([
+                'status' => 'That is not a valid review outcome.',
+            ]);
+        }
+
+        return DB::transaction(function () use ($admin, $cheque, $outcome, $note) {
+            $cheque = Cheque::query()->whereKey($cheque->getKey())->lockForUpdate()->firstOrFail();
+
+            if (! $cheque->status->isIssued()) {
+                throw ValidationException::withMessages([
+                    'cheque' => "Cheque #{$cheque->cheque_number} has not been used yet, so there is nothing to review.",
+                ]);
+            }
+
+            if ($cheque->status->isFinal()) {
+                throw ValidationException::withMessages([
+                    'cheque' => "Cheque #{$cheque->cheque_number} is already {$cheque->status->label()} and cannot be reviewed again.",
+                ]);
+            }
+
+            $onHold = $cheque->updateRequests()
+                ->where('status', RequestStatus::Pending)
+                ->exists();
+
+            if ($onHold) {
+                throw ValidationException::withMessages([
+                    'cheque' => "Cheque #{$cheque->cheque_number} is on hold — a detail update request is awaiting approval and must be resolved first.",
+                ]);
+            }
+
+            $cheque->update([
+                'status' => $outcome,
+                'reviewed_by' => $admin->id,
+                'reviewed_at' => Carbon::now(),
+                'review_note' => $note,
+            ]);
+
+            $this->logger->log(
+                $admin,
+                ChequeAction::ReviewedCheque,
+                $cheque->cheque_number,
+                ($outcome->awaitsCompliance()
+                    ? "Cheque number {$cheque->cheque_number} returned to the staff member by {$admin->name}."
+                    : "Cheque number {$cheque->cheque_number} reviewed as {$outcome->label()} by {$admin->name}.")
+                    .($note ? " Note: {$note}" : ''),
+            );
+
+            // Tell the staff member who issued it how their cheque was decided. "Returned"
+            // is an action item for them, not a verdict, so it lands as a request-kind notification.
+            $kind = match ($outcome) {
+                ChequeStatus::Approved => 'approved',
+                ChequeStatus::Disapproved => 'rejected',
+                default => 'request',
+            };
+
+            $message = $outcome->awaitsCompliance()
+                ? "{$admin->name} returned cheque #{$cheque->cheque_number} to you — it needs your"
+                    .' attention before it can be signed off.'
+                    .($note ? " What to fix: {$note}" : '')
+                : "{$admin->name} reviewed cheque #{$cheque->cheque_number} as {$outcome->label()}."
+                    .($note ? " Note: {$note}" : '');
+
+            $cheque->usedBy?->notify(new ActivityNotification(
+                kind: $kind,
+                title: $outcome->awaitsCompliance()
+                    ? "Cheque #{$cheque->cheque_number} returned to you"
+                    : "Cheque #{$cheque->cheque_number} {$outcome->label()}",
+                message: $message,
+                url: '/cheques',
+                chequeNumber: $cheque->cheque_number,
+            ));
+
+            return $cheque->fresh(['usedBy', 'receivedBy', 'reviewedBy']);
+        });
+    }
+
+    /**
+     * Register a newly issued physical cheque book by its printed serial range.
+     *
+     * The admin enters the first and last serial exactly as printed on the book, so a new book
+     * may legitimately start well above the last number already on file (bank-assigned serials
+     * are not contiguous between books). Numbers in between simply never existed.
+     *
+     * What is guaranteed: **no number is ever registered twice**. The whole range is checked
+     * against existing rows inside a locked transaction, so two admins registering overlapping
+     * books concurrently cannot both win. Sequential *usage* is unaffected — `useNext()` still
+     * hands out the lowest available number across every book.
      *
      * @return array{from:int, to:int, count:int}
      *
      * @throws ValidationException
      */
-    public function addRange(User $user, int $count, ?int $startAt = null): array
+    public function addRange(User $user, int $startAt, int $endAt): array
     {
-        return DB::transaction(function () use ($user, $count, $startAt) {
-            $last = Cheque::query()
-                ->orderByDesc('cheque_number')
-                ->lockForUpdate()
-                ->first();
+        if ($endAt < $startAt) {
+            throw ValidationException::withMessages([
+                'end_at' => 'The last serial number must be the same as or higher than the first.',
+            ]);
+        }
 
-            if ($last !== null) {
-                $from = $last->cheque_number + 1;
-            } else {
-                $from = $startAt ?? 1;
+        return DB::transaction(function () use ($user, $startAt, $endAt) {
+            // Lock the table's tail so a concurrent registration can't slip an overlapping
+            // range in between this check and the insert.
+            Cheque::query()->orderByDesc('cheque_number')->lockForUpdate()->first();
+
+            $clash = Cheque::query()
+                ->whereBetween('cheque_number', [$startAt, $endAt])
+                ->orderBy('cheque_number')
+                ->pluck('cheque_number');
+
+            if ($clash->isNotEmpty()) {
+                $first = $clash->first();
+                $last = $clash->last();
+                $range = $first === $last ? "#{$first}" : "#{$first}–#{$last}";
+
+                throw ValidationException::withMessages([
+                    'start_at' => $clash->count() === 1
+                        ? "Cheque number {$range} is already registered. Enter a serial range that has not been added yet."
+                        : "{$clash->count()} numbers in that range are already registered ({$range}). Enter a serial range that has not been added yet.",
+                ]);
             }
 
-            $to = $from + $count - 1;
-
+            $count = $endAt - $startAt + 1;
             $now = Carbon::now();
             $rows = [];
-            for ($number = $from; $number <= $to; $number++) {
+            for ($number = $startAt; $number <= $endAt; $number++) {
                 $rows[] = [
                     'cheque_number' => $number,
                     'status' => ChequeStatus::Available->value,
@@ -217,10 +324,10 @@ class ChequeService
                 $user,
                 ChequeAction::AddedChequeRange,
                 null,
-                "Added cheque numbers {$from}–{$to} ({$count} cheques).",
+                "Registered cheque book serials {$startAt}–{$endAt} ({$count} cheques).",
             );
 
-            return ['from' => $from, 'to' => $to, 'count' => $count];
+            return ['from' => $startAt, 'to' => $endAt, 'count' => $count];
         });
     }
 }

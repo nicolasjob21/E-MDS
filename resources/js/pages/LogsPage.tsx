@@ -9,6 +9,7 @@ const ACTIONS = [
     'logout',
     'used_cheque',
     'received_cheque',
+    'reviewed_cheque',
     'requested_update',
     'approved_update',
     'rejected_update',

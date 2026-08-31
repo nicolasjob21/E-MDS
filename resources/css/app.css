@@ -231,3 +231,260 @@
         color: var(--color-success-fg);
     }
 }
+
+
+/*
+ * Print — only the ACIC form goes to paper.
+ *
+ * Laid out to the pre-agreed sheet the depository bank accepts: Arial, 9.5pt, a three-column
+ * header, a ruled check table with a shaded head, and the signature block along the foot.
+ *
+ * The form is portalled to <body> (see AcicDetailModal), so it is a top-level element in the
+ * print flow with no fixed or clipped ancestor — the app root is simply hidden beside it. That
+ * matters: printing from inside the dialog's `position: fixed` overlay made browsers clip the
+ * sheet to one viewport-sized page and repeat it, splitting a single ACIC's table.
+ */
+.acic-print {
+    display: none;
+}
+
+@media print {
+    body > *:not(.acic-print) {
+        display: none !important;
+    }
+
+    html,
+    body {
+        background: #fff !important;
+        margin: 0;
+        padding: 0;
+    }
+
+    .acic-print {
+        display: block;
+        width: 100%;
+        background: #fff;
+        color: #000;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 9.5pt;
+        line-height: 1.25;
+    }
+
+    /* ---- header: bank block, agency block, code list ---- */
+
+    .acic-head {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 8pt;
+        align-items: start;
+    }
+
+    .acic-head-agency {
+        text-align: center;
+    }
+
+    .acic-prepared {
+        margin-top: 2pt;
+    }
+
+    .acic-head-codes {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        column-gap: 8pt;
+        margin: 0;
+    }
+
+    .acic-head-codes dt {
+        white-space: nowrap;
+    }
+
+    .acic-head-codes dd {
+        margin: 0;
+        text-align: right;
+    }
+
+    /* ---- title and account line ---- */
+
+    .acic-print h1 {
+        margin: 12pt 0 6pt;
+        font-size: 10.5pt;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        text-align: center;
+    }
+
+    .acic-account {
+        margin-bottom: 2pt;
+    }
+
+    /* ---- the checks table ---- */
+
+    /*
+     * ONE table per ACIC, however many cheques and LDDAPs it carries. If it is long enough to
+     * run onto a second sheet it breaks between rows and repeats its header — it is never split
+     * into separate tables.
+     */
+    .acic-checks {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+        break-inside: auto;
+    }
+
+    .acic-checks thead {
+        display: table-header-group;
+    }
+
+    .acic-checks tr {
+        break-inside: avoid;
+        break-after: auto;
+    }
+
+    .acic-checks th,
+    .acic-checks td {
+        border: 1px solid #000;
+        padding: 2pt 4pt;
+        vertical-align: top;
+        overflow-wrap: break-word;
+    }
+
+    .acic-checks thead th {
+        /* The reference head row is shaded. */
+        background: #d9d9d9;
+        font-weight: 400;
+        text-align: center;
+    }
+
+    .acic-checks .c-check {
+        width: 14%;
+    }
+    .acic-checks .c-date {
+        width: 14%;
+    }
+    .acic-checks .c-amount {
+        width: 16%;
+    }
+    .acic-checks .c-obj {
+        width: 14%;
+    }
+    .acic-checks .c-remarks {
+        width: 12%;
+    }
+
+    .acic-checks .num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+    }
+
+    /* ---- totals and amount in words ---- */
+
+    .acic-totals {
+        display: flex;
+        justify-content: space-between;
+        gap: 16pt;
+        margin-top: 4pt;
+    }
+
+    .acic-words {
+        display: flex;
+        gap: 6pt;
+        margin-top: 2pt;
+    }
+
+    .acic-words .lbl {
+        white-space: nowrap;
+    }
+
+    /* The reference leaves the middle of the sheet clear for the bank's stamp. */
+    .acic-gap {
+        height: 150pt;
+    }
+
+    /* ---- foot: cancelled-checks box and the signature grid ---- */
+
+    .acic-head,
+    .acic-totals,
+    .acic-words,
+    .acic-foot,
+    .acic-file {
+        break-inside: avoid;
+    }
+
+    .acic-foot {
+        display: grid;
+        grid-template-columns: 38% 1fr;
+        gap: 14pt;
+        align-items: start;
+    }
+
+    .acic-cancelled {
+        border: 1px solid #000;
+        padding: 3pt 5pt 5pt;
+    }
+
+    .acic-cancelled-title {
+        text-align: center;
+        margin-bottom: 2pt;
+    }
+
+    .acic-cancelled table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    .acic-cancelled th,
+    .acic-cancelled td {
+        border-right: 1px solid #000;
+        padding: 2pt 4pt;
+        font-weight: 400;
+        text-align: left;
+    }
+
+    .acic-cancelled th:last-child,
+    .acic-cancelled td:last-child {
+        border-right: 0;
+    }
+
+    .acic-cancelled td {
+        height: 34pt;
+    }
+
+    .acic-sigs {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10pt 14pt;
+    }
+
+    .acic-sigs .lbl {
+        display: block;
+        white-space: nowrap;
+    }
+
+    /* The rule people sign on, with the printed name beneath it. */
+    .acic-sigs .rule {
+        display: block;
+        border-bottom: 1px solid #000;
+        height: 22pt;
+    }
+
+    .acic-sigs .name {
+        display: block;
+        min-height: 11pt;
+        padding-top: 1pt;
+    }
+
+    /* ---- foot line ---- */
+
+    .acic-file {
+        display: flex;
+        justify-content: space-between;
+        gap: 16pt;
+        margin-top: 10pt;
+        font-weight: 700;
+    }
+
+    @page {
+        size: portrait;
+        margin: 12mm;
+    }
+}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { X, CheckCircle2, Landmark, PencilLine, Clock, History, Check, Ban } from 'lucide-react';
+import { X, CheckCircle2, Landmark, PencilLine, Clock, History, Check, Ban, ShieldCheck } from 'lucide-react';
 import { ChequeApi, UpdateRequestApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
 import type { Cheque, RequestStatus, UpdateRequest } from '../lib/types';
@@ -23,14 +23,24 @@ function Row({ label, value }: { label: string; value: ReactNode }) {
 
 interface Props {
     cheque: Cheque;
+    /**
+     * `action` is the Returned entry point from the cheque table: the review outcome section
+     * is hidden — reviewing is not the staff member's call — and the correction form is what
+     * the dialog is for.
+     */
+    mode?: 'view' | 'action';
     onClose: () => void;
     onChanged: (cheque: Cheque) => void;
 }
 
-export default function ChequeDetailModal({ cheque, onClose, onChanged }: Props) {
+export default function ChequeDetailModal({ cheque, mode = 'view', onClose, onChanged }: Props) {
     const { user, isTeller } = useAuth();
     const isStaff = user?.role === 'staff';
     const [current, setCurrent] = useState<Cheque>(cheque);
+    // A returned cheque belongs to the staff member it was returned to — the one who used the
+    // number. Any other staff member gets the details, not the correction form.
+    const ownsCheque = current.used_by?.id === user?.id;
+    const canCorrect = isStaff && (!current.awaits_compliance || ownsCheque);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
 
@@ -69,9 +79,10 @@ export default function ChequeDetailModal({ cheque, onClose, onChanged }: Props)
         return () => window.removeEventListener('keydown', onKey);
     }, [onClose]);
 
-    const isIssued = current.status === 'used' || current.status === 'received';
-    const isReceived = current.status === 'received';
+    const isIssued = current.status !== 'available';
+    const isReceived = !!current.received_at;
     const isPending = current.status === 'used';
+    const isReviewed = !!current.is_reviewed;
     // A used cheque with an open update request is on hold: the teller can't confirm it yet.
     const onHold = isPending && pendingRequest;
 
@@ -129,8 +140,14 @@ export default function ChequeDetailModal({ cheque, onClose, onChanged }: Props)
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
-                        <StatusBadge status={current.status} />
-                        {onHold && (
+                        <StatusBadge
+                            status={current.status}
+                            complied={pendingRequest}
+                            viewer={user?.role}
+                        />
+                        {/* On a Returned cheque the badge itself already carries the hold,
+                            so the chip would only repeat it. */}
+                        {onHold && current.status !== 'complies' && (
                             <span className="inline-flex items-center gap-1 rounded-xs border border-accent-400/50 bg-accent-400/10 px-2 py-0.5 text-xs font-medium text-accent-400">
                                 <Clock className="h-3 w-3" />
                                 On hold
@@ -157,6 +174,10 @@ export default function ChequeDetailModal({ cheque, onClose, onChanged }: Props)
                             <Row label="Payee / name" value={current.payee_name ?? '—'} />
                             <Row label="Amount" value={formatMoney(current.amount)} />
                             <Row label="Cheque date" value={formatDate(current.cheque_date)} />
+                            <Row
+                                label="ACIC no."
+                                value={current.acic_number ? `#${current.acic_number}` : 'Not on an ACIC'}
+                            />
                             <Row label="Used by" value={current.used_by?.name ?? current.used_by_name ?? '—'} />
                             <Row label="Used at" value={formatDateTime(current.used_at)} />
                         </section>
@@ -209,6 +230,52 @@ export default function ChequeDetailModal({ cheque, onClose, onChanged }: Props)
                                 </p>
                             )}
                         </section>
+
+                        {/* What the admin asked for. In action mode this replaces the outcome
+                            section: the staff member needs the instruction, not the verdict. */}
+                        {mode === 'action' && current.awaits_compliance && (
+                            <section className="rounded-xs border border-accent-400/50 bg-accent-400/10 p-4">
+                                <h3 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-accent-400">
+                                    <Clock className="h-4 w-4" />
+                                    Returned
+                                </h3>
+                                <p className="mt-2 text-sm text-fg">
+                                    {current.review_note ?? 'No note was recorded.'}
+                                </p>
+                                <p className="mt-2 text-xs text-subtle">
+                                    {current.reviewed_by?.name ?? current.reviewed_by_name ?? 'An admin'} ·{' '}
+                                    {formatDateTime(current.reviewed_at)} — edit the details below to address
+                                    this. An admin has to approve the change, and the cheque stays
+                                    Returned until they do.
+                                </p>
+                            </section>
+                        )}
+
+                        {/* Admin review outcome — the final step of the lifecycle. */}
+                        {mode !== 'action' && isReviewed && (
+                            <section className="rounded-xs border border-line bg-well p-4">
+                                <h3 className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-brandink">
+                                    <ShieldCheck className="h-4 w-4" />
+                                    Review outcome
+                                </h3>
+                                <Row label="Outcome" value={<StatusBadge status={current.status} />} />
+                                <Row
+                                    label="Reviewed by"
+                                    value={current.reviewed_by?.name ?? current.reviewed_by_name ?? '—'}
+                                />
+                                <Row label="Reviewed at" value={formatDateTime(current.reviewed_at)} />
+                                {current.review_note && (
+                                    <p className="mt-3 text-sm text-fg">“{current.review_note}”</p>
+                                )}
+                                {current.awaits_compliance && (
+                                    <p className="mt-3 flex items-start gap-1.5 text-xs text-accent-400">
+                                        <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                        Returned — once the notes above are addressed, an admin can review
+                                        this cheque again.
+                                    </p>
+                                )}
+                            </section>
+                        )}
 
                         {/* Update-request history with the admin's decision on each. */}
                         {history.length > 0 && (
@@ -265,8 +332,10 @@ export default function ChequeDetailModal({ cheque, onClose, onChanged }: Props)
                             </section>
                         )}
 
-                        {/* Staff can request a correction to the details; an admin must approve it. */}
-                        {isStaff && (
+                        {/* Staff can request a correction to the details; an admin must approve it.
+                            A returned cheque is the exception: it went back to one person, so only
+                            they get the form. */}
+                        {canCorrect && (
                             <section className="rounded-xs border border-line bg-well p-4">
                                 <h3 className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-brandink">
                                     <PencilLine className="h-4 w-4" />
@@ -359,12 +428,16 @@ export default function ChequeDetailModal({ cheque, onClose, onChanged }: Props)
                                 ) : (
                                     <>
                                         <p className="mb-3 text-sm text-muted">
-                                            Spotted a mistake in the details above? Propose a correction — an admin
-                                            will review and apply it.
+                                            {current.awaits_compliance
+                                                ? 'Update the details to address the note above. An admin reviews and approves the change.'
+                                                : 'Spotted a mistake in the details above? Propose a correction — an admin will review and apply it.'}
                                         </p>
-                                        <button className="btn btn-outline w-full" onClick={() => setRequesting(true)}>
+                                        <button
+                                            className={`btn w-full ${current.awaits_compliance ? 'btn-primary' : 'btn-outline'}`}
+                                            onClick={() => setRequesting(true)}
+                                        >
                                             <PencilLine className="h-4 w-4" />
-                                            Request an update
+                                            {current.awaits_compliance ? 'Edit Details' : 'Request an update'}
                                         </button>
                                     </>
                                 )}

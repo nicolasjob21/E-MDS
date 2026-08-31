@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Layers, CircleDot, CheckCheck, BadgeCheck } from 'lucide-react';
+import { Layers, CircleDot, CheckCheck, BadgeCheck, ShieldCheck, ScrollText, ShieldX } from 'lucide-react';
 import { ChequeApi, toApiError } from '../lib/api';
 import type { Summary } from '../lib/types';
 import { useAuth } from '../auth/AuthContext';
@@ -11,6 +11,9 @@ const CARDS = [
     { key: 'available', label: 'Available', icon: CircleDot, color: 'text-brandink' },
     { key: 'used', label: 'Used', icon: CheckCheck, color: 'text-accent-400' },
     { key: 'received', label: 'Received', icon: BadgeCheck, color: 'text-success-fg' },
+    { key: 'approved', label: 'Approved', icon: ShieldCheck, color: 'text-success-fg' },
+    { key: 'complies', label: 'Returned', icon: ScrollText, color: 'text-accent-400' },
+    { key: 'disapproved', label: 'Disapproved', icon: ShieldX, color: 'text-danger-fg' },
 ] as const;
 
 export default function DashboardPage() {
@@ -56,6 +59,8 @@ export default function DashboardPage() {
                                 </div>
                             </div>
                         ))}
+                        {/* Filler so the 7 tiles don't leave a bare seam-coloured cell. */}
+                        <div className="bg-card" />
                     </div>
 
                     <NextChequePanel next={summary.next} onUsed={() => void load()} />

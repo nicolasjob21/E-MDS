@@ -1,49 +1,87 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Lock, BadgeCheck, Clock } from 'lucide-react';
-import { ChequeApi, toApiError } from '../lib/api';
+import { Lock, BadgeCheck, CheckCircle2, Clock, Gavel, ListChecks, PencilLine, Search, X } from 'lucide-react';
+import { AcicApi, ChequeApi, toApiError } from '../lib/api';
 import type { Cheque, Paginated, Summary } from '../lib/types';
 import { PageHeader, Spinner, Alert, StatusBadge, EmptyState } from '../components/ui';
 import NextChequePanel from '../components/NextChequePanel';
 import ChequeDetailModal from '../components/ChequeDetailModal';
+import ChequeReviewModal, { type ReviewMode } from '../components/ChequeReviewModal';
+import AcicUseModal from '../components/AcicUseModal';
+import ChequeUseModal from '../components/ChequeUseModal';
+import { useAuth } from '../auth/AuthContext';
 import { formatDate, formatMoney } from '../lib/format';
 
-type Tab = 'all' | 'available' | 'used' | 'received';
+type Tab = 'all' | 'available' | 'used' | 'received' | 'approved' | 'complies' | 'disapproved';
 
 const TABS: { key: Tab; label: string }[] = [
     { key: 'all', label: 'All' },
     { key: 'available', label: 'Available' },
     { key: 'used', label: 'Used' },
     { key: 'received', label: 'Received' },
+    { key: 'approved', label: 'Approved' },
+    { key: 'complies', label: 'Returned' },
+    { key: 'disapproved', label: 'Disapproved' },
 ];
 
 export default function ChequesPage() {
+    const { user } = useAuth();
+    const isAdmin = user?.role === 'admin';
+    const isStaff = user?.role === 'staff';
+    // Admin and staff may both put an approved cheque on an ACIC, and both may use the
+    // next-in-line number straight from its row. A teller does neither.
+    const canAssign = isAdmin || isStaff;
+    const canUse = isAdmin || isStaff;
     const [tab, setTab] = useState<Tab>('all');
     const [page, setPage] = useState(1);
+    const [search, setSearch] = useState('');
+    // Debounced copy — the list only refetches once typing pauses.
+    const [query, setQuery] = useState('');
     const [data, setData] = useState<Paginated<Cheque> | null>(null);
-    const [selected, setSelected] = useState<Cheque | null>(null);
+    const [selected, setSelected] = useState<{ cheque: Cheque; mode: 'view' | 'action' } | null>(null);
+    const [reviewing, setReviewing] = useState<{ cheque: Cheque; mode: ReviewMode } | null>(null);
+    const [assigning, setAssigning] = useState<Cheque | null>(null);
+    // Admin-only row action on a freshly added (still available) cheque.
+    const [usingCheque, setUsingCheque] = useState<Cheque | null>(null);
     const [summary, setSummary] = useState<Summary | null>(null);
+    // The number the ACIC opened by the Assign dialog will take.
+    const [acicNext, setAcicNext] = useState<number | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
     const nextNumber = summary?.next?.cheque_number ?? null;
 
+    useEffect(() => {
+        const timer = setTimeout(() => setQuery(search.trim()), 300);
+        return () => clearTimeout(timer);
+    }, [search]);
+
+    // Any new query starts from the first page, or a match on page 3 would be invisible.
+    useEffect(() => {
+        setPage(1);
+    }, [query]);
+
     const loadList = useCallback(async () => {
         setLoading(true);
         try {
-            setData(await ChequeApi.list(tab, page));
+            setData(await ChequeApi.list(tab, page, 50, query));
             setError('');
         } catch (err) {
             setError(toApiError(err).message);
         } finally {
             setLoading(false);
         }
-    }, [tab, page]);
+    }, [tab, page, query]);
 
     const loadSummary = useCallback(async () => {
         try {
             setSummary(await ChequeApi.summary());
         } catch {
             /* non-fatal */
+        }
+        try {
+            setAcicNext(await AcicApi.next());
+        } catch {
+            /* non-fatal — the Assign dialog just won't preview the number */
         }
     }, []);
 
@@ -69,7 +107,7 @@ export default function ChequesPage() {
             </div>
 
             {/* Tabs */}
-            <div className="mb-4 flex gap-1 border-b border-line">
+            <div className="mb-4 flex flex-wrap gap-1 border-b border-line">
                 {TABS.map(({ key, label }) => (
                     <button
                         key={key}
@@ -88,6 +126,39 @@ export default function ChequesPage() {
                 ))}
             </div>
 
+            {/* Search */}
+            <div className="mb-4">
+                <label htmlFor="cheque-search" className="sr-only">
+                    Search by cheque number or ACIC no.
+                </label>
+                <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-subtle" />
+                    <input
+                        id="cheque-search"
+                        type="search"
+                        className="field !pl-10 !pr-10"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        placeholder="Search by cheque number or ACIC no.…"
+                    />
+                    {search && (
+                        <button
+                            type="button"
+                            onClick={() => setSearch('')}
+                            aria-label="Clear search"
+                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-subtle hover:text-fg"
+                        >
+                            <X className="h-4 w-4" />
+                        </button>
+                    )}
+                </div>
+                {query && data && (
+                    <p className="mt-2 text-xs text-subtle" aria-live="polite">
+                        {data.meta.total.toLocaleString()} match{data.meta.total === 1 ? '' : 'es'} for “{query}”
+                    </p>
+                )}
+            </div>
+
             {error && (
                 <div className="mb-4">
                     <Alert kind="error">{error}</Alert>
@@ -97,7 +168,11 @@ export default function ChequesPage() {
             {loading && !data ? (
                 <Spinner />
             ) : data && data.data.length === 0 ? (
-                <EmptyState>No cheques to show in this view.</EmptyState>
+                <EmptyState>
+                    {query
+                        ? `No cheque matches “${query}” in this view.`
+                        : 'No cheques to show in this view.'}
+                </EmptyState>
             ) : (
                 data && (
                     <div className="card overflow-hidden">
@@ -110,6 +185,7 @@ export default function ChequesPage() {
                                         <th className="px-4 py-3 font-semibold">Payee</th>
                                         <th className="px-4 py-3 text-right font-semibold">Amount</th>
                                         <th className="px-4 py-3 font-semibold">Used by</th>
+                                        <th className="px-4 py-3 font-semibold">ACIC no.</th>
                                         <th className="px-4 py-3 font-semibold">Receipt</th>
                                         <th className="px-4 py-3 text-right font-semibold">Action</th>
                                     </tr>
@@ -126,7 +202,7 @@ export default function ChequesPage() {
                                             >
                                                 <td className="px-4 py-3">
                                                     <button
-                                                        onClick={() => setSelected(cheque)}
+                                                        onClick={() => setSelected({ cheque, mode: 'view' })}
                                                         title="View cheque details"
                                                         className={`font-display font-bold underline-offset-4 hover:underline ${
                                                             isNext ? 'text-brandink' : 'text-fg'
@@ -141,7 +217,11 @@ export default function ChequesPage() {
                                                     )}
                                                 </td>
                                                 <td className="px-4 py-3">
-                                                    <StatusBadge status={cheque.status} />
+                                                    <StatusBadge
+                                                        status={cheque.status}
+                                                        complied={cheque.has_pending_update}
+                                                        viewer={user?.role}
+                                                    />
                                                 </td>
                                                 <td className="px-4 py-3 text-muted">
                                                     {cheque.payee_name ?? '—'}
@@ -152,8 +232,11 @@ export default function ChequesPage() {
                                                 <td className="px-4 py-3 text-muted">
                                                     {cheque.used_by?.name ?? cheque.used_by_name ?? '—'}
                                                 </td>
+                                                <td className="px-4 py-3 font-mono text-xs whitespace-nowrap text-muted">
+                                                    {cheque.acic_number ? `#${cheque.acic_number}` : '—'}
+                                                </td>
                                                 <td className="px-4 py-3">
-                                                    {cheque.status === 'received' ? (
+                                                    {cheque.received_at ? (
                                                         <span className="inline-flex items-center gap-1 rounded-xs border border-success/40 bg-success/10 px-2 py-0.5 text-xs font-medium text-success-fg">
                                                             <BadgeCheck className="h-3 w-3" />
                                                             {formatDate(cheque.received_at)}
@@ -172,17 +255,111 @@ export default function ChequesPage() {
                                                     )}
                                                 </td>
                                                 <td className="px-4 py-3 text-right">
-                                                    {cheque.status === 'available' &&
-                                                        (isNext ? (
-                                                            <span className="text-xs text-brandink">
-                                                                Use from the panel above ↑
-                                                            </span>
+                                                    {cheque.status === 'available' ? (
+                                                        isNext ? (
+                                                            /* A newly added cheque is actionable the
+                                                               moment it is the lowest available number.
+                                                               Admin and staff use it straight from the
+                                                               row; a teller is pointed at the panel. */
+                                                            canUse ? (
+                                                                <button
+                                                                    className="btn btn-primary !px-3 !py-1.5"
+                                                                    onClick={() => setUsingCheque(cheque)}
+                                                                >
+                                                                    <CheckCircle2 className="h-3.5 w-3.5" />
+                                                                    Use
+                                                                </button>
+                                                            ) : (
+                                                                <span className="text-xs text-brandink">
+                                                                    Use from the panel above ↑
+                                                                </span>
+                                                            )
                                                         ) : (
                                                             <span className="inline-flex items-center gap-1 text-xs text-subtle">
                                                                 <Lock className="h-3 w-3" />
                                                                 Locked
                                                             </span>
-                                                        ))}
+                                                        )
+                                                    ) : cheque.status === 'approved' ? (
+                                                        /* Approved — the next step is going on an ACIC. */
+                                                        cheque.acic_number ? (
+                                                            <span className="text-xs text-subtle">
+                                                                On ACIC #{cheque.acic_number}
+                                                            </span>
+                                                        ) : canAssign ? (
+                                                            <button
+                                                                className="btn btn-outline !px-3 !py-1.5"
+                                                                onClick={() => setAssigning(cheque)}
+                                                            >
+                                                                <ListChecks className="h-3.5 w-3.5" />
+                                                                Assign
+                                                            </button>
+                                                        ) : (
+                                                            <span className="text-xs text-subtle">
+                                                                Awaiting assignment
+                                                            </span>
+                                                        )
+                                                    ) : cheque.is_final ? (
+                                                        <span className="text-xs text-subtle">
+                                                            Reviewed {formatDate(cheque.reviewed_at)}
+                                                        </span>
+                                                    ) : cheque.awaits_compliance ? (
+                                                        /* Returned — the staff member's turn to fix the
+                                                           details; the admin waits for that update. */
+                                                        cheque.has_pending_update ? (
+                                                            <span className="text-xs text-subtle">
+                                                                Update awaiting admin approval
+                                                            </span>
+                                                        ) : isStaff && cheque.used_by?.id === user?.id ? (
+                                                            /* Returned to this staff member — only
+                                                               they can act on it. */
+                                                            <button
+                                                                className="btn btn-primary !px-3 !py-1.5"
+                                                                onClick={() =>
+                                                                    setSelected({ cheque, mode: 'action' })
+                                                                }
+                                                            >
+                                                                <PencilLine className="h-3.5 w-3.5" />
+                                                                Action
+                                                            </button>
+                                                        ) : isAdmin ? (
+                                                            <button
+                                                                className="btn btn-outline !px-3 !py-1.5"
+                                                                onClick={() =>
+                                                                    setReviewing({ cheque, mode: 'review' })
+                                                                }
+                                                            >
+                                                                <Gavel className="h-3.5 w-3.5" />
+                                                                Review
+                                                            </button>
+                                                        ) : (
+                                                            <span className="text-xs text-subtle">
+                                                                Returned to{' '}
+                                                                {cheque.used_by?.name ??
+                                                                    cheque.used_by_name ??
+                                                                    'the staff member who used it'}
+                                                            </span>
+                                                        )
+                                                    ) : isAdmin ? (
+                                                        /* Used (or received) — awaiting the admin's review. */
+                                                        cheque.has_pending_update ? (
+                                                            <span className="text-xs text-subtle">
+                                                                On hold — resolve the update request first
+                                                            </span>
+                                                        ) : (
+                                                            <button
+                                                                className="btn btn-outline !px-3 !py-1.5"
+                                                                onClick={() =>
+                                                                    setReviewing({ cheque, mode: 'review' })
+                                                                }
+                                                            >
+                                                                <Gavel className="h-3.5 w-3.5" />
+                                                                Review
+                                                            </button>
+                                                        )
+                                                    ) : (
+                                                        <span className="text-xs text-subtle">Awaiting review</span>
+                                                    )}
                                                 </td>
                                             </tr>
                                         );
@@ -219,12 +396,51 @@ export default function ChequesPage() {
                 )
             )}
 
+            {usingCheque && (
+                <ChequeUseModal
+                    cheque={usingCheque}
+                    onClose={() => setUsingCheque(null)}
+                    onUsed={() => {
+                        setUsingCheque(null);
+                        refreshAll();
+                    }}
+                />
+            )}
+
+            {assigning && (
+                /* The same dialog the ACIC page's "Assign cheque to ACIC" uses: one cheque, onto
+                   the next number in the sequence, which is opened on submit. */
+                <AcicUseModal
+                    nextNumber={acicNext}
+                    single
+                    preselect={assigning.id}
+                    onClose={() => setAssigning(null)}
+                    onAssigned={() => {
+                        setAssigning(null);
+                        refreshAll();
+                    }}
+                />
+            )}
+
+            {reviewing && (
+                <ChequeReviewModal
+                    cheque={reviewing.cheque}
+                    mode={reviewing.mode}
+                    onClose={() => setReviewing(null)}
+                    onReviewed={() => {
+                        setReviewing(null);
+                        refreshAll();
+                    }}
+                />
+            )}
+
             {selected && (
                 <ChequeDetailModal
-                    cheque={selected}
+                    cheque={selected.cheque}
+                    mode={selected.mode}
                     onClose={() => setSelected(null)}
                     onChanged={(updated) => {
-                        setSelected(updated);
+                        setSelected((prev) => (prev ? { ...prev, cheque: updated } : prev));
                         refreshAll();
                     }}
                 />

@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Enums\ChequeStatus;
 use App\Http\Requests\AddChequeRangeRequest;
+use App\Http\Requests\IndexChequesRequest;
+use App\Http\Requests\ReviewChequeRequest;
 use App\Http\Requests\UseChequeRequest;
 use App\Http\Resources\ChequeResource;
 use App\Models\Cheque;
@@ -17,23 +19,32 @@ class ChequeController extends Controller
     public function __construct(private readonly ChequeService $cheques) {}
 
     /**
-     * List cheques, optionally filtered by view (all | available | used | received), paginated.
+     * List cheques, optionally filtered by any ChequeStatus value (or "all") and by a search
+     * term matching the cheque number or the number of the ACIC it sits on, paginated.
      */
-    public function index(Request $request): AnonymousResourceCollection
+    public function index(IndexChequesRequest $request): AnonymousResourceCollection
     {
-        $status = $request->query('status', 'all');
+        $status = (string) $request->query('status', 'all');
 
         $query = Cheque::query()
-            ->with(['usedBy', 'receivedBy'])
+            ->with(['usedBy', 'receivedBy', 'reviewedBy', 'acic'])
             ->withCount(['updateRequests as pending_update_count' => fn ($q) => $q->where('status', 'pending')])
             ->orderBy('cheque_number');
 
-        if (in_array($status, [
-            ChequeStatus::Available->value,
-            ChequeStatus::Used->value,
-            ChequeStatus::Received->value,
-        ], true)) {
+        if (ChequeStatus::tryFrom($status) !== null) {
             $query->where('status', $status);
+        }
+
+        if (($search = $request->searchTerm()) !== null) {
+            // Escape LIKE wildcards so a literal % or _ can't widen the match, and compare
+            // lower-cased: LIKE is case-sensitive on Postgres but not on SQLite, and LOWER()
+            // behaves the same on both.
+            $term = '%'.str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], mb_strtolower($search)).'%';
+
+            $query->where(function ($q) use ($term) {
+                $q->whereRaw("CAST(cheque_number AS TEXT) LIKE ? ESCAPE '\\'", [$term])
+                    ->orWhereHas('acic', fn ($a) => $a->whereRaw("CAST(acic_number AS TEXT) LIKE ? ESCAPE '\\'", [$term]));
+            });
         }
 
         return ChequeResource::collection(
@@ -97,14 +108,30 @@ class ChequeController extends Controller
     }
 
     /**
-     * Admin only: extend the sequence, continuing from the last existing number.
+     * Admin only: record the review outcome for an issued cheque
+     * (approved | complies | disapproved), with a note where one is required.
+     */
+    public function review(ReviewChequeRequest $request, Cheque $cheque): JsonResponse
+    {
+        $cheque = $this->cheques->review(
+            $request->user(),
+            $cheque,
+            $request->outcome(),
+            $request->filled('review_note') ? $request->string('review_note')->toString() : null,
+        );
+
+        return response()->json(['data' => new ChequeResource($cheque)]);
+    }
+
+    /**
+     * Admin only: register a newly issued cheque book by its printed first/last serial.
      */
     public function addRange(AddChequeRangeRequest $request): JsonResponse
     {
         $result = $this->cheques->addRange(
             $request->user(),
-            $request->integer('count'),
-            $request->filled('start_at') ? $request->integer('start_at') : null,
+            $request->integer('start_at'),
+            $request->integer('end_at'),
         );
 
         return response()->json([
@@ -112,7 +139,7 @@ class ChequeController extends Controller
                 'from' => $result['from'],
                 'to' => $result['to'],
                 'count' => $result['count'],
-                'message' => "Added cheque numbers {$result['from']}–{$result['to']}.",
+                'message' => "Registered cheque numbers {$result['from']}–{$result['to']}.",
             ],
         ], 201);
     }

@@ -5,6 +5,7 @@ namespace Database\Seeders;
 use App\Enums\UserRole;
 use App\Models\Cheque;
 use App\Models\User;
+use App\Services\AcicService;
 use App\Services\ChequeService;
 use App\Services\UpdateRequestService;
 use Illuminate\Database\Seeder;
@@ -46,10 +47,16 @@ class DatabaseSeeder extends Seeder
             ],
         );
 
+        // ACIC numbers are a registered series now, so seed a block to draw on.
+        $acics = app(AcicService::class);
+        if ($acics->series()['registered'] === 0) {
+            $acics->addRange($admin, 1, 200);
+        }
+
         // Seed an initial run of cheque numbers (1–500) if none exist yet.
         $cheques = app(ChequeService::class);
         if ($cheques->counts()['total'] === 0) {
-            $cheques->addRange($admin, 500, 1);
+            $cheques->addRange($admin, 1, 500);
 
             // Use the first few so there is sample "used" data and audit history.
             $payees = ['Acme Supplies', 'City Power Co.', 'Metro Rentals', 'J. Rivera', 'Sunrise Catering', 'BlueOcean Logistics', 'Northwind Traders', 'Payroll Run'];

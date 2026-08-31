@@ -28,11 +28,16 @@ class UpdateRequestService
      */
     public function create(User $staff, Cheque $cheque, array $proposed, string $reason): ChequeUpdateRequest
     {
-        if (! in_array($cheque->status, [ChequeStatus::Used, ChequeStatus::Received], true)) {
+        if (! $cheque->status->isIssued()) {
             throw ValidationException::withMessages([
-                'cheque' => 'Only a used or received cheque has details that can be updated.',
+                'cheque' => 'Only a cheque that has been used has details that can be updated.',
             ]);
         }
+
+        // A Returned cheque belongs to the staff member who used it: the admin handed *them* the
+        // remark, and they are the one notified. Anyone else correcting it would be answering a
+        // question they were never asked, and the audit trail would name the wrong person.
+        $this->assertOwnsReturned($staff, $cheque);
 
         $pendingExists = $cheque->updateRequests()
             ->where('status', RequestStatus::Pending)
@@ -93,6 +98,27 @@ class UpdateRequestService
     }
 
     /**
+     * A cheque that has been returned may only be corrected by the staff member it was returned
+     * to — the one who used the number in the first place.
+     *
+     * @throws ValidationException
+     */
+    private function assertOwnsReturned(User $staff, Cheque $cheque): void
+    {
+        if (! $cheque->status->awaitsCompliance() || $cheque->used_by === $staff->id) {
+            return;
+        }
+
+        $owner = $cheque->usedBy?->name;
+
+        throw ValidationException::withMessages([
+            'cheque' => "Cheque #{$cheque->cheque_number} was returned to "
+                .($owner !== null ? $owner : 'the staff member who used it')
+                .'. Only they can update it.',
+        ]);
+    }
+
+    /**
      * An admin approves a pending request, applying the staff-proposed details to the cheque.
      *
      * @throws ValidationException
@@ -110,16 +136,28 @@ class UpdateRequestService
                 'cheque_date' => $cheque->cheque_date?->toDateString(),
             ];
 
+            $now = Carbon::now();
+
+            // Approving a correction on a Returned cheque *is* the sign-off: the
+            // deficiency the note described has been fixed and accepted, so the cheque moves
+            // straight to Approved rather than waiting on a second review.
+            $resolvesCompliance = $cheque->status === ChequeStatus::Complies;
+
             $cheque->update([
                 'payee_name' => $request->proposed_payee_name,
                 'amount' => $request->proposed_amount,
                 'cheque_date' => $request->proposed_cheque_date,
-            ]);
+            ] + ($resolvesCompliance ? [
+                'status' => ChequeStatus::Approved,
+                'reviewed_by' => $admin->id,
+                'reviewed_at' => $now,
+                'review_note' => $note,
+            ] : []));
 
             $request->update([
                 'status' => RequestStatus::Approved,
                 'reviewed_by' => $admin->id,
-                'reviewed_at' => Carbon::now(),
+                'reviewed_at' => $now,
                 'review_note' => $note,
             ]);
 
@@ -134,13 +172,15 @@ class UpdateRequestService
                 ChequeAction::ApprovedUpdate,
                 $cheque->cheque_number,
                 "Approved update to cheque number {$cheque->cheque_number}."
-                    .($changes !== '' ? " Changes: {$changes}." : ' No field changes.'),
+                    .($changes !== '' ? " Changes: {$changes}." : ' No field changes.')
+                    .($resolvesCompliance ? ' Compliance resolved — the cheque is now Approved.' : ''),
             );
 
             $request->requestedBy?->notify(new ActivityNotification(
                 kind: 'approved',
                 title: "Update approved · Cheque #{$cheque->cheque_number}",
                 message: "{$admin->name} approved your update to cheque #{$cheque->cheque_number}."
+                    .($resolvesCompliance ? ' It is now Approved.' : '')
                     .($note ? " Note: {$note}" : ''),
                 url: '/cheques',
                 chequeNumber: $cheque->cheque_number,

@@ -32,7 +32,7 @@ class ChequeTest extends TestCase
 
     private function seedCheques(int $count, int $startAt = 1): void
     {
-        app(ChequeService::class)->addRange($this->admin(), $count, $startAt);
+        app(ChequeService::class)->addRange($this->admin(), $startAt, $startAt + $count - 1);
     }
 
     /**
@@ -192,32 +192,100 @@ class ChequeTest extends TestCase
     {
         Sanctum::actingAs($this->staff());
 
-        $this->postJson('/api/v1/cheques/add-range', ['count' => 10])
+        $this->postJson('/api/v1/cheques/add-range', ['start_at' => 1, 'end_at' => 10])
             ->assertForbidden();
     }
 
-    public function test_admin_add_range_continues_from_the_last_number(): void
+    public function test_admin_registers_a_book_by_its_first_and_last_serial(): void
+    {
+        Sanctum::actingAs($this->admin());
+
+        $this->postJson('/api/v1/cheques/add-range', ['start_at' => 10001, 'end_at' => 10200])
+            ->assertCreated()
+            ->assertJsonPath('data.from', 10001)
+            ->assertJsonPath('data.to', 10200)
+            ->assertJsonPath('data.count', 200);
+
+        $this->assertSame(200, Cheque::count());
+        $this->assertSame(10001, Cheque::min('cheque_number'));
+        $this->assertSame(10200, Cheque::max('cheque_number'));
+    }
+
+    /** A new physical book carries its own bank-assigned serials, which need not adjoin the last. */
+    public function test_a_new_book_may_start_above_the_last_existing_number(): void
     {
         $this->seedCheques(500, 1); // 1..500
         Sanctum::actingAs($this->admin());
 
-        $this->postJson('/api/v1/cheques/add-range', ['count' => 100])
+        $this->postJson('/api/v1/cheques/add-range', ['start_at' => 10001, 'end_at' => 10200])
             ->assertCreated()
-            ->assertJsonPath('data.from', 501)
-            ->assertJsonPath('data.to', 600);
+            ->assertJsonPath('data.from', 10001);
 
-        $this->assertSame(600, Cheque::max('cheque_number'));
-        $this->assertSame(600, Cheque::count()); // no gaps, no duplicates
+        $this->assertSame(700, Cheque::count());
+        // The numbers between the books simply never existed.
+        $this->assertSame(0, Cheque::whereBetween('cheque_number', [501, 10000])->count());
     }
 
-    public function test_first_range_respects_start_at(): void
+    public function test_a_range_overlapping_existing_serials_is_rejected(): void
+    {
+        $this->seedCheques(500, 1); // 1..500
+        Sanctum::actingAs($this->admin());
+
+        // Fully inside the existing book.
+        $this->postJson('/api/v1/cheques/add-range', ['start_at' => 100, 'end_at' => 200])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('start_at');
+
+        // Straddling the end of it.
+        $this->postJson('/api/v1/cheques/add-range', ['start_at' => 400, 'end_at' => 600])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('start_at');
+
+        // A single already-registered serial.
+        $this->postJson('/api/v1/cheques/add-range', ['start_at' => 500, 'end_at' => 500])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('start_at');
+
+        // Nothing was added by any of the rejected attempts.
+        $this->assertSame(500, Cheque::count());
+    }
+
+    public function test_the_last_serial_cannot_be_below_the_first(): void
     {
         Sanctum::actingAs($this->admin());
 
-        $this->postJson('/api/v1/cheques/add-range', ['count' => 10, 'start_at' => 1001])
+        $this->postJson('/api/v1/cheques/add-range', ['start_at' => 200, 'end_at' => 100])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('end_at');
+    }
+
+    public function test_both_serials_are_required(): void
+    {
+        Sanctum::actingAs($this->admin());
+
+        $this->postJson('/api/v1/cheques/add-range', [])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['start_at', 'end_at']);
+    }
+
+    public function test_an_absurdly_large_range_is_rejected(): void
+    {
+        Sanctum::actingAs($this->admin());
+
+        $this->postJson('/api/v1/cheques/add-range', ['start_at' => 1, 'end_at' => 5_000_000])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('end_at');
+
+        $this->assertSame(0, Cheque::count());
+    }
+
+    public function test_a_single_cheque_range_is_allowed(): void
+    {
+        Sanctum::actingAs($this->admin());
+
+        $this->postJson('/api/v1/cheques/add-range', ['start_at' => 77, 'end_at' => 77])
             ->assertCreated()
-            ->assertJsonPath('data.from', 1001)
-            ->assertJsonPath('data.to', 1010);
+            ->assertJsonPath('data.count', 1);
     }
 
     public function test_logs_are_admin_only(): void
@@ -234,7 +302,7 @@ class ChequeTest extends TestCase
         $admin = $this->admin();
         Sanctum::actingAs($admin);
 
-        $this->postJson('/api/v1/cheques/add-range', ['count' => 10, 'start_at' => 1]);
+        $this->postJson('/api/v1/cheques/add-range', ['start_at' => 1, 'end_at' => 10]);
 
         $this->assertDatabaseHas('cheque_logs', [
             'user_id' => $admin->id,

@@ -6,7 +6,7 @@ import { Spinner } from './ui';
 function FullScreenLoader() {
     return (
         <div className="flex min-h-screen items-center justify-center">
-            <Spinner label="Loading ChequeWatch…" />
+            <Spinner label="Loading E-MDS…" />
         </div>
     );
 }

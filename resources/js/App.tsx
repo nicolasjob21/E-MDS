@@ -4,6 +4,10 @@ import Layout from './components/Layout';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import ChequesPage from './pages/ChequesPage';
+import AcicsPage from './pages/AcicsPage';
+import LddapsPage from './pages/LddapsPage';
+import LddapSeriesPage from './pages/LddapSeriesPage';
+import AcicSeriesPage from './pages/AcicSeriesPage';
 import AddRangePage from './pages/AddRangePage';
 import UsersPage from './pages/UsersPage';
 import LogsPage from './pages/LogsPage';
@@ -23,6 +27,24 @@ export default function App() {
             >
                 <Route path="/dashboard" element={<DashboardPage />} />
                 <Route path="/cheques" element={<ChequesPage />} />
+                <Route path="/lddaps" element={<LddapsPage />} />
+                <Route path="/acics" element={<AcicsPage />} />
+                <Route
+                    path="/admin/lddap-series"
+                    element={
+                        <RequireAdmin>
+                            <LddapSeriesPage />
+                        </RequireAdmin>
+                    }
+                />
+                <Route
+                    path="/admin/acic-series"
+                    element={
+                        <RequireAdmin>
+                            <AcicSeriesPage />
+                        </RequireAdmin>
+                    }
+                />
                 <Route
                     path="/admin/add-range"
                     element={
