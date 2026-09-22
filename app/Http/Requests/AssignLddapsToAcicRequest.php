@@ -20,6 +20,10 @@ class AssignLddapsToAcicRequest extends FormRequest
         return [
             'lddap_ids' => ['required', 'array', 'min:1', 'max:500'],
             'lddap_ids.*' => ['integer', 'exists:lddaps,id'],
+            // The check numbers the screen previewed, in the same order as `lddap_ids`. The
+            // allocator refuses the save if they are no longer the next ones.
+            'expected_check_nos' => ['nullable', 'array', 'max:500'],
+            'expected_check_nos.*' => ['integer', 'min:1'],
         ];
     }
 

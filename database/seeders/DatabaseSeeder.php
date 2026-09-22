@@ -4,6 +4,8 @@ namespace Database\Seeders;
 
 use App\Enums\UserRole;
 use App\Models\Cheque;
+use App\Models\Payee;
+use App\Models\Unit;
 use App\Models\User;
 use App\Services\AcicService;
 use App\Services\ChequeService;
@@ -46,6 +48,28 @@ class DatabaseSeeder extends Seeder
                 'is_active' => true,
             ],
         );
+
+        // The reference lists an LDDAP is registered against. Sample entries only — replace
+        // them with the office's real units and payees.
+        foreach (['ACCOUNTING', 'BUDGET', 'CASH', 'ADMINISTRATION', 'LOGISTICS', 'OPERATIONS'] as $unit) {
+            Unit::firstOrCreate(['name' => $unit]);
+        }
+
+        // A payee may hold several accounts; the first sample does, so the account select and
+        // the auto-pick of a lone account both have something to show.
+        foreach ([
+            'ACME SUPPLIES INC.' => [['1701-0426-18', 'LBP'], ['0451-2210-07', 'DBP']],
+            'CITY POWER CO.' => [['2028-9010-12', 'LBP']],
+            'METRO RENTALS' => [['2028-9010-13', 'LBP']],
+            'J. RIVERA' => [['2028-9010-14', 'LBP']],
+            'SUNRISE CATERING' => [['2028-9010-15', 'LBP']],
+            'BLUEOCEAN LOGISTICS' => [['2028-9010-16', 'LBP']],
+        ] as $name => $accounts) {
+            $payee = Payee::firstOrCreate(['name' => $name]);
+            foreach ($accounts as [$accountNo, $bank]) {
+                $payee->accounts()->firstOrCreate(['account_no' => $accountNo], ['bank' => $bank]);
+            }
+        }
 
         // ACIC numbers are a registered series now, so seed a block to draw on.
         $acics = app(AcicService::class);

@@ -107,44 +107,25 @@ export function AcicStatusBadge({ status }: { status: AcicStatus }) {
 }
 
 /**
- * Once the staff member has complied with a Returned remark, the stored status is still
- * `compliance` — the admin's approval is what moves the record on. The badge says so from the
- * reader's side rather than leaving the row looking untouched: the staff member who acted sees
- * **On Hold**, everyone else sees **Complied**. It also drops the coral "act on me" styling for
- * cyan, since the ball is no longer in the staff member's court. This badge is the only place
- * the hold is shown — the LDDAP number column carries no chip of its own.
+ * The LDDAP's place in its routing: Registered → For Out → Returned for ACIC → Approved | RTS |
+ * Canceled. Coral marks the one state that is waiting on the admin's action; amber, a record
+ * sent back to be corrected.
  */
-export function LddapStatusBadge({
-    status,
-    complied = false,
-    viewer,
-}: {
-    status: LddapStatus;
-    /** A correction is pending, i.e. the compliance remark has been acted on. */
-    complied?: boolean;
-    /** Whose reading of the status this is. */
-    viewer?: Role;
-}) {
+export function LddapStatusBadge({ status }: { status: LddapStatus }) {
     const config = {
-        used: { styles: 'border-slate-600/50 text-muted bg-slate-500/10', dot: 'bg-slate-400', label: 'Used' },
-        received: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300', label: 'Received' },
+        registered: { styles: 'border-line text-muted bg-well', dot: 'bg-slate-500', label: 'Registered' },
+        for_out: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300', label: 'For Out' },
+        returned_for_acic: { styles: 'border-accent-400/50 text-accent-400 bg-accent-400/10', dot: 'bg-accent-400', label: 'Returned for ACIC' },
+        // Sent back to be corrected — amber, so it reads as neither the coral "act on me" nor a verdict.
+        rts: { styles: 'border-amber-400/50 text-amber-400 bg-amber-400/10', dot: 'bg-amber-400', label: 'RTS' },
         approved: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success', label: 'Approved' },
-        compliance: { styles: 'border-accent-400/50 text-accent-400 bg-accent-400/10', dot: 'bg-accent-400', label: 'Returned' },
-        cancelled: { styles: 'border-danger/40 text-danger-fg bg-danger/10', dot: 'bg-danger', label: 'Cancelled' },
+        canceled: { styles: 'border-danger/40 text-danger-fg bg-danger/10', dot: 'bg-danger', label: 'Canceled' },
     }[status];
 
-    const isComplied = complied && status === 'compliance';
-    const label = isComplied ? (viewer === 'staff' ? 'On Hold' : 'Complied') : config.label;
-    const styles = isComplied ? 'border-brand-400/40 text-brandink bg-brand-500/10' : config.styles;
-    const dot = isComplied ? 'bg-brand-300' : config.dot;
-
     return (
-        <span
-            className={`inline-flex items-center gap-1.5 rounded-xs border px-2 py-0.5 text-xs font-medium ${styles}`}
-            title={isComplied ? 'Complied with — the record stays Returned until an admin approves the correction.' : undefined}
-        >
-            <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
-            {label}
+        <span className={`inline-flex items-center gap-1.5 rounded-xs border px-2 py-0.5 text-xs font-medium ${config.styles}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${config.dot}`} />
+            {config.label}
         </span>
     );
 }

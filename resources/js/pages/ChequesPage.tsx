@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Lock, BadgeCheck, CheckCircle2, Clock, Gavel, ListChecks, PencilLine, Search, X } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
+import { Lock, BadgeCheck, CheckCircle2, Clock, Eye, Gavel, ListChecks, PencilLine, Search, X } from 'lucide-react';
 import { AcicApi, ChequeApi, toApiError } from '../lib/api';
 import type { Cheque, Paginated, Summary } from '../lib/types';
 import { PageHeader, Spinner, Alert, StatusBadge, EmptyState } from '../components/ui';
@@ -8,6 +9,7 @@ import ChequeDetailModal from '../components/ChequeDetailModal';
 import ChequeReviewModal, { type ReviewMode } from '../components/ChequeReviewModal';
 import AcicUseModal from '../components/AcicUseModal';
 import ChequeUseModal from '../components/ChequeUseModal';
+import ChequeViewModal from '../components/ChequeViewModal';
 import { useAuth } from '../auth/AuthContext';
 import { formatDate, formatMoney } from '../lib/format';
 
@@ -23,6 +25,10 @@ const TABS: { key: Tab; label: string }[] = [
     { key: 'disapproved', label: 'Disapproved' },
 ];
 
+function tabFrom(value: string | null): Tab {
+    return TABS.some((t) => t.key === value) ? (value as Tab) : 'all';
+}
+
 export default function ChequesPage() {
     const { user } = useAuth();
     const isAdmin = user?.role === 'admin';
@@ -31,7 +37,9 @@ export default function ChequesPage() {
     // next-in-line number straight from its row. A teller does neither.
     const canAssign = isAdmin || isStaff;
     const canUse = isAdmin || isStaff;
-    const [tab, setTab] = useState<Tab>('all');
+    // `?status=` picks the tab, so the dashboard's tiles land on the right list.
+    const [params] = useSearchParams();
+    const [tab, setTab] = useState<Tab>(() => tabFrom(params.get('status')));
     const [page, setPage] = useState(1);
     const [search, setSearch] = useState('');
     // Debounced copy — the list only refetches once typing pauses.
@@ -42,6 +50,8 @@ export default function ChequesPage() {
     const [assigning, setAssigning] = useState<Cheque | null>(null);
     // Admin-only row action on a freshly added (still available) cheque.
     const [usingCheque, setUsingCheque] = useState<Cheque | null>(null);
+    // The cheque face, for an approved cheque only.
+    const [viewingCheque, setViewingCheque] = useState<Cheque | null>(null);
     const [summary, setSummary] = useState<Summary | null>(null);
     // The number the ACIC opened by the Assign dialog will take.
     const [acicNext, setAcicNext] = useState<number | null>(null);
@@ -54,6 +64,11 @@ export default function ChequesPage() {
         const timer = setTimeout(() => setQuery(search.trim()), 300);
         return () => clearTimeout(timer);
     }, [search]);
+
+    useEffect(() => {
+        setTab(tabFrom(params.get('status')));
+        setPage(1);
+    }, [params]);
 
     // Any new query starts from the first page, or a match on page 3 would be invisible.
     useEffect(() => {
@@ -281,24 +296,31 @@ export default function ChequesPage() {
                                                             </span>
                                                         )
                                                     ) : cheque.status === 'approved' ? (
-                                                        /* Approved — the next step is going on an ACIC. */
-                                                        cheque.acic_number ? (
-                                                            <span className="text-xs text-subtle">
-                                                                On ACIC #{cheque.acic_number}
-                                                            </span>
-                                                        ) : canAssign ? (
+                                                        /* Approved — it can be viewed and printed, and
+                                                           the next step is going on an ACIC. The View
+                                                           button exists for this status alone. */
+                                                        <div className="flex items-center justify-end gap-2">
                                                             <button
-                                                                className="btn btn-outline !px-3 !py-1.5"
-                                                                onClick={() => setAssigning(cheque)}
+                                                                className="btn btn-ghost !px-3 !py-1.5"
+                                                                onClick={() => setViewingCheque(cheque)}
                                                             >
-                                                                <ListChecks className="h-3.5 w-3.5" />
-                                                                Assign
+                                                                <Eye className="h-3.5 w-3.5" />
+                                                                View
                                                             </button>
-                                                        ) : (
-                                                            <span className="text-xs text-subtle">
-                                                                Awaiting assignment
-                                                            </span>
-                                                        )
+                                                            {cheque.acic_number ? null : canAssign ? (
+                                                                <button
+                                                                    className="btn btn-outline !px-3 !py-1.5"
+                                                                    onClick={() => setAssigning(cheque)}
+                                                                >
+                                                                    <ListChecks className="h-3.5 w-3.5" />
+                                                                    Assign
+                                                                </button>
+                                                            ) : (
+                                                                <span className="text-xs text-subtle">
+                                                                    Awaiting assignment
+                                                                </span>
+                                                            )}
+                                                        </div>
                                                     ) : cheque.is_final ? (
                                                         <span className="text-xs text-subtle">
                                                             Reviewed {formatDate(cheque.reviewed_at)}
@@ -394,6 +416,10 @@ export default function ChequesPage() {
                         )}
                     </div>
                 )
+            )}
+
+            {viewingCheque && (
+                <ChequeViewModal cheque={viewingCheque} onClose={() => setViewingCheque(null)} />
             )}
 
             {usingCheque && (

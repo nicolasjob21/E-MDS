@@ -176,7 +176,7 @@ export default function AcicDetailModal({
             aria-modal="true"
             aria-labelledby="acic-detail-title"
         >
-            <div className="card max-h-[90vh] w-full max-w-lg overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
+            <div className="card max-h-[90vh] w-full max-w-xl overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
                 <div className="mb-5 flex items-start justify-between gap-4">
                     <div>
                         <span className="eyebrow">{isConfirm ? 'Confirm completion' : 'ACIC'}</span>
@@ -320,7 +320,7 @@ export default function AcicDetailModal({
                                                         {formatMoney(l.amount)}
                                                     </td>
                                                     <td className="px-3 py-2">
-                                                        <LddapStatusBadge status={l.status} viewer={user?.role} />
+                                                        <LddapStatusBadge status={l.status} />
                                                     </td>
                                                 </tr>
                                             ))}

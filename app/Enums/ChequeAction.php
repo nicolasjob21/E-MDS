@@ -9,6 +9,8 @@ enum ChequeAction: string
 {
     case Login = 'login';
     case Logout = 'logout';
+    case UpdatedProfile = 'updated_profile';
+    case ChangedPassword = 'changed_password';
     case UsedCheque = 'used_cheque';
     case ReceivedCheque = 'received_cheque';
     case ReviewedCheque = 'reviewed_cheque';
@@ -17,6 +19,9 @@ enum ChequeAction: string
     case RejectedUpdate = 'rejected_update';
     case AddedChequeRange = 'added_cheque_range';
     case AddedLddapCheckRange = 'added_lddap_check_range';
+    case RegisteredLddap = 'registered_lddap';
+    case ForwardedLddap = 'forwarded_lddap';
+    case ReceivedLddapBack = 'received_lddap_back';
     case UsedLddapCheck = 'used_lddap_check';
     case ReceivedLddap = 'received_lddap';
     case ReviewedLddap = 'reviewed_lddap';

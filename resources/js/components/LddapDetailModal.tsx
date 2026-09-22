@@ -1,25 +1,18 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { X, PencilLine, Clock, History, Check, Ban, Hash, AlertTriangle, Zap, CheckCircle2 } from 'lucide-react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { X, PencilLine, Clock, History, Check, Ban, Hash, AlertTriangle, Zap, CheckCircle2, Route, Undo2 } from 'lucide-react';
 import { LddapUpdateRequestApi, LddapApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
-import type { Lddap, LddapUpdateRequest, RequestStatus } from '../lib/types';
+import type { Lddap, LddapEdit, LddapRoutingStep, LddapUpdateRequest, RequestStatus } from '../lib/types';
 import { formatDate, formatDateTime, formatMoney } from '../lib/format';
 import { Alert, LddapStatusBadge } from './ui';
+import LddapRecordDetails, { Row } from './LddapRecordDetails';
+import LddapRegisterModal from './LddapRegisterModal';
 
 const REQUEST_STATUS: Record<RequestStatus, { label: string; styles: string; icon: typeof Clock }> = {
     pending: { label: 'Pending', styles: 'border-accent-400/50 bg-accent-400/10 text-accent-400', icon: Clock },
     approved: { label: 'Approved', styles: 'border-success/40 bg-success/10 text-success-fg', icon: Check },
     rejected: { label: 'Rejected', styles: 'border-danger/40 bg-danger/10 text-danger-fg', icon: Ban },
 };
-
-function Row({ label, value }: { label: string; value: ReactNode }) {
-    return (
-        <div className="flex items-baseline justify-between gap-4 border-b border-line/60 py-2.5 last:border-0">
-            <span className="text-xs font-semibold uppercase tracking-wider text-subtle">{label}</span>
-            <span className="text-right text-sm text-fg">{value}</span>
-        </div>
-    );
-}
 
 interface Props {
     lddap: Lddap;
@@ -42,12 +35,15 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
     const isAdmin = user?.role === 'admin';
     const isTeller = user?.role === 'teller';
 
-    // Staff propose a correction for approval; an admin applies one immediately. Same fields,
-    // same mandatory reason — only who it has to pass through differs. A returned record is the
-    // exception: it went back to the staff member who used the number, so only they get the form.
-    const ownsLddap = lddap.used_by?.id === user?.id;
-    const canEdit = isAdmin || (isStaff && (!lddap.awaits_compliance || ownsLddap));
+    // While Registered or RTS the record is edited through the register form itself ("Edit
+    // LDDAP Record"). Once it is out for routing, a staff member can only propose a correction
+    // for approval and an admin apply one with a reason; a canceled record is closed to both.
+    const canOpenEdit = (isAdmin || isStaff) && !!lddap.can_edit;
+    const canCorrect = (isAdmin || isStaff) && !lddap.can_edit && lddap.status !== 'canceled';
     const direct = isAdmin;
+
+    const [editing, setEditing] = useState(false);
+    const [edits, setEdits] = useState<LddapEdit[]>([]);
 
     const [requesting, setRequesting] = useState(false);
     const [lddapNo, setLddapNo] = useState(lddap.lddap_no);
@@ -59,6 +55,11 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
     const [reqError, setReqError] = useState('');
     const [pendingRequest, setPendingRequest] = useState(!!lddap.has_pending_update);
     const [history, setHistory] = useState<LddapUpdateRequest[]>([]);
+    // Every routing step the record has taken, oldest first.
+    const [routing, setRouting] = useState<LddapRoutingStep[]>([]);
+    // The returns to sender, newest first — the RTS History section, and the count badge.
+    const rtsEntries = routing.filter((step) => step.action === 'rts').slice().reverse();
+    const latestRts = rtsEntries[0] ?? null;
     // Teller receipt confirmation lives here now, as it does for cheques.
     const [receiving, setReceiving] = useState(false);
     const [receiptError, setReceiptError] = useState('');
@@ -67,8 +68,14 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
     // a record that already has a request awaiting approval.
     const loadHistory = useCallback(async () => {
         try {
-            const list = await LddapUpdateRequestApi.forLddap(lddap.id);
+            const [list, trail, changes] = await Promise.all([
+                LddapUpdateRequestApi.forLddap(lddap.id),
+                LddapApi.routingHistory(lddap.id),
+                LddapApi.editHistory(lddap.id),
+            ]);
             setHistory(list);
+            setRouting(trail);
+            setEdits(changes);
             setPendingRequest(list.some((r) => r.status === 'pending'));
         } catch {
             /* non-fatal — history just won't show */
@@ -81,11 +88,12 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
 
     useEffect(() => {
         function onKey(e: KeyboardEvent) {
-            if (e.key === 'Escape' && !reqBusy) onClose();
+            // With the edit dialog open on top, Esc is its to handle.
+            if (e.key === 'Escape' && !reqBusy && !editing) onClose();
         }
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, [onClose, reqBusy]);
+    }, [onClose, reqBusy, editing]);
 
     async function handleConfirmReceipt() {
         setReceiving(true);
@@ -140,7 +148,7 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
             aria-labelledby="lddap-detail-title"
         >
             <div
-                className="card flex max-h-[92vh] w-full max-w-lg flex-col overflow-y-auto p-6"
+                className="card flex max-h-[92vh] w-full max-w-xl flex-col overflow-y-auto p-6"
                 onClick={(e) => e.stopPropagation()}
             >
                 <div className="mb-4 flex items-start justify-between gap-4">
@@ -154,7 +162,11 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
                         </h2>
                         <p className="mt-1 flex items-center gap-1.5 text-sm text-muted">
                             <Hash className="h-3.5 w-3.5 text-subtle" />
-                            Check {lddap.check_no}
+                            {lddap.check_no != null
+                                ? `Check ${lddap.check_no}`
+                                : lddap.status === 'approved'
+                                  ? 'Check number assigned when put on an ACIC'
+                                  : 'No check number yet — assigned with the ACIC after approval'}
                         </p>
                     </div>
                     <button
@@ -176,52 +188,98 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
                     </div>
                 )}
 
-                {lddap.awaits_compliance && (
-                    <div className="mb-4 rounded-xs border border-accent-400/50 bg-accent-400/10 p-3">
-                        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-accent-400">
+                {/* Where the record is in its routing, and the last note left on it. */}
+                {lddap.status === 'rts' && latestRts && (
+                    <div className="mb-4 rounded-xs border border-amber-400/50 bg-amber-400/10 p-3">
+                        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-amber-400">
+                            <Undo2 className="h-3.5 w-3.5" />
+                            Returned to sender
+                        </div>
+                        <p className="mt-1.5 text-sm text-fg">{latestRts.note}</p>
+                        <p className="mt-1.5 text-xs text-subtle">
+                            {latestRts.user?.name ?? '—'} · {latestRts.unit_name ?? '—'} ·{' '}
+                            {formatDate(latestRts.acted_on)} — correct the details, then forward it again.
+                        </p>
+                    </div>
+                )}
+
+                {(lddap.status === 'for_out' || lddap.status === 'returned_for_acic') && (
+                    <div
+                        className={`mb-4 rounded-xs border p-3 ${
+                            lddap.status === 'returned_for_acic'
+                                ? 'border-accent-400/50 bg-accent-400/10'
+                                : 'border-brand-400/40 bg-brand-500/10'
+                        }`}
+                    >
+                        <div
+                            className={`flex items-center gap-2 text-xs font-semibold uppercase tracking-wider ${
+                                lddap.status === 'returned_for_acic' ? 'text-accent-400' : 'text-brandink'
+                            }`}
+                        >
                             <AlertTriangle className="h-3.5 w-3.5" />
-                            Returned
+                            {lddap.status_label}
                         </div>
                         <p className="mt-1.5 text-sm text-fg">
-                            {lddap.review_note ?? 'No remark was recorded.'}
+                            {lddap.status === 'for_out'
+                                ? `Forwarded to ${lddap.forward_to ?? '—'}${lddap.forward_unit_name ? ` (${lddap.forward_unit_name})` : ''} by ${lddap.forwarded_by?.name ?? '—'} on ${formatDate(lddap.date_forwarded)}.`
+                                : `Received back${lddap.return_unit_name ? ` from ${lddap.return_unit_name}` : ''} by ${lddap.returned_by?.name ?? '—'} on ${formatDate(lddap.date_returned)} — awaiting the admin's action.`}
                         </p>
-                        <p className="mt-1.5 text-xs text-subtle">
-                            {lddap.reviewed_by?.name ? `${lddap.reviewed_by.name} · ` : ''}
-                            {formatDateTime(lddap.reviewed_at)}
-                            {isStaff && ownsLddap
-                                ? ' — edit the details below to address this. An admin has to approve the change, and the record stays Returned until they do.'
-                                : ''}
-                        </p>
-                        {!ownsLddap && (
-                            <p className="mt-1.5 text-xs text-subtle">
-                                Returned to {lddap.used_by?.name ?? 'the staff member who used it'} —
-                                it is theirs to update.
-                            </p>
-                        )}
                     </div>
+                )}
+
+                {/* Cancellation details — only on a canceled record. */}
+                {lddap.status === 'canceled' && (
+                    <section className="mb-4 rounded-xs border border-danger/40 bg-danger/10 p-3">
+                        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-danger-fg">
+                            <Ban className="h-3.5 w-3.5" />
+                            Cancellation Details
+                        </div>
+                        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+                            <dt className="text-xs uppercase tracking-wider text-subtle">Canceled By</dt>
+                            <dd className="text-fg">{lddap.canceled_by?.name ?? lddap.reviewed_by?.name ?? '—'}</dd>
+                            <dt className="text-xs uppercase tracking-wider text-subtle">Date Canceled</dt>
+                            <dd className="text-fg">{formatDate(lddap.date_canceled ?? lddap.reviewed_at)}</dd>
+                            <dt className="text-xs uppercase tracking-wider text-subtle">Reason</dt>
+                            <dd className="whitespace-pre-wrap text-fg">
+                                {lddap.cancel_reason ?? lddap.review_note ?? 'No reason was recorded.'}
+                            </dd>
+                        </dl>
+                        <p className="mt-2 text-xs text-subtle">
+                            This record is closed. It cannot be edited, forwarded, returned or assigned to an ACIC,
+                            and its LDDAP number stays used.
+                        </p>
+                    </section>
                 )}
 
                 <section>
                     <Row
                         label="Status"
                         value={
-                            <LddapStatusBadge
-                                status={lddap.status}
-                                complied={pendingRequest}
-                                viewer={user?.role}
-                            />
+                            <span className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                                <LddapStatusBadge status={lddap.status} />
+                                {rtsEntries.length > 0 && (
+                                    <span
+                                        className="inline-flex items-center rounded-xs border border-amber-400/50 bg-amber-400/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-400"
+                                        title={`Returned to sender ${rtsEntries.length} time${rtsEntries.length === 1 ? '' : 's'}`}
+                                    >
+                                        RTS: {rtsEntries.length}
+                                    </span>
+                                )}
+                            </span>
                         }
                     />
-                    <Row label="LDDAP No." value={lddap.lddap_no} />
-                    <Row label="OBJ No." value={lddap.obj_no ?? '—'} />
-                    <Row label="Payee" value={lddap.payee_name ?? '—'} />
-                    <Row
-                        label="Amount"
-                        value={<span className="font-mono">{formatMoney(lddap.amount)}</span>}
-                    />
-                    <Row label="Check date" value={formatDate(lddap.check_date)} />
-                    <Row label="Used by" value={lddap.used_by?.name ?? '—'} />
-                    <Row label="Used at" value={formatDateTime(lddap.used_at)} />
+                </section>
+
+                {/* Everything it was registered with — details, payee, W/TAX, VAT, deductions, net. */}
+                <div className="mt-4">
+                    <LddapRecordDetails lddap={lddap} />
+                </div>
+
+                {/* Where it has been since. */}
+                <section className="mt-6">
+                    <h3 className="mb-2 font-display text-sm font-semibold uppercase tracking-widest text-subtle">
+                        Routing
+                    </h3>
                     {lddap.received_at && (
                         <Row
                             label="Received by"
@@ -246,7 +304,7 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
                     )}
                 </section>
 
-                {isTeller && lddap.status === 'used' && !pendingRequest && (
+                {isTeller && lddap.check_no != null && !lddap.received_at && !pendingRequest && (
                     <section className="mt-6 border-t border-line pt-5">
                         <p className="mb-3 text-sm text-muted">
                             Confirm this LDDAP has been received. This records you and the time against it.
@@ -264,6 +322,73 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
                             <CheckCircle2 className="h-4 w-4" />
                             {receiving ? 'Saving…' : 'Confirm receipt'}
                         </button>
+                    </section>
+                )}
+
+                {/* Every return to sender, newest first. Absent when the record was never returned. */}
+                {rtsEntries.length > 0 && (
+                    <section className="mt-6">
+                        <h3 className="mb-3 flex items-center gap-2 font-display text-sm font-semibold uppercase tracking-widest text-amber-400">
+                            <Undo2 className="h-4 w-4" />
+                            RTS History ({rtsEntries.length})
+                        </h3>
+                        <ol className="space-y-2">
+                            {rtsEntries.map((entry, i) => (
+                                <li key={entry.id} className="rounded-xs border border-amber-400/30 bg-well p-3">
+                                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                        <span className="font-display text-xs font-semibold uppercase tracking-wider text-amber-400">
+                                            RTS #{rtsEntries.length - i}
+                                        </span>
+                                        <span className="text-xs text-subtle">by {entry.user?.name ?? '—'}</span>
+                                    </div>
+                                    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                                        <dt className="uppercase tracking-wider text-subtle">Date Received</dt>
+                                        <dd className="text-fg">{formatDate(entry.received_on)}</dd>
+                                        <dt className="uppercase tracking-wider text-subtle">Received By</dt>
+                                        <dd className="text-fg">{entry.received_by_name ?? '—'}</dd>
+                                        <dt className="uppercase tracking-wider text-subtle">RTS Unit</dt>
+                                        <dd className="text-fg">{entry.unit_name ?? '—'}</dd>
+                                        <dt className="uppercase tracking-wider text-subtle">RTS Date</dt>
+                                        <dd className="text-fg">{formatDate(entry.acted_on)}</dd>
+                                        <dt className="uppercase tracking-wider text-subtle">Comment</dt>
+                                        <dd className="whitespace-pre-wrap text-fg">{entry.note ?? '—'}</dd>
+                                    </dl>
+                                </li>
+                            ))}
+                        </ol>
+                    </section>
+                )}
+
+                {routing.length > 0 && (
+                    <section className="mt-6">
+                        <h3 className="mb-3 flex items-center gap-2 font-display text-sm font-semibold uppercase tracking-widest text-subtle">
+                            <Route className="h-4 w-4" />
+                            Routing trail
+                        </h3>
+                        <ol className="space-y-2">
+                            {routing.map((step) => (
+                                <li key={step.id} className="rounded-xs border border-line bg-well p-3">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <span className="flex items-center gap-2">
+                                            <span className="font-display text-sm font-semibold text-fg">
+                                                {step.action_label}
+                                            </span>
+                                            <LddapStatusBadge status={step.to_status} />
+                                        </span>
+                                        <span className="text-xs text-subtle">
+                                            {step.user?.name ?? '—'} · {formatDate(step.acted_on ?? step.created_at)}
+                                        </span>
+                                    </div>
+                                    {(step.counterparty || step.unit_name) && (
+                                        <p className="mt-1.5 text-xs text-muted">
+                                            {step.action === 'forwarded' ? 'To' : 'From'}{' '}
+                                            {[step.counterparty, step.unit_name].filter(Boolean).join(' · ')}
+                                        </p>
+                                    )}
+                                    {step.note && <p className="mt-1.5 text-sm text-fg">{step.note}</p>}
+                                </li>
+                            ))}
+                        </ol>
                     </section>
                 )}
 
@@ -317,7 +442,52 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
                     </section>
                 )}
 
-                {canEdit && !pendingRequest && (
+                {/* Every edit through "Edit LDDAP Record": who, when, and what changed. */}
+                {edits.length > 0 && (
+                    <section className="mt-6">
+                        <h3 className="mb-3 flex items-center gap-2 font-display text-sm font-semibold uppercase tracking-widest text-subtle">
+                            <PencilLine className="h-4 w-4" />
+                            Edit history
+                        </h3>
+                        <ol className="space-y-2">
+                            {edits.map((edit) => (
+                                <li key={edit.id} className="rounded-xs border border-line bg-well p-3 text-sm">
+                                    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                        <span className="font-medium text-fg">{edit.user?.name ?? '—'}</span>
+                                        <span className="text-xs text-subtle">{formatDateTime(edit.created_at)}</span>
+                                    </div>
+                                    <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                                        {Object.entries(edit.changes).map(([field, change]) => (
+                                            <div key={field} className="contents">
+                                                <dt className="uppercase tracking-wider text-subtle">{field.replaceAll('_', ' ')}</dt>
+                                                <dd className="min-w-0 break-words text-muted">
+                                                    <span className="line-through">{change.from ?? '—'}</span>
+                                                    {' → '}
+                                                    <span className="text-fg">{change.to ?? '—'}</span>
+                                                </dd>
+                                            </div>
+                                        ))}
+                                    </dl>
+                                </li>
+                            ))}
+                        </ol>
+                    </section>
+                )}
+
+                {canOpenEdit && !pendingRequest && (
+                    <section className="mt-6 border-t border-line pt-5">
+                        <p className="mb-3 text-sm text-muted">
+                            Open the record in the register form to change any of its details. Every change is
+                            kept with who made it and when. The check number is never part of it.
+                        </p>
+                        <button className="btn btn-outline w-full" onClick={() => setEditing(true)}>
+                            <PencilLine className="h-4 w-4" />
+                            Edit
+                        </button>
+                    </section>
+                )}
+
+                {canCorrect && !pendingRequest && (
                     <section className="mt-6 border-t border-line pt-5">
                         {requesting ? (
                             <form onSubmit={handleRequestUpdate} className="space-y-3">
@@ -429,26 +599,32 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
                                 <p className="mb-3 text-sm text-muted">
                                     {direct
                                         ? 'Correct the details yourself — the change takes effect immediately, and you must record why.'
-                                        : lddap.awaits_compliance
-                                          ? 'Update the details to address the remark above. An admin reviews and approves the change — approving it is the sign-off.'
-                                          : 'Spotted a mistake in the details above? Propose a correction — an admin will review and apply it.'}
+                                        : 'Spotted a mistake in the details above? Propose a correction — an admin will review and apply it.'}
                                 </p>
-                                <button
-                                    className={`btn w-full ${lddap.awaits_compliance && isStaff ? 'btn-primary' : 'btn-outline'}`}
-                                    onClick={() => setRequesting(true)}
-                                >
+                                <button className="btn btn-outline w-full" onClick={() => setRequesting(true)}>
                                     <PencilLine className="h-4 w-4" />
-                                    {direct
-                                        ? 'Edit details'
-                                        : lddap.awaits_compliance
-                                          ? 'Edit Details'
-                                          : 'Request an update'}
+                                    {direct ? 'Correct details' : 'Request an update'}
                                 </button>
                             </>
                         )}
                     </section>
                 )}
             </div>
+
+            {/* The edit dialog sits on top; its overlay clicks must not fall through to this one. */}
+            {editing && (
+                <div onClick={(e) => e.stopPropagation()}>
+                    <LddapRegisterModal
+                        lddap={lddap}
+                        onClose={() => setEditing(false)}
+                        onSaved={() => {
+                            setEditing(false);
+                            onChanged();
+                            onClose();
+                        }}
+                    />
+                </div>
+            )}
         </div>
     );
 }

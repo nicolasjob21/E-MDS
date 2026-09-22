@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { FilePlus2, ListChecks, CheckCircle2, Eye } from 'lucide-react';
 import { AcicApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
@@ -27,6 +27,10 @@ const TABS: { key: Tab; label: string }[] = [
     { key: 'forwarded', label: 'Forwarded' },
     { key: 'completed', label: 'Completed' },
 ];
+
+function tabFrom(value: string | null): Tab {
+    return TABS.some((t) => t.key === value) ? (value as Tab) : 'all';
+}
 
 /**
  * What an ACIC is carrying. One sequence serves both record types, so an ACIC is a Cheque ACIC,
@@ -70,7 +74,9 @@ export default function AcicsPage() {
     const isTeller = user?.role === 'teller';
     const canManage = isAdmin || user?.role === 'staff';
 
-    const [tab, setTab] = useState<Tab>('all');
+    // `?tab=` picks the tab, so the dashboard's tiles land on the right list.
+    const [params] = useSearchParams();
+    const [tab, setTab] = useState<Tab>(() => tabFrom(params.get('tab')));
     const [page, setPage] = useState(1);
     const [data, setData] = useState<Paginated<Acic> | null>(null);
     const [nextNumber, setNextNumber] = useState<number | null>(null);
@@ -108,6 +114,11 @@ export default function AcicsPage() {
     useEffect(() => {
         void load();
     }, [load]);
+
+    useEffect(() => {
+        setTab(tabFrom(params.get('tab')));
+        setPage(1);
+    }, [params]);
 
     return (
         <div>

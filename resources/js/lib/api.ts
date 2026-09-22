@@ -3,10 +3,15 @@ import type {
     AppNotification,
     Cheque,
     ChequeDetails,
+    ChequePrintData,
     ChequeLog,
+    Dashboard,
     Lddap,
     LddapDraft,
-    LddapReviewOutcome,
+    LddapEdit,
+    LddapListFilters,
+    LddapOptions,
+    LddapRoutingStep,
     LddapSeries,
     LddapUpdateRequest,
     ProposedLddapUpdate,
@@ -15,6 +20,7 @@ import type {
     Acic,
     AcicSeries,
     Paginated,
+    Payee,
     ReviewOutcome,
     Summary,
     UpdateRequest,
@@ -77,6 +83,22 @@ export const AuthApi = {
         const { data } = await http.get('/me');
         return data.data as User;
     },
+    /** Profile: the signed-in user's own full name and email. */
+    async updateProfile(payload: { name: string; email: string | null }): Promise<User> {
+        await ensureCsrf();
+        const { data } = await http.put('/me', payload);
+        return data.data as User;
+    },
+    /** Change Password. The session stays signed in afterwards. */
+    async changePassword(payload: {
+        current_password: string;
+        password: string;
+        password_confirmation: string;
+    }): Promise<string> {
+        await ensureCsrf();
+        const { data } = await http.put('/me/password', payload);
+        return (data.data as { message: string }).message;
+    },
 };
 
 export const ChequeApi = {
@@ -98,6 +120,11 @@ export const ChequeApi = {
             ...details,
         });
         return data.data as Cheque;
+    },
+    /** The cheque view's data. Refused unless the cheque is approved. */
+    async printData(chequeId: number): Promise<ChequePrintData> {
+        const { data } = await http.get(`/cheques/${chequeId}/print`);
+        return data.data as ChequePrintData;
     },
     async confirmReceipt(chequeId: number): Promise<Cheque> {
         await ensureCsrf();
@@ -234,23 +261,92 @@ export const AcicApi = {
         const { data } = await http.post(`/acics/${id}/forward`, body);
         return data.data as Acic;
     },
-    /** Put completed LDDAP records on this ACIC. */
-    async assignLddaps(id: number, lddapIds: number[]): Promise<Acic> {
+    /**
+     * Put approved LDDAP records on this ACIC. Each takes the next check number; the previewed
+     * block goes along so a stale preview is refused rather than silently renumbered.
+     */
+    async assignLddaps(id: number, lddapIds: number[], expectedCheckNos: number[] = []): Promise<Acic> {
         await ensureCsrf();
-        const { data } = await http.post(`/acics/${id}/lddaps`, { lddap_ids: lddapIds });
+        const { data } = await http.post(`/acics/${id}/lddaps`, {
+            lddap_ids: lddapIds,
+            expected_check_nos: expectedCheckNos,
+        });
         return data.data as Acic;
     },
 };
 
+
+export const PayeeApi = {
+    /** Registered payees matching a name or account number. Empty term lists the first page. */
+    async search(term: string): Promise<Payee[]> {
+        const { data } = await http.get('/payees', { params: term ? { search: term } : {} });
+        return data.data as Payee[];
+    },
+    /** One payee with its accounts — pre-fills the picker in "Edit LDDAP Record". */
+    async get(id: number): Promise<Payee> {
+        const { data } = await http.get(`/payees/${id}`);
+        return data.data as Payee;
+    },
+};
+
+/** The register/edit form's fields as `POST /lddaps` and `PUT /lddaps/{id}` take them. */
+function lddapPayload(draft: LddapDraft): Record<string, unknown> {
+    return {
+        lddap_no: draft.lddap_no.trim(),
+        nca_no: draft.nca_no.trim(),
+        orb_no: draft.orb_no.trim(),
+        dv_no: draft.dv_no.trim(),
+        nature_of_payment: draft.nature_of_payment,
+        obj_no: draft.obj_no.trim() || null,
+        unit_id: draft.unit_id ? Number(draft.unit_id) : null,
+        check_date: draft.check_date,
+        payee_id: draft.payee?.id ?? null,
+        payee_account_id: draft.payee_account_id,
+        acic_ref: draft.acic_ref.trim() || null,
+        gross_amount: draft.gross_amount,
+        wtax_1: draft.wtax['0.01'] || '0',
+        wtax_2: draft.wtax['0.02'] || '0',
+        wtax_3: draft.wtax['0.03'] || '0',
+        wtax_5: draft.wtax['0.05'] || '0',
+        vat_1: draft.vat['0.01'] || '0',
+        vat_2: draft.vat['0.02'] || '0',
+        vat_3: draft.vat['0.03'] || '0',
+        vat_5: draft.vat['0.05'] || '0',
+        vat_10: draft.vat['0.10'] || '0',
+        vat_12: draft.vat['0.12'] || '0',
+        vat_30: draft.vat['0.30'] || '0',
+        retention: draft.retention || '0',
+        liquidated_damages: draft.liquidated_damages || '0',
+        advance_payment: draft.advance_payment || '0',
+        fwd_to_lbp_at: draft.fwd_to_lbp_at || null,
+        date_loaded: draft.date_loaded || null,
+        note: draft.note.trim() || null,
+        remarks: draft.remarks.trim() || null,
+    };
+}
+
 export const LddapApi = {
-    /** `search` matches the LDDAP number, OBJ number, payee, check number or ACIC number. */
-    async list(status = 'all', page = 1, perPage = 50, search = ''): Promise<Paginated<Lddap>> {
+    /**
+     * The table, filtered. `search` matches part of the LDDAP number or check number, or the
+     * gross amount exactly (typed with or without ₱ and commas); `status` and `nature` take
+     * "all" or one value. The filters combine.
+     */
+    async list(filters: LddapListFilters): Promise<Paginated<Lddap>> {
         const { data } = await http.get('/lddaps', {
-            params: { status, page, per_page: perPage, ...(search ? { search } : {}) },
+            params: {
+                status: filters.status || 'all',
+                nature: filters.nature || 'all',
+                page: filters.page ?? 1,
+                per_page: filters.perPage ?? 50,
+                ...(filters.search ? { search: filters.search } : {}),
+            },
         });
         return data as Paginated<Lddap>;
     },
-    /** The next `count` check numbers in the LDDAP series, lowest unused first. */
+    /**
+     * The block of `count` consecutive unused check numbers a batch of that size would take —
+     * empty when the series holds no run that long.
+     */
     async nextNumbers(count: number): Promise<NextCheckNumbers> {
         const { data } = await http.get('/lddaps/next-numbers', { params: { count } });
         return data.data as NextCheckNumbers;
@@ -260,43 +356,111 @@ export const LddapApi = {
         const { data } = await http.get('/lddaps/series');
         return data.data as LddapSeries;
     },
-    /** Completed LDDAPs not yet on any ACIC. */
+    /** Approved LDDAPs not yet on any ACIC. */
     async linkable(): Promise<Lddap[]> {
         const { data } = await http.get('/lddaps/linkable');
         return data.data as Lddap[];
     },
     /**
-     * Register LDDAP records, each taking the next check number in the series. `startAt` is the
-     * number the batch is expected to start at — the server rejects the request if the series has
-     * moved on since the preview, so a number can never be skipped. The check date is stamped
-     * server-side from the day of registration.
+     * Register one LDDAP record. It carries no check number — that arrives when the approved
+     * record is put on an ACIC.
      */
-    async consumeCheckNumbers(startAt: number, rows: LddapDraft[]): Promise<Lddap[]> {
+    async register(draft: LddapDraft): Promise<Lddap> {
         await ensureCsrf();
-        const { data } = await http.post('/lddaps/use-cheque', {
-            start_at: startAt,
-            rows: rows.map((row) => ({
-                lddap_no: row.lddap_no.trim(),
-                obj_no: row.obj_no.trim() || null,
-                payee_name: row.payee_name.trim() || null,
-                amount: row.amount,
-            })),
+        const { data } = await http.post('/lddaps', lddapPayload(draft));
+        return data.data as Lddap;
+    },
+    /**
+     * Edit LDDAP Record: the same form, saved onto a Registered or RTS record. The check
+     * number is not part of it.
+     */
+    async edit(id: number, draft: LddapDraft): Promise<Lddap> {
+        await ensureCsrf();
+        const { data } = await http.put(`/lddaps/${id}`, lddapPayload(draft));
+        return data.data as Lddap;
+    },
+    /** Every edit the record has had, newest first. */
+    async editHistory(id: number): Promise<LddapEdit[]> {
+        const { data } = await http.get(`/lddaps/${id}/edit-history`);
+        return data.data as LddapEdit[];
+    },
+    /** Admin/staff: Forward — Registered → For Out. */
+    async forward(
+        id: number,
+        details: { forward_to: string; unit_id: number; date_forwarded: string; note: string },
+    ): Promise<Lddap> {
+        await ensureCsrf();
+        const { data } = await http.post(`/lddaps/${id}/forward`, {
+            ...details,
+            note: details.note.trim() || null,
         });
-        return data.data as Lddap[];
+        return data.data as Lddap;
+    },
+    /** Admin/staff: Receive — For Out → Returned for ACIC. */
+    async receiveBack(
+        id: number,
+        details: { unit_id: number; date_received: string; note: string },
+    ): Promise<Lddap> {
+        await ensureCsrf();
+        const { data } = await http.post(`/lddaps/${id}/receive-back`, {
+            ...details,
+            note: details.note.trim() || null,
+        });
+        return data.data as Lddap;
+    },
+    /** Admin only: Approve a record Returned for ACIC, with an optional note. */
+    async approve(id: number, note: string): Promise<Lddap> {
+        await ensureCsrf();
+        const { data } = await http.post(`/lddaps/${id}/approve`, { note: note.trim() || null });
+        return data.data as Lddap;
+    },
+    /** Admin only: Cancel a record Returned for ACIC. Canceled By is the signed-in user. */
+    async cancel(id: number, details: { date_canceled: string; note: string }): Promise<Lddap> {
+        await ensureCsrf();
+        const { data } = await http.post(`/lddaps/${id}/cancel`, details);
+        return data.data as Lddap;
+    },
+    /** Admin only: RTS — Returned for ACIC → RTS, with who received it, the unit, the date and why. */
+    async rts(
+        id: number,
+        details: { received_on: string; received_by: string; unit_id: number; rts_date: string; note: string },
+    ): Promise<Lddap> {
+        await ensureCsrf();
+        const { data } = await http.post(`/lddaps/${id}/rts`, details);
+        return data.data as Lddap;
+    },
+    /** The record's routing trail, oldest first. */
+    async routingHistory(id: number): Promise<LddapRoutingStep[]> {
+        const { data } = await http.get(`/lddaps/${id}/routing-history`);
+        return data.data as LddapRoutingStep[];
+    },
+    /**
+     * Admin/staff: "Assign LDDAP to ACIC" by ACIC number. `expectedCheckNos` is the block the
+     * dialog previewed, in the same order as `lddapIds`; the server refuses the save if it is
+     * no longer the block about to be issued.
+     */
+    async assignToAcicNumber(
+        acicNo: number,
+        lddapIds: number[],
+        expectedCheckNos: number[],
+    ): Promise<Acic> {
+        await ensureCsrf();
+        const { data } = await http.post('/lddaps/assign-acic', {
+            acic_no: acicNo,
+            lddap_ids: lddapIds,
+            expected_check_nos: expectedCheckNos,
+        });
+        return data.data as Acic;
+    },
+    /** The select options the register dialog needs: every nature of payment, every unit. */
+    async options(): Promise<LddapOptions> {
+        const { data } = await http.get('/lddaps/options');
+        return data.data as LddapOptions;
     },
     /** Teller only: confirm an LDDAP has been received. */
     async confirmReceipt(id: number): Promise<Lddap> {
         await ensureCsrf();
         const { data } = await http.post(`/lddaps/${id}/receive`);
-        return data.data as Lddap;
-    },
-    /** Admin only: record the review outcome (completed | compliance | cancelled). */
-    async review(id: number, status: LddapReviewOutcome, reviewNote?: string): Promise<Lddap> {
-        await ensureCsrf();
-        const { data } = await http.post(`/lddaps/${id}/review`, {
-            status,
-            review_note: reviewNote ?? null,
-        });
         return data.data as Lddap;
     },
     /** Staff only: propose corrected details for an LDDAP, with a reason. */
@@ -374,6 +538,13 @@ export const UpdateRequestApi = {
         await ensureCsrf();
         const { data } = await http.post(`/update-requests/${id}/reject`, { review_note: reviewNote ?? null });
         return data.data as UpdateRequest;
+    },
+};
+
+export const DashboardApi = {
+    async show(): Promise<Dashboard> {
+        const { data } = await http.get('/dashboard');
+        return data.data as Dashboard;
     },
 };
 

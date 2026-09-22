@@ -3,7 +3,6 @@
 namespace App\Services;
 
 use App\Enums\ChequeAction;
-use App\Enums\LddapStatus;
 use App\Enums\RequestStatus;
 use App\Models\Lddap;
 use App\Models\LddapUpdateRequest;
@@ -33,10 +32,7 @@ class LddapUpdateRequestService
      */
     public function create(User $staff, Lddap $lddap, array $proposed, string $reason): LddapUpdateRequest
     {
-        // A Returned record belongs to the staff member who used the number: the admin handed
-        // *them* the remark, and they are the one notified. Anyone else correcting it would be
-        // answering a question they were never asked.
-        $this->assertOwnsReturned($staff, $lddap);
+        $this->assertEditable($lddap);
 
         $pendingExists = $lddap->updateRequests()
             ->where('status', RequestStatus::Pending)
@@ -92,23 +88,18 @@ class LddapUpdateRequestService
     }
 
     /**
-     * A Returned LDDAP may only be corrected by the staff member it was returned to — the one
-     * who used the check number in the first place.
+     * A canceled LDDAP is closed: it cannot be edited, forwarded or assigned.
      *
      * @throws ValidationException
      */
-    private function assertOwnsReturned(User $staff, Lddap $lddap): void
+    private function assertEditable(Lddap $lddap): void
     {
-        if (! $lddap->status->awaitsCompliance() || $lddap->used_by === $staff->id) {
+        if ($lddap->status->isEditable()) {
             return;
         }
 
-        $owner = $lddap->usedBy?->name;
-
         throw ValidationException::withMessages([
-            'lddap' => "LDDAP {$lddap->lddap_no} was returned to "
-                .($owner !== null ? $owner : 'the staff member who used it')
-                .'. Only they can update it.',
+            'lddap' => "LDDAP {$lddap->lddap_no} is canceled and can no longer be edited.",
         ]);
     }
 
@@ -126,6 +117,8 @@ class LddapUpdateRequestService
      */
     public function applyDirect(User $admin, Lddap $lddap, array $proposed, string $reason): LddapUpdateRequest
     {
+        $this->assertEditable($lddap);
+
         $pendingExists = $lddap->updateRequests()
             ->where('status', RequestStatus::Pending)
             ->exists();
@@ -215,22 +208,14 @@ class LddapUpdateRequestService
             $before = $this->snapshot($lddap);
             $now = Carbon::now();
 
-            // Approving a correction on a Returned record *is* the sign-off:
-            // the deficiency the remark described has been fixed and accepted, so the record
-            // moves straight to Approved rather than waiting on a second review.
-            $resolvesCompliance = $lddap->status === LddapStatus::Compliance;
-
+            // A correction changes the details only; the record's place in the routing is
+            // untouched — an RTS'd record is forwarded again once it is right.
             $lddap->update([
                 'lddap_no' => $request->proposed_lddap_no,
                 'obj_no' => $request->proposed_obj_no,
                 'payee_name' => $request->proposed_payee_name,
                 'amount' => $request->proposed_amount,
-            ] + ($resolvesCompliance ? [
-                'status' => LddapStatus::Approved,
-                'reviewed_by' => $admin->id,
-                'reviewed_at' => $now,
-                'review_note' => $note,
-            ] : []));
+            ]);
 
             $request->update([
                 'status' => RequestStatus::Approved,
@@ -246,15 +231,13 @@ class LddapUpdateRequestService
                 ChequeAction::ApprovedLddapUpdate,
                 null,
                 "Approved update to LDDAP {$lddap->lddap_no}."
-                    .($changes !== '' ? " Changes: {$changes}." : ' No field changes.')
-                    .($resolvesCompliance ? ' Compliance resolved — the record is now Approved.' : ''),
+                    .($changes !== '' ? " Changes: {$changes}." : ' No field changes.'),
             );
 
             $request->requestedBy?->notify(new ActivityNotification(
                 kind: 'approved',
                 title: "Update approved · LDDAP {$lddap->lddap_no}",
                 message: "{$admin->name} approved your update to LDDAP {$lddap->lddap_no}."
-                    .($resolvesCompliance ? ' It is now Approved.' : '')
                     .($note ? " Note: {$note}" : ''),
                 url: '/lddaps',
             ));

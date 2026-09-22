@@ -29,6 +29,37 @@ final class AmountInWords
     /** @var list<string> */
     private const SCALES = ['', 'THOUSAND', 'MILLION', 'BILLION', 'TRILLION'];
 
+    /**
+     * The cheque's wording: Title Case, centavos as a fraction, closed with "Only" so nothing
+     * can be appended —
+     *
+     *   185369.86 → "One Hundred Eighty-Five Thousand Three Hundred Sixty-Nine Pesos and 86/100 Only"
+     *   1000.00   → "One Thousand Pesos Only"
+     */
+    public static function cheque(float|int|string $amount): string
+    {
+        $total = (int) round(((float) $amount) * 100);
+        $pesos = intdiv($total, 100);
+        $centavos = $total % 100;
+
+        $words = self::titleCase(self::whole($pesos)).($pesos === 1 ? ' Peso' : ' Pesos');
+
+        if ($centavos > 0) {
+            $words .= ' and '.str_pad((string) $centavos, 2, '0', STR_PAD_LEFT).'/100';
+        }
+
+        return $words.' Only';
+    }
+
+    /** "ONE HUNDRED EIGHTY-FIVE" → "One Hundred Eighty-Five"; hyphenated parts each capitalised. */
+    private static function titleCase(string $upper): string
+    {
+        return implode(' ', array_map(
+            fn (string $word) => implode('-', array_map('ucfirst', explode('-', strtolower($word)))),
+            explode(' ', $upper),
+        ));
+    }
+
     public static function pesos(float|int|string $amount): string
     {
         // Round to centavos first, so 0.005 cases don't split between the two halves.

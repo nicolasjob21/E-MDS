@@ -10,9 +10,11 @@ use App\Http\Requests\UseChequeRequest;
 use App\Http\Resources\ChequeResource;
 use App\Models\Cheque;
 use App\Services\ChequeService;
+use App\Support\AmountInWords;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Validation\ValidationException;
 
 class ChequeController extends Controller
 {
@@ -95,6 +97,40 @@ class ChequeController extends Controller
         );
 
         return response()->json(['data' => new ChequeResource($cheque)]);
+    }
+
+    /**
+     * What the cheque view prints: the cheque's own fields, the amount spelled the cheque way,
+     * the account it is drawn on, and its references. Only an **approved** cheque has a view —
+     * nothing is printed before sign-off.
+     */
+    public function print(Cheque $cheque): JsonResponse
+    {
+        if (! $cheque->status->isApproved()) {
+            throw ValidationException::withMessages([
+                'cheque' => "Cheque #{$cheque->cheque_number} is {$cheque->status->label()} — only an approved cheque can be viewed and printed.",
+            ]);
+        }
+
+        $cheque->load('acic');
+
+        return response()->json([
+            'data' => [
+                'cheque_number' => $cheque->cheque_number,
+                'cheque_date' => $cheque->cheque_date?->toDateString(),
+                'payee_name' => $cheque->payee_name,
+                'amount' => $cheque->amount,
+                'amount_figures' => '₱'.number_format((float) $cheque->amount, 2, '.', ','),
+                'amount_in_words' => AmountInWords::cheque($cheque->amount),
+                // The account the office's cheques are drawn on.
+                'account_no' => config('acic.account_no'),
+                'bank_name' => config('acic.bank.name'),
+                'bank_branch' => config('acic.bank.branch'),
+                'acic_number' => $cheque->acic?->acic_number,
+                // A cheque carries no LDDAP number; the slot is here for the reference line.
+                'lddap_no' => null,
+            ],
+        ]);
     }
 
     /**

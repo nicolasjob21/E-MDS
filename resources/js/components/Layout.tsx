@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
     LayoutDashboard,
     ListChecks,
@@ -12,7 +12,6 @@ import {
     Hash,
     BookOpen,
     ChevronDown,
-    LogOut,
     Menu,
     X,
     ShieldCheck,
@@ -22,6 +21,7 @@ import {
 import { useAuth } from '../auth/AuthContext';
 import { ThemeToggle } from './ui';
 import NotificationsBell from './NotificationsBell';
+import UserMenu from './UserMenu';
 
 interface NavItem {
     to: string;
@@ -72,8 +72,7 @@ const COLLAPSE_KEY = 'cw-sidebar-collapsed';
 const GROUPS_KEY = 'cw-sidebar-groups';
 
 export default function Layout() {
-    const { user, isAdmin, logout } = useAuth();
-    const navigate = useNavigate();
+    const { isAdmin } = useAuth();
     const { pathname } = useLocation();
     const [open, setOpen] = useState(false); // mobile drawer
     const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === '1');
@@ -105,11 +104,6 @@ export default function Layout() {
     // When collapsed, these utilities hide labels / centre icons on desktop only (mobile drawer stays full).
     const hideOnCollapse = collapsed ? 'md:hidden' : '';
     const centreOnCollapse = collapsed ? 'md:justify-center md:px-0' : '';
-
-    async function handleLogout() {
-        await logout();
-        navigate('/login');
-    }
 
     return (
         <div className="min-h-screen md:flex">
@@ -240,18 +234,14 @@ export default function Layout() {
                     <div className="ml-auto flex items-center gap-3">
                         <NotificationsBell />
                         <ThemeToggle />
-                        <div className="hidden text-right sm:block">
-                            <div className="text-sm font-medium text-fg">{user?.name}</div>
-                            <div className="text-xs uppercase tracking-wider text-brandink">{user?.role}</div>
-                        </div>
-                        <button className="btn btn-outline" onClick={handleLogout}>
-                            <LogOut className="h-4 w-4" />
-                            <span className="hidden sm:inline">Sign out</span>
-                        </button>
+                        {/* Name → Profile · Change Password · Sign Out. */}
+                        <UserMenu />
                     </div>
                 </header>
 
-                <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 md:px-8">
+                {/* No max-width, just a modest gutter: the tables run nearly the full width of
+                    the viewport. Forms that want to stay narrow cap themselves. */}
+                <main className="w-full flex-1 px-5 py-8 md:px-8 lg:px-12">
                     <Outlet />
                 </main>
             </div>

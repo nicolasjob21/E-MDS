@@ -7,6 +7,8 @@ import { actionLabel, formatDateTime } from '../lib/format';
 const ACTIONS = [
     'login',
     'logout',
+    'updated_profile',
+    'changed_password',
     'used_cheque',
     'received_cheque',
     'reviewed_cheque',

@@ -4,7 +4,7 @@
 > workflows, routes, or data model), update this document and its flow-charts in the **same change**.
 > See [Maintaining this document](#maintaining-this-document).
 
-_Last reviewed against the code: 2026-09-09._
+_Last reviewed against the code: 2026-09-22._
 
 ---
 
@@ -63,6 +63,7 @@ flowchart LR
 | Capability | Admin | Staff | Teller |
 |---|:---:|:---:|:---:|
 | Sign in / view cheques & dashboard | ✓ | ✓ | ✓ |
+| Edit **own profile** (full name, email) / **change own password** | ✓ | ✓ | ✓ |
 | Use the next cheque | ✓ | ✓ | ✓ |
 | Confirm a used cheque as **received** | | | ✓ |
 | Request a **detail correction** (with reason) | | ✓ | |
@@ -75,7 +76,7 @@ flowchart LR
 | **Correct an LDDAP directly** (reason required) | ✓ | | |
 | **Use a check number** for LDDAP records | ✓ | ✓ | |
 | Confirm an LDDAP as **received** | | | ✓ |
-| **Review** an LDDAP (approved / returned / cancelled) | ✓ | | |
+| **Act** on an LDDAP (approved / RTS / cancel) | ✓ | | |
 | Assign approved LDDAPs to an ACIC | ✓ | ✓ | |
 | Open an ACIC / assign cheques to it | ✓ | ✓ | |
 | **Forward** an ACIC | ✓ | | |
@@ -85,6 +86,29 @@ flowchart LR
 
 Roles are defined in `app/Enums/UserRole.php` and enforced by the `admin` and `teller`
 middleware plus per-request authorization (e.g. staff-only requests).
+
+### The user menu
+
+The signed-in user's name in the header is a **dropdown trigger** (avatar initials on a phone,
+name and role from `sm` up, a chevron that turns when open). The panel beneath it, aligned to the
+right edge, holds a header with the full name and role, then **Profile**, **Change Password**,
+and — set apart — **Sign Out**. Clicking the name again, clicking outside, or Esc closes it;
+Enter/Space or an arrow key opens it, the arrows move between items, Esc returns focus to the
+name, and `aria-expanded` follows the state (`resources/js/components/UserMenu.tsx`).
+
+- **Sign Out** is a form submit that posts `POST /logout` with the XSRF token — not a link; a
+  `GET /logout` is a 405. The endpoint is unchanged.
+- **Profile** (`/profile`, `PUT /me`, `UpdateProfileRequest`): username and role read-only; the
+  user edits their **full name** and **email** (`users.email`, nullable, unique) and saves. The
+  header follows the new name at once. Logged as `updated_profile`.
+- **Change Password** (`/change-password`, `PUT /me/password`, `ChangePasswordRequest`):
+  *Current Password* (checked with the `current_password` rule — a wrong one is refused and
+  nothing changes), *New Password* and *Confirm New Password* (`confirmed`, different from the
+  current one, and the app's `Password::defaults()` rules — every failing rule is listed under
+  the field). The user **stays signed in**: `ProfileController::changePassword()` writes the
+  new hash back into the session (`password_hash_web`, the guard's HMAC of it — Sanctum's
+  `AuthenticateSession` compares against that on every request), so the same session goes on
+  working. Logged as `changed_password`; the page then shows a done view.
 
 ---
 
@@ -362,11 +386,12 @@ relation), the last two to `?status=`; the two parameters combine server-side, t
 lights only one at a time. A **Mixed** ACIC is listed under *both* category tabs, and an ACIC
 opened but not yet filled under neither.
 
-**Assign LDDAP to ACIC** on the LDDAP page works the same way through `LddapAssignModal`: it
-targets the **next number in the sequence**, opened on submit, and lists only approved LDDAPs not
-already on an ACIC. Unlike the cheque dialog it stays **multi-select** — many LDDAPs may share one
-ACIC — and shows the running total of the selection. It no longer offers a picker of existing
-ACICs.
+**Assign LDDAP to ACIC** (`LddapAssignModal`, on the LDDAP page beside **Add LDDAP**, and on the
+ACIC page) lists only approved LDDAPs not already on an ACIC, **multi-select** — many share one
+ACIC number. The user types the **ACIC #** (prefilled with the next in the series; it must be an
+existing open ACIC or that next number, never invented) and ticks records; a **Check No.**
+column previews the number each will take, in tick order. See [6c](#6c-lddap-ada-records) for
+the numbering and locking rules.
 
 **Assign cheque to ACIC** is the ACIC page's primary button. It opens `AcicUseModal` on the
 **next number in the sequence**, restricted to a **single** approved cheque (radio, not
@@ -534,22 +559,86 @@ The **Check No.** on this page comes from `lddap_checks`, a register that shares
 
 - The next number is always the **lowest unused** number in the series — never a random one, and
   never one out of order.
-- Numbers are handed out in **strict ascending order** within a batch: N LDDAP rows take the N
-  lowest unused numbers, matched in row order, so the preview beside each row in the modal is
-  exactly what the server assigns.
-- **A number is never skipped.** The caller must name the number the batch expects to start at
-  (`start_at`); a client working from a stale preview is rejected rather than jumping ahead.
-- **A block registered later, below numbers already in use, is used first.** Register 500–505,
-  use 500 and 501, then register 1–3: the next numbers handed out are 1, 2, 3 and only then 502.
+- Numbers are handed out **when records go on an ACIC** — never at registration — as a
+  **consecutive block**: N ticked records take the first run of N gap-free unused numbers,
+  searching up from the lowest, in the order ticked. Free numbers a longer batch had to skip
+  remain for a shorter one.
+- **A number is never skipped past for good**, and never issued twice. The caller sends the
+  block it previewed (`expected_check_nos`); a client working from a stale preview is rejected
+  by name rather than silently renumbered.
+- **A block registered later, below numbers already in use, is used first — when the batch
+  fits.** Register 500–505, use 500 and 501, then register 1–3: a batch of three takes 1, 2, 3;
+  a batch of four cannot, so it takes 502–505 and leaves 1–3 for later.
 - Selection happens under a `FOR UPDATE` lock, so two concurrent batches can never claim the same
   numbers, and `lddaps.lddap_check_id` is **unique**, so a number can never be held twice
   whatever happens above it.
-- A batch is **all-or-nothing** and capped at `LddapService::MAX_BATCH` (20) rows. One bad row —
-  a duplicate LDDAP number, an exhausted series — fails the whole request and releases nothing.
-- **`lddap_no` is unique**: the same document can never be registered against two check numbers,
-  and a repeat inside one batch is caught up front with a per-row error.
-- The **check date is not asked for**. An LDDAP is registered on the day its number is used, so
-  the date is stamped server-side alongside `used_at`.
+- **Registration is one record at a time.** Numbers, by contrast, go out in one locked batch
+  per ACIC assignment — however many records were ticked.
+- **`lddap_no` is unique**: the same document can never be registered twice — enforced by the
+  database index, the form request and a locked re-check in the service.
+- The **date of issue is entered** with the record (`check_date`, defaulting to today in the
+  dialog); a caller that omits it gets the day of registration.
+
+### What a record is registered with
+
+**Register LDDAP record** (`LddapRegisterModal`) collects one record's fields. There is **no
+check number field**: the number is issued when the approved record is put on an ACIC
+(`LddapAssignModal`). Every field but one is required (`LddapDetailsRequest` — the one form
+request behind both Register and Edit):
+
+| Field | Column | Notes |
+|---|---|---|
+| LDDAP Number | `lddap_no` | unique across the register |
+| NCA Number · ORB Number · DV Number | `nca_no` · `orb_no` · `dv_no` | the references the disbursement is drawn against |
+| Nature of Payment | `nature_of_payment` | `NatureOfPayment` enum; offered in caps, e.g. **PAYROLL / PERSONAL CLAIMS**, **LOCAL TRAVEL**, **POL** |
+| UACS Object Code | `obj_no` | *optional*; the same column that always held OBJ No. — it is what prints as OBJ CODE on the ACIC |
+| Unit Name | `unit_id` → `units` | select, from the `units` reference table |
+| Date Issued | `check_date` | `type="date"`, defaults to today |
+| Payee | `payee_id` → `payees` | searchable lookup by name **or account number**; results in a table (Payee · Account Number · **Select**) |
+| Account Number | `payee_account_id` → `payee_accounts` | select of the payee's accounts as `account number – bank`; **auto-picked when there is only one** |
+| ACIC # | `acic_ref` | *optional*; the number written on the form — distinct from `acic_id`, the ACIC it is later put on |
+| Gross Amount | `gross_amount` | `decimal(14,2)` |
+| W/TAX 0.01 · 0.02 · 0.03 · 0.05 | `wtax_1` … `wtax_5` | `decimal(14,2)`, default 0 |
+| VAT 0.01 · 0.02 · 0.03 · 0.05 · 0.10 · 0.12 · 0.30 | `vat_1` … `vat_30` | `decimal(14,2)`, default 0 |
+| Retention · Liquidated Damages · Advance Payment | `retention` · `liquidated_damages` · `advance_payment` | `decimal(14,2)`, default 0 |
+| FWD to LBP · Date Loaded | `fwd_to_lbp_at` · `date_loaded` | *optional* dates |
+| Note · Remarks | `note` · `remarks` | *optional* |
+
+The dialog groups these as **Details · Payee · W/TAX · VAT · Deductions · Dates · Notes**, with a
+live **Net payable** line between Deductions and Dates.
+
+**Money.** Every amount is a `decimal(14, 2)` column and is handled server-side as a decimal
+string through `App\Support\Money` (bcmath) — never a float, so `0.10 + 0.20` is `0.30` and
+`2.675` rounds to `2.68`. **`amount` is the net payable**: gross less every W/TAX, VAT and
+deduction, derived in `LddapService::register()` and refused if it would not be positive. It
+keeps its old meaning downstream — it is what the ACIC prints and totals. Records that predate
+the breakdown were backfilled with `gross_amount = amount`.
+
+**The tax rule.** Gross amounts are VAT-inclusive, so each rate button computes
+`(gross ÷ 1.12) × rate`, rounded to two decimals — `App\Support\Tax::withheld()` is the tested
+reference, mirrored client-side in `resources/js/lib/tax.ts`. Clicking a rate fills its amount
+and marks the rate **active**; changing the gross recomputes every active rate in both grids.
+Typing in an amount keeps it and drops the rate from the active set, so a manual figure is never
+silently overwritten. Amounts default to 0 and stay editable.
+
+- **The payee is chosen, not typed.** `GET /payees?search=` matches registered payees by name
+  or any of their account numbers (case-insensitive, capped at 15) and returns each with its
+  `accounts` (`account_no`, `bank`, `label`). A payee may hold **several accounts**
+  (`payee_accounts`); the form's Account Number select offers them and picks a lone one
+  automatically, and the server does the same when `payee_account_id` is omitted for a
+  single-account payee. An account that is not the chosen payee's own is refused. On registration
+  the payee's **name, account number and bank are copied** onto the record (`payee_name`,
+  `payee_account_no`, `payee_bank`), so an LDDAP reads the same forever even if the payee or the
+  account is later edited.
+- `GET /lddaps/options` serves the two selects in one call: every nature of payment
+  (`value` + caps `label`) and every unit on file, name order.
+- **Units and payees are reference lists** (`units`, `payees`) with no admin screen yet — they
+  are populated by the seeder (sample entries) or directly. The dialog says so when either is
+  empty. Staff **corrections** still cover the original four fields (LDDAP No., UACS code, payee
+  name, amount); the new references are set at registration.
+- The LDDAP table shows the references stacked in one **References** column (NCA / ORB / DV),
+  plus **Nature**, **Unit** and **UACS Code**, with the payee's account number beneath the payee
+  name; the list search matches all of them.
 
 ### Lifecycle
 
@@ -558,29 +647,116 @@ lifecycle step for step.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Used: takes the lowest unused check number
-    Used --> Received: teller confirms receipt
-    Used --> Approved: admin review
-    Received --> Approved: admin review
-    Used --> Returned: admin review (note required)
-    Received --> Returned: admin review (note required)
-    Returned --> Approved: reviewed again after fixing
-    Returned --> Cancelled: reviewed again
-    Used --> Cancelled: admin review
-    Received --> Cancelled: admin review
+    ForOut: For Out
+    ReturnedForAcic: Returned for ACIC
+    [*] --> Registered: "Add LDDAP"
+    Registered --> ForOut: Forward
+    ForOut --> ReturnedForAcic: Receive
+    ReturnedForAcic --> Approved: Action · Approved
+    ReturnedForAcic --> RTS: Action · RTS (own form, comment required)
+    RTS --> ForOut: (edit) then Forward again
+    ReturnedForAcic --> Canceled: Action · Cancel (own confirmation, reason required)
+    Approved --> Approved: put on an ACIC — takes the next check number
     Approved --> [*]: eligible for an ACIC
-    Cancelled --> [*]
+    Canceled --> [*]: closed, read-only; LDDAP number stays used
 ```
 
+- **Registered** — created through **Add LDDAP** (`POST /lddaps`, admin/staff): **one record
+  per submission**, no check number. The LDDAP number is unique (`lddaps_lddap_no_unique` at the
+  database, `Rule::unique` in the form request, a locked re-check in `LddapService::register()`),
+  and a duplicate is refused by name.
+- **For Out** — the **Forward** action on a Registered record (`POST /lddaps/{lddap}/forward`,
+  admin/staff): *Forward To*, *Unit Name* (select), *Date Forwarded*, *Note*; *Forwarded By* is
+  the signed-in user. Stored on the record (`forward_to`, `forward_unit_id`, `forwarded_by`,
+  `date_forwarded`) and in the trail.
+- **Returned for ACIC** — the **Receive** action on a For Out record
+  (`POST /lddaps/{lddap}/receive-back`, admin/staff): *From Unit Name* (select), *Date Received*,
+  *Note*; *Received By* is the signed-in user. Stored as `return_unit_id`, `returned_by`,
+  `date_returned`.
+- **Action** — on a Returned for ACIC record, admin only. Above the buttons the dialog shows
+  **the essentials of the record** (`LddapRecordDetails`, `compact`): LDDAP No., DV No., nature
+  of payment, unit, date issued; the payee with account and bank; then the money — gross, only
+  the W/TAX and VAT rates and deductions that actually apply, and **Net payable** as gross −
+  withheld — plus the registration note if any. *Show every registered detail* expands it to
+  the full record in the register form's sections (**LDDAP Details**, **Payee**, **W/TAX** and
+  **VAT** with every rate, **Deductions**, **Net payable**, **Notes**), which is also what the
+  record's detail dialog shows. Three buttons:
+  - **Approved** (`POST /lddaps/{lddap}/approve`) — signed off; now offered by **Assign LDDAP to
+    ACIC**.
+  - **RTS** (`POST /lddaps/{lddap}/rts`) — Return to Sender, a status of its own with an **amber**
+    badge. Taken through its own form: *Date Received*, *Received By*, *RTS Unit* (select), *RTS
+    Date* and a **required Comment**. Not a verdict — nothing is stamped as reviewed. An RTS
+    record **can be edited** (staff correction or admin direct edit — details only, the status
+    stays RTS) and then **forwarded again** with the same Forward fields, back to For Out, on
+    round the routing once more. **Every RTS is its own history row** (`received_by_name`,
+    `received_on`, `unit_id`, `acted_on`, `note`); nothing is overwritten, so a record returned
+    three times keeps all three. The list carries `rts_count`, shown as an **RTS: n** badge
+    beside the status in the table and the record; the record's **RTS History** section lists
+    every return newest first — Date Received · Received By · RTS Unit · RTS Date · Comment —
+    and is hidden when there has been none.
+  - **Cancel** (`POST /lddaps/{lddap}/cancel`) — closed for good, through its own
+    confirmation dialog: *Canceled By* (the signed-in admin, read-only), *Date Canceled*
+    (defaults to today) and a **required Reason**. Stored as `canceled_by`, `date_canceled` and
+    `cancel_reason` (the reason is also the review note, and `reviewed_by` / `reviewed_at` are
+    stamped, so the audit reads the same as any other outcome). The status becomes
+    **Canceled** — its own red badge and its own **Canceled** filter tab. From then on the
+    record is **read-only**: no Edit, Forward, RTS, Approve or Assign is offered, and the server
+    refuses every routing step, any correction (staff request or admin direct edit) and any ACIC
+    assignment — a canceled record is never listed in **Assign LDDAP to ACIC**. **The LDDAP
+    number stays used**: it cannot be registered again. The record shows a **Cancellation
+    Details** section — Canceled By · Date Canceled · Reason — only when canceled.
+- **Only the next valid step is ever allowed.** `LddapStatus::canForward()` (Registered *or*
+  RTS), `canReceive()` and `awaitsAction()` name it, the resource exposes them (`can_forward`, `can_receive`,
+  `awaits_action`), the table offers only that button, and `LddapService::assertStep()` refuses
+  anything else server-side with the record's actual status in the message. A pending correction
+  holds the record at every step.
+- **Every step is a history entry.** `lddap_routing_history` records the action, the statuses
+  either side, the user, the unit and counterparty, the date and the note — appended by
+  `LddapService::trail()` on registration and each step, readable at
+  `GET /lddaps/{lddap}/routing-history`, and shown on the record as its **Routing trail**.
+- **The old "Returned" status is gone**, together with `returned_from_routing` and the legacy
+  `used` / `received`. The migration
+  `2026_09_22_000000_route_lddaps_through_for_out_and_returned_for_acic` remaps every record on
+  those statuses to **Returned for ACIC** — awaiting the admin's action, check numbers intact —
+  through a public `remap()` that the test suite exercises directly. Approving a correction no
+  longer moves a record; the correction path now runs through RTS.
+- **"Cancelled" is spelt `canceled`** since the Cancel rework. The migration
+  `2026_09_22_000200_add_cancellation_details_to_lddaps` adds the three cancellation columns and,
+  through its own public `remap()`, moves every record and history row on the old `cancelled`
+  value to `canceled`, back-filling *Canceled By / Date Canceled / Reason* from the review stamp
+  the old Cancel left.
+- **Assign LDDAP to ACIC** is when the check number arrives. Approved records with no ACIC are
+  listed; the user ticks one or more and names the ACIC number; on save every ticked record
+  goes on that ACIC and the batch takes a **consecutive block** of check numbers:
+  - N records take numbers k … k+N−1 with **no gap** — the first such run in the registered
+    series, searching **up from the lowest unused** number.
+  - A run broken by a used (or never-registered) number is **skipped whole**. With 1 and 2 free
+    and 3 used, three records take 4–6; **1 and 2 stay free** for a later batch of one or two.
+    A batch never straddles the gap between two registered blocks.
+  - Numbers go out **in the order the records were ticked**.
+  - `LddapCheckAllocator::claim()` runs inside the assignment transaction: it first locks the
+    lowest unused row `FOR UPDATE` — every allocator contends for that same row, so two users
+    assigning at once run one after the other — then locks the chosen block and confirms each
+    number is still free. Two users can never receive overlapping numbers.
+  - The dialog **previews the block** (`GET /lddaps/next-numbers?count=N`, refetched as the
+    selection changes) and sends it with the save. If any previewed number has since been taken
+    the save is refused naming that number — *"Check number X is already used. Please refresh
+    and try again."* — and the dialog recomputes and shows the next whole block.
+  - Numbers are never reused: `lddap_checks.check_no` and `lddaps.lddap_check_id` are both
+    unique. Who did it and when is written to the audit log (`used_acic`, naming each record
+    and its number) and to the ACIC's `used_by` / `used_at`.
+- **Check # is read-only everywhere.** No form takes one; the only way a record gets a number
+  is by going on an ACIC. `lddaps.lddap_check_id` is nullable so records before that point stand
+  without one.
+- A record **re-assigned off** an ACIC keeps the number it was issued; the one swapped on takes
+  the next.
+- **Teller receipt** presupposes a check number, i.e. an ACIC; it stamps `received_by` /
+  `received_at` and leaves the status alone.
 - **Teller** confirms receipt (`POST /lddaps/{lddap}/receive`), exactly as for cheques.
-- **Admin** records the outcome (`POST /lddaps/{lddap}/review`): **Approved**, **Returned**
-  or **Cancelled**, all three offered in one dialog. Approved and Cancelled are final — a record in either state
-  cannot be reviewed again. Returned requires a note and hands the record back to the
-  staff member, who can have it reviewed again.
+- **Admin** takes the action on a Returned for ACIC record (`POST /lddaps/{lddap}/approve`,
+  `/rts`, `/cancel` — see *Routing* above). Approved and Canceled are final — a record in either
+  state takes no further step.
 - Only **Approved** records may go on an ACIC.
-- The review modal shows the full record being signed off — check number, amount, OBJ number,
-  payee, check date, who used it and its current status — and, when re-reviewing a record sent
-  back to the staff member, the note saying what had to be fixed.
 
 ### Linking to an ACIC
 
@@ -594,11 +770,41 @@ stateDiagram-v2
 - An ACIC can carry **cheques, LDDAPs, or both**. Forwarding needs at least one of either, and
   completing it stamps the teller's receipt on every record it carries that lacks one.
 
+### Editing a record — "Edit LDDAP Record"
+
+While a record is in the registrant's hands — **Registered**, or **RTS**'d back to them — it is
+edited through **the register form itself**. **Edit**, inside the record's detail dialog (from
+View or the LDDAP number), opens the same dialog as *Add LDDAP*, titled **Edit LDDAP Record**, with **every
+field pre-filled** from the saved values: LDDAP, NCA, ORB and DV numbers, nature of payment,
+unit, date issued, the payee and its account (the saved payee is fetched with its accounts —
+`GET /payees/{payee}` — so the picker shows the current choice and can still change it), UACS
+object code, gross amount, every W/TAX and VAT amount, retention, liquidated damages, advance
+payment, FWD to LBP, date loaded, note and remarks. The rate buttons recompute from the gross
+exactly as when registering. **Check #** and **ACIC #** are shown read-only — the check number
+is only ever set by *Assign LDDAP to ACIC* — and the button reads **Save Changes**.
+
+- One form for both: `LddapRegisterModal` (with a `lddap` prop) on the client,
+  `LddapDetailsRequest` on the server, and `LddapService::attributes()` building the columns
+  for `register()` and `update()` alike — so the two never drift apart.
+- `PUT /lddaps/{lddap}` (admin/staff). **Registered and RTS only** — For Out, Returned for ACIC,
+  Approved and Canceled are refused (*"cannot be edited"*) and get no Edit button
+  (`LddapResource.can_edit`, `LddapStatus::canEdit()`). Refused while a correction request pends.
+- **The LDDAP number stays unique**, but the record's own number is not a duplicate of itself
+  (`Rule::unique()->ignore()` in the request, and the locked re-check skips the record).
+- The **check number, status, routing and registrant are never touched**; extra keys in the
+  payload are ignored.
+- **Every edit that changes something is kept** in `lddap_edit_history` — who, when, and each
+  field's before and after (`changes = {field: {from, to}}`), readable at
+  `GET /lddaps/{lddap}/edit-history` and shown as **Edit history** on the record. An edit that
+  changes nothing writes no entry. The audit log gets `updated_lddap` naming the fields.
+
 ### Correcting the details
 
-Staff cannot edit an LDDAP directly. They **propose** a correction with a reason, and an admin
-reviews and applies it — the same request/approve flow the cheque register uses
-(`LddapUpdateRequestService`).
+Once a record is **out of the registrant's hands** — For Out, Returned for ACIC, Approved — it is
+not edited. Staff **propose** a correction with a reason, and an admin reviews and applies it —
+the same request/approve flow the cheque register uses (`LddapUpdateRequestService`) — or an
+admin applies one directly (*Correct details*, reason required). Neither is offered on a
+Registered or RTS record, where Edit applies instead.
 
 ```mermaid
 flowchart LR
@@ -620,57 +826,26 @@ flowchart LR
 - **`lddap_no` stays unique.** A correction that would collide with another record is refused
   when raised *and* re-checked under a lock at approval time, since another record may have taken
   the number in between. That approval fails and the request stays pending.
-#### The return loop
+#### Corrections and the routing
 
-**Returned is the one outcome that hands work back.** It returns the record to the staff
-member who used the number, together with the admin's remark saying what has to change.
+A correction changes the **details only** — it never moves a record in its routing. Approving
+one applies the proposed values and leaves the status exactly where it was. The route back for a
+record that came in wrong is the admin's **RTS** action on a Returned for ACIC record: it becomes
+**RTS**, the staff member **edits** it (Edit LDDAP Record — the full form), and once it is right
+it is **forwarded again**. The record carries the whole loop in its routing trail —
+registered, forwarded, received, RTS, forwarded, received, approved — and each RTS in its RTS
+History.
 
-```mermaid
-sequenceDiagram
-    participant A as Admin
-    participant L as LDDAP record
-    participant S as Staff
-    A->>L: Review → Returned + remark
-    L-->>S: Notification · record flagged "Needs your update"
-    S->>L: Update the details against the remark
-    L-->>A: Notification → Update Requests
-    A->>L: Confirm the correction (approve)
-    Note over L: Details applied · status → Approved
-```
-
-- **It goes back to one person: the staff member who used the check number.** They are the one
-  **notified** (`LDDAP {no} returned to you` — *"…it needs your attention before it can be signed
-  off"*, plus the remark), and the record is theirs alone to correct. Another staff member sees
-  the row and the record but no **Action** button, just `Returned to {name}`; the server enforces
-  the same rule, so a hand-rolled request is refused by name.
-- The record shows **Returned** in the table's Status column. The remark itself is in the detail
-  modal, which leads with it.
-- They open it and **update the details** — the same correction form, framed around the remark.
-- Submitting **notifies every active admin** and links straight to **Update Requests**, where the
-  admin checks and confirms it.
-- **Once complied with, the Status badge reads differently on each side.** The stored status is
-  still `compliance` — only the admin's approval moves it on — but leaving the row reading
-  "Returned" would suggest the staff member still owes work they have already done. So while a
-  correction is pending (`has_pending_update`), `LddapStatusBadge` relabels it: **staff see
-  On Hold**, **admins (and tellers) see Complied**, and the badge drops its coral "act on me"
-  styling for cyan. The label is the only thing that changes — the status value, the
-  **Returned** tab it is filtered under, and the hold itself all stay as they are.
-- That badge is the **only** place the hold is shown on the LDDAP table. The LDDAP No. column
-  carries no status chip of its own: the number is a link to the record, nothing more.
-- **Approving the correction is the sign-off.** On a Returned record, the admin's
-  approval applies the details *and* moves it straight to **Approved**, stamping them as the
-  reviewer — the deficiency the remark described has been fixed and accepted, so no second review
-  is needed and the record is immediately eligible for an ACIC. Approving a correction on a
-  record that was *not* Returned changes the details only, leaving its status alone.
+A **canceled** record is closed: a correction on it — proposed by staff or applied directly by
+an admin — is refused (*"is canceled and can no longer be edited"*), as are every routing step
+and any ACIC assignment.
 
 #### Admin direct correction
 
 An admin does not have to send a record back to change it: `PATCH /lddaps/{lddap}` applies the
 correction **immediately**. It is reachable from two places, both admin-only: the detail modal
-(from the LDDAP number) and **Edit details** inside `LddapReviewModal`, so a mistake spotted
-mid-review is fixed without closing the dialog and starting over. The review dialog scrolls, and
-after a correction it stays open showing the new values — the outcome is recorded against what is
-on screen — while the table refreshes behind it.
+(from the LDDAP number), as **Correct details** on a record that is out of the registrant's
+hands (For Out, Returned for ACIC, Approved).
 
 - **The reason is mandatory.** A change with no second pair of eyes has to say why it was made.
 - It is written into the **same correction history**, flagged `applied_directly`, so a record has
@@ -702,29 +877,36 @@ actually next.
 
 | Status | Who | Action |
 |---|---|---|
-| **Used** / Received | Admin | **Review** — the single entry point; nothing else is shown |
-| **Returned** | Staff *(the one it was returned to)* | **Action** — opens the dialog for editing the details |
-| Returned | Any other staff | `Returned to {name}` — read-only; the correction is theirs |
-| Returned (complied) | Staff | Status reads *On Hold*; row reads `Update awaiting admin approval` |
-| Returned (complied) | Admin | Status reads *Complied*; the correction is approved from **Update Requests** |
-| Returned | Admin | **Review** — the full dialog, so a stalled record can still be moved |
-| **Approved** | Admin/Staff | **Assign** — put it on an ACIC |
+| **Registered** | Admin/Staff | **Forward** — Forward To, Unit, Date Forwarded, Note (Edit lives in the record dialog) |
+| **For Out** | Admin/Staff | **Receive** — From Unit, Date Received, Note |
+| **Returned for ACIC** | Admin | **Action** — Approved · RTS (opens the RTS form) · Cancel (opens the cancel confirmation: Canceled By · Date Canceled · Reason) |
+| **RTS** | Admin/Staff | **Forward** — corrected (via Edit in the record dialog), out again with the same Forward fields |
+| **Approved** | Admin/Staff | **Assign** — put it on an ACIC; this is when it takes its check number |
 | Approved (already linked) | — | `On ACIC #n` — forwarding is the ACIC's own step |
-| Cancelled | — | `Reviewed <date>` |
+| **Canceled** | — | `Canceled <date>` — read-only; nothing is offered |
 
 - The LDDAP number in the first column is itself the link to the full record, so there is no
-  separate View action.
-- For staff, **Action** opens `LddapDetailModal` in mode `action`: the outcome section (the
-  reviewed-by and review-note rows) is **hidden** — deciding the outcome is not their call — the
-  dialog leads with the admin's remark instead, and the correction CTA reads **Edit Details**.
-  Submitting raises an ordinary update request: it goes to the admin for approval, and the LDDAP
-  **stays Returned** until they approve it. That approval is the sign-off — it applies the
-  details and moves the record straight to **Approved**, ready to be assigned to an ACIC. While
-  the request is pending the row reads *Update awaiting admin approval*.
-- **Assign** is what an approved LDDAP not yet on an ACIC offers to admin and staff alike
-  (`LddapAssignModal`); it is the next step after sign-off.
-- **Teller receipt** is confirmed inside the detail modal rather than from the row, matching how
-  the cheque register does it.
+  separate View action; the record shows its **Routing trail** and its correction history.
+- The status badge sits in the table's Status column.
+- **Filter bar** above the table — *Search*, *Status* (All · Registered · For Out · Returned for
+  ACIC · Approved · RTS · Canceled), *Nature of Payment* (All plus the register form's list, from
+  `GET /lddaps/options`), then **Filter** and **Clear**. Nothing applies until Filter is pressed
+  (Enter in the search box does the same); Clear resets every field and shows all records. The
+  filters **combine (AND)** and are applied **server-side** as the query string of `GET /lddaps`
+  — `?search=&status=&nature=&page=` — which the page keeps in its own URL, so a filtered view
+  survives a refresh and can be bookmarked, the inputs keep their values after filtering, and
+  Prev/Next carry the filters (the paginator's links do too). A line above the table reads
+  *Showing 12 records* (or *Showing 51–100 of 120 records* when paged), and *No records found*
+  when nothing matches. `FilterLddapsRequest` validates the parameters; an unknown status or
+  nature is a 422.
+  - **Search** is one box that matches any of three things (`Lddap::scopeSearch()`): **part of
+    the LDDAP number**, **part of the check number** (compared as text, so `2026` finds
+    `120260`), or the **gross amount exactly** when the text reads as an amount — with or
+    without the peso sign, thousands separators or centavos: `194032`, `194,032.00` and
+    `₱194,032` all find ₱194,032.00 (`Money::parse()`); `LDDAP-0001` is never mistaken for an
+    amount.
+- **Teller receipt** is confirmed inside the detail modal rather than from the row, once the
+  record carries a check number.
 - An admin's **direct correction** also lives in the detail modal, reached from the LDDAP number.
 
 ### Forwarding
@@ -752,6 +934,7 @@ only the step that is actually next.
 | Returned (complied) | Staff | Status reads *On Hold*; row reads `Update awaiting admin approval` |
 | Returned (complied) | Admin | Status reads *Complied*; the correction is approved from **Update Requests** |
 | Returned | Admin | **Review** — to finish the cycle once the update is approved |
+| **Approved** | any | **View** — the cheque's face, printable onto Landbank stock |
 | **Approved** | Admin/Staff | **Assign** — put it on an ACIC |
 | Approved (already linked) | — | `On ACIC #n` |
 | Disapproved | — | `Reviewed <date>` |
@@ -794,6 +977,19 @@ just been registered, offered to **admin and staff** — the two roles that put 
   sequence.
 - A **teller** gets no button; their next-in-line row still points at the panel above.
 
+**View** (`ChequeViewModal`) exists for an **approved** cheque only — the row shows the button for
+that status alone, and `GET /cheques/{cheque}/print` refuses any other. It shows the cheque's
+face at real size on a white ground, laid out to the Landbank cheque: Check No., Date, Pay to
+the Order of, the amount in figures (`₱185,369.86`) and in words (*"One Hundred Eighty-Five
+Thousand Three Hundred Sixty-Nine Pesos and 86/100 Only"*, from `AmountInWords::cheque()`), the
+account the cheque is drawn on (`config('acic.account_no')`), and a reference line with the ACIC
+# (a cheque carries no LDDAP number; that slot is empty). **Print** outputs only the fields —
+no dialog, buttons or page — at cheque size (`@page cheque { size: 178mm 76mm }`), each field at
+a fixed millimetre position on `.cheque-face` in `app.css`, where **every measurement sits in
+one block** to be tuned after a test print on pre-printed stock. The pre-printed labels are
+drawn faintly on screen and dropped in print. The face is portalled to `<body>` for printing,
+as the ACIC form is.
+
 **Assign** is the next step after sign-off. It opens `AcicUseModal` — the same dialog as the ACIC
 page's **Assign cheque to ACIC** button — with the clicked cheque preselected: **one** approved
 cheque, onto the **next number in the sequence**, which is opened only on submit. It writes
@@ -806,11 +1002,49 @@ cheques not already on an ACIC are listed.
 ## 7. Audit log
 
 Every significant action appends an immutable row to `cheque_logs` via `ActivityLogger`.
-Actions (`app/Enums/ChequeAction.php`): `login`, `logout`, `used_cheque`, `received_cheque`,
+Actions (`app/Enums/ChequeAction.php`): `login`, `logout`, `updated_profile`, `changed_password`,
+`used_cheque`, `received_cheque`,
 `reviewed_cheque`, `requested_update`, `approved_update`, `rejected_update`, `added_cheque_range`,
 `created_acic`, `used_acic`, `forwarded_acic`, `completed_acic`, `created_user`, `updated_user`,
 `deleted_user`.
 Admins view and filter the log at `GET /api/v1/logs`.
+
+---
+
+## 7a. Dashboard
+
+`GET /dashboard` (`DashboardController` → `DashboardService::for($user)`) feeds the landing page,
+which reads top to bottom: what is waiting on *you*, then every register at a glance. Every tile
+is a link into the matching filtered list (`/cheques?status=`, `/lddaps?status=`, `/acics?tab=`).
+
+- **Needs your attention** — by role, only items with a non-zero count (an empty list reads
+  *Nothing is waiting on you right now*):
+
+  | Role | Item | Counts | Opens |
+  |---|---|---|---|
+  | Admin | LDDAPs awaiting your action | Returned for ACIC | `/lddaps?status=returned_for_acic` |
+  | Admin | Cheques awaiting review | Used + Received | `/cheques?status=used` |
+  | Admin | Update requests pending | pending cheque + LDDAP corrections | `/admin/update-requests` |
+  | Admin | ACICs to sign off | ACIC status Used | `/acics?tab=all` |
+  | Staff | Returned to you (RTS) | RTS LDDAPs **registered by them** | `/lddaps?status=rts` |
+  | Staff | Cheques returned to you | Returned cheques **used by them** | `/cheques?status=complies` |
+  | Staff | Registered, not yet forwarded | their Registered LDDAPs | `/lddaps?status=registered` |
+  | Staff | Approved LDDAPs awaiting an ACIC | Approved, no ACIC | `/lddaps?status=approved` |
+  | Teller | Cheques to receive | Used | `/cheques?status=used` |
+  | Teller | LDDAPs to receive | carrying a check number, not received | `/lddaps?status=approved` |
+  | Teller | ACICs forwarded to you | ACIC status Forwarded | `/acics?tab=forwarded` |
+
+- **Cheques** — the seven status tiles (`ChequeService::counts()`) and, for admin/staff, the
+  **next-in-line cheque** panel, usable from the dashboard as before.
+- **LDDAP-ADA** — a tile per routing status (Registered · For Out · Returned for ACIC · RTS ·
+  Approved · Canceled) and, of the approved, how many await an ACIC vs. sit on one.
+- **ACIC** — a tile per status (Open · Used · Approved · Forwarded · Completed).
+- **Number series** — the cheque book, the LDDAP check numbers and the ACIC numbers: how many are
+  **available**, the **next** number each will issue, used-of-registered, and a **Low** flag under
+  `DashboardService::LOW_SERIES` (10) free numbers; admins get a *Register more* link to the
+  series page.
+- **Recent activity** (admin only) — the latest eight audit rows, newest first, linking to the
+  full log. Other roles get an empty `recent`.
 
 ---
 
@@ -841,8 +1075,11 @@ the action that raised it.
 | `POST /login` | Public | Sign in |
 | `POST /logout` | Auth | Sign out |
 | `GET /me` | Auth | Current user |
+| `PUT /me` | Auth | Profile: the signed-in user's own full name and email (`UpdateProfileRequest`) |
+| `PUT /me/password` | Auth | Change own password — current password required, confirmed, session kept (`ChangePasswordRequest`) |
 | `GET /cheques` | Auth | List cheques (filter by `status` and `search`; includes hold flag) |
-| `GET /cheques/summary` | Auth | Dashboard counts + next cheque |
+| `GET /cheques/summary` | Auth | Cheque counts + next cheque (the cheque page's header) |
+| `GET /dashboard` | Auth | The dashboard: attention items by role, every register's counts, the series, admin's recent activity |
 | `GET /cheques/next` | Auth | The next usable cheque |
 | `POST /cheques/use` | Auth | Use the next cheque |
 | `POST /cheques/{cheque}/receive` | **Teller** | Confirm receipt (blocked if on hold) |
@@ -850,21 +1087,30 @@ the action that raised it.
 | `GET /cheques/{cheque}/update-requests` | Auth | A cheque's request history + outcomes |
 | `POST /cheques/add-range` | **Admin** | Register a book by `start_at` / `end_at` serial |
 | `POST /cheques/{cheque}/review` | **Admin** | Record the review outcome (blocked if on hold) |
-| `GET /lddaps` | Auth | List LDDAP records (filter by `status` and `search`) |
+| `GET /lddaps` | Auth | List LDDAP records — the filter bar's `search`, `status`, `nature`, `page`, `per_page` (`FilterLddapsRequest`) |
 | `GET /lddaps/next-numbers` | Auth | The next `count` check numbers in the LDDAP series |
 | `GET /lddaps/series` | Auth | LDDAP check series counts (registered / unused / used) |
 | `GET /lddaps/linkable` | Auth | Completed LDDAPs not yet on an ACIC |
-| `POST /lddaps/use-cheque` | **Admin/Staff** | Register LDDAPs, one check number each |
+| `GET /lddaps/options` | any | The natures of payment and the units the register dialog offers |
+| `GET /payees?search=` | any | Registered payees by name or account number, each with its accounts, capped at 15 |
+| `GET /payees/{payee}` | any | One payee with its accounts — pre-fills the picker in Edit LDDAP Record |
+| `POST /lddaps` | **Admin/Staff** | Register **one** LDDAP, without a check number |
+| `PUT /lddaps/{lddap}` | **Admin/Staff** | Edit LDDAP Record — the same form (`LddapDetailsRequest`) on a Registered or RTS record; own number ignored by the unique rule; check number untouched |
+| `GET /lddaps/{lddap}/edit-history` | any | Every edit: user, time, `{field: {from, to}}`, newest first |
+| `POST /lddaps/{lddap}/forward` | **Admin/Staff** | Forward: Registered → For Out |
+| `POST /lddaps/{lddap}/receive-back` | **Admin/Staff** | Receive: For Out → Returned for ACIC |
+| `GET /lddaps/{lddap}/routing-history` | any | The record's routing trail |
+| `POST /lddaps/{lddap}/approve` · `/rts` · `/cancel` | **Admin** | The action on a Returned for ACIC record (`cancel`: `note` required, `date_canceled` optional) |
+| `POST /lddaps/assign-acic` | **Admin/Staff** | Put ticked approved records on a typed ACIC number; each takes the next check number |
 | `POST /lddaps/add-range` | **Admin** | Register a block of the LDDAP check series |
 | `POST /lddaps/{lddap}/receive` | **Teller** | Confirm an LDDAP as received |
-| `POST /lddaps/{lddap}/review` | **Admin** | Record the review outcome |
 | `POST /lddaps/{lddap}/update-requests` | **Staff** | Propose a detail correction |
 | `PATCH /lddaps/{lddap}` | **Admin** | Correct the details directly (reason required) |
 | `GET /lddaps/{lddap}/update-requests` | Auth | An LDDAP's request history + outcomes |
 | `GET /lddap-update-requests` | **Admin** | Pending LDDAP correction requests |
 | `POST /lddap-update-requests/{id}/approve` | **Admin** | Approve (apply proposed values) |
 | `POST /lddap-update-requests/{id}/reject` | **Admin** | Reject (no change) |
-| `POST /acics/{acic}/lddaps` | **Admin/Staff** | Assign approved LDDAPs to an ACIC |
+| `POST /acics/{acic}/lddaps` | **Admin/Staff** | Assign approved LDDAPs to an ACIC; each takes the next check number (`expected_check_nos` optional) |
 | `GET /acics` | Auth | List ACIC records (filter by `status`) |
 | `GET /acics/next` | Auth | The number the next ACIC will take |
 | `GET /acics/linkable-cheques` | Auth | Approved cheques not yet on an ACIC |
@@ -896,6 +1142,13 @@ erDiagram
     LDDAP_CHECKS ||--|| LDDAPS : "numbers"
     ACICS ||--o{ LDDAPS : "carries"
     LDDAPS ||--o{ LDDAP_UPDATE_REQUESTS : "has"
+    LDDAPS ||--o{ LDDAP_ROUTING_HISTORY : "trail"
+    LDDAPS ||--o{ LDDAP_EDIT_HISTORY : "edits"
+    USERS ||--o{ LDDAP_EDIT_HISTORY : "made"
+    UNITS ||--o{ LDDAPS : "drawn for"
+    PAYEES ||--o{ LDDAPS : "paid to"
+    PAYEES ||--o{ PAYEE_ACCOUNTS : "holds"
+    PAYEE_ACCOUNTS ||--o{ LDDAPS : "paid into"
     USERS ||--o{ LDDAPS : "uses / receives / reviews"
     USERS ||--o{ CHEQUE_LOGS : "acts in"
     USERS ||--o{ NOTIFICATIONS : "notified via"
@@ -903,6 +1156,7 @@ erDiagram
     USERS {
         string name
         string username
+        string email "nullable, unique — set on the Profile page"
         enum   role "admin | staff | teller"
         bool   is_active
     }
@@ -935,19 +1189,79 @@ erDiagram
         enum   status "available | used"
         fk     created_by
     }
+    UNITS {
+        string name "unique"
+    }
+    PAYEES {
+        string name
+    }
+    PAYEE_ACCOUNTS {
+        fk     payee_id
+        string account_no
+        string bank
+    }
     LDDAPS {
-        fk     lddap_check_id "unique — one LDDAP, one check number"
+        fk     lddap_check_id "unique, nullable — added once back from routing"
         string lddap_no "unique document serial"
-        string obj_no "obligation / object of expenditure"
+        string nca_no
+        string orb_no
+        string dv_no
+        enum   nature_of_payment
+        fk     unit_id
+        string obj_no "UACS object code — prints as OBJ CODE"
         decimal amount
-        string payee_name
-        date   check_date
-        enum   status "used | received | approved | compliance | cancelled"
+        fk     payee_id
+        fk     payee_account_id
+        string payee_name "copied from the payee at registration"
+        string payee_account_no "copied from the account at registration"
+        string payee_bank "copied from the account at registration"
+        string acic_ref "ACIC # written on the form"
+        decimal gross_amount
+        decimal wtax_1 "… wtax_2, wtax_3, wtax_5"
+        decimal vat_1 "… vat_2, vat_3, vat_5, vat_10, vat_12, vat_30"
+        decimal retention
+        decimal liquidated_damages
+        decimal advance_payment
+        date   fwd_to_lbp_at
+        date   date_loaded
+        text   note
+        string remarks
+        date   check_date "date issued, entered
+        enum   status "registered | for_out | returned_for_acic | rts | approved | canceled"
+        string forward_to
+        fk     forward_unit_id
+        fk     forwarded_by
+        date   date_forwarded
+        fk     return_unit_id
+        fk     returned_by
+        date   date_returned
         fk     acic_id "the ACIC it sits on"
         fk     used_by
         fk     received_by
         fk     reviewed_by
         text   review_note
+        fk     canceled_by
+        date   date_canceled
+        text   cancel_reason
+    }
+    LDDAP_EDIT_HISTORY {
+        fk     lddap_id
+        fk     user_id
+        json   changes "{field: {from, to}}"
+        datetime created_at "append-only"
+    }
+    LDDAP_ROUTING_HISTORY {
+        fk     lddap_id
+        enum   action "registered | forwarded | received | approved | rts | canceled"
+        enum   from_status
+        enum   to_status
+        fk     user_id
+        fk     unit_id
+        string counterparty "Forward To"
+        string received_by_name "RTS: who received it"
+        date   received_on "RTS: when"
+        date   acted_on "forwarded / received / RTS date"
+        text   note
     }
     LDDAP_UPDATE_REQUESTS {
         fk     lddap_id

@@ -4,9 +4,28 @@ export interface User {
     id: number;
     name: string;
     username: string;
+    email: string | null;
     role: Role;
     is_active: boolean;
     created_at?: string;
+}
+
+/** What the cheque view prints — the cheque's fields, formatted as the cheque shows them. */
+export interface ChequePrintData {
+    cheque_number: number;
+    cheque_date: string | null;
+    payee_name: string | null;
+    amount: string;
+    /** "₱185,369.86" */
+    amount_figures: string;
+    /** "One Hundred Eighty-Five Thousand … Pesos and 86/100 Only" */
+    amount_in_words: string;
+    account_no: string;
+    bank_name: string;
+    bank_branch: string;
+    acic_number: number | null;
+    /** A cheque carries no LDDAP number; the slot is here for the reference line. */
+    lddap_no: string | null;
 }
 
 export type ChequeStatus = 'available' | 'used' | 'received' | 'approved' | 'complies' | 'disapproved';
@@ -65,10 +84,36 @@ export interface ChequeDetails {
 }
 
 /** The LDDAP's own lifecycle. It draws on an independent check series, not on the cheque register. */
-export type LddapStatus = 'used' | 'received' | 'approved' | 'compliance' | 'cancelled';
+/** The routing, in order: Registered → For Out → Returned for ACIC → Approved | RTS | Canceled. */
+export type LddapStatus = 'registered' | 'for_out' | 'returned_for_acic' | 'rts' | 'approved' | 'canceled';
 
-/** The three outcomes an admin LDDAP review can produce. */
-export type LddapReviewOutcome = Extract<LddapStatus, 'approved' | 'compliance' | 'cancelled'>;
+/** One step of a record's routing trail. */
+/** One edit of a record through "Edit LDDAP Record": who, when, and each field's before/after. */
+export interface LddapEdit {
+    id: number;
+    user: { id: number; name: string; username: string } | null;
+    changes: Record<string, { from: string | number | null; to: string | number | null }>;
+    created_at: string | null;
+}
+
+export interface LddapRoutingStep {
+    id: number;
+    action: 'registered' | 'forwarded' | 'received' | 'approved' | 'rts' | 'canceled';
+    action_label: string;
+    from_status: LddapStatus | null;
+    to_status: LddapStatus;
+    to_status_label: string;
+    user: { id: number; name: string; username: string } | null;
+    unit_name: string | null;
+    counterparty: string | null;
+    /** RTS only: who received the record and when, before it was returned. */
+    received_by_name: string | null;
+    received_on: string | null;
+    /** The step's date: forwarded / received / RTS'd on. */
+    acted_on: string | null;
+    note: string | null;
+    created_at: string;
+}
 
 /** One row of the LDDAP table. */
 export interface Lddap {
@@ -78,9 +123,42 @@ export interface Lddap {
     check_date?: string | null;
 
     lddap_no: string;
+
+    /** The references the disbursement is drawn against. */
+    nca_no?: string | null;
+    orb_no?: string | null;
+    dv_no?: string | null;
+    nature_of_payment?: string | null;
+    /** The nature spelled out, in caps, as the forms carry it. */
+    nature_of_payment_label?: string | null;
+    unit_id?: number | null;
+    unit_name?: string | null;
+
+    /** The UACS object code — prints as OBJ CODE on the ACIC. */
     obj_no?: string | null;
     amount: string;
+
+    /** The payee and account as they stood when the record was registered. */
+    payee_id?: number | null;
     payee_name?: string | null;
+    payee_account_id?: number | null;
+    payee_account_no?: string | null;
+    payee_bank?: string | null;
+    /** The ACIC number written on the form at registration (distinct from `acic_number`). */
+    acic_ref?: string | null;
+
+    /** The payment breakdown. `amount` is the net payable: gross less all of these. */
+    gross_amount?: string;
+    wtax?: Record<string, string>;
+    vat?: Record<string, string>;
+    retention?: string;
+    liquidated_damages?: string;
+    advance_payment?: string;
+
+    fwd_to_lbp_at?: string | null;
+    date_loaded?: string | null;
+    note?: string | null;
+    remarks?: string | null;
     status: LddapStatus;
 
     used_by?: { id: number; name: string; username: string } | null;
@@ -91,9 +169,28 @@ export interface Lddap {
     reviewed_by?: { id: number; name: string; username: string } | null;
     reviewed_at?: string | null;
     review_note?: string | null;
-    is_reviewed?: boolean;
     is_final?: boolean;
-    awaits_compliance?: boolean;
+    status_label?: string;
+    /** Which single next step the status allows. */
+    /** "Edit LDDAP Record" is offered: Registered or RTS only. */
+    can_edit?: boolean;
+    can_forward?: boolean;
+    can_receive?: boolean;
+    awaits_action?: boolean;
+
+    /** The most recent forward and return. */
+    forward_to?: string | null;
+    forward_unit_name?: string | null;
+    forwarded_by?: { id: number; name: string; username: string } | null;
+    date_forwarded?: string | null;
+    return_unit_name?: string | null;
+    returned_by?: { id: number; name: string; username: string } | null;
+    date_returned?: string | null;
+
+    /** The cancellation, when there is one. */
+    canceled_by?: { id: number; name: string; username: string } | null;
+    date_canceled?: string | null;
+    cancel_reason?: string | null;
 
     /** ACIC No. and Forward To / Date. */
     acic_id?: number | null;
@@ -104,6 +201,8 @@ export interface Lddap {
 
     /** True while a staff correction is awaiting admin approval — the record is on hold. */
     has_pending_update?: boolean;
+    /** How many times the record has been returned to sender. */
+    rts_count?: number;
 
     created_at: string;
 }
@@ -136,12 +235,72 @@ export interface ProposedLddapUpdate {
     reason: string;
 }
 
-/** One row of the "Use Check Number" modal — a document to register against a check number. */
+/** What the "Register LDDAP record" dialog collects. No check number — that comes after routing. */
 export interface LddapDraft {
     lddap_no: string;
+    nca_no: string;
+    orb_no: string;
+    dv_no: string;
+    nature_of_payment: string;
+    /** The UACS object code. */
     obj_no: string;
-    payee_name: string;
-    amount: string;
+    unit_id: string;
+    check_date: string;
+    /** Chosen from the payee lookup; the pick carries its accounts for the account select. */
+    payee: Payee | null;
+    payee_account_id: number | null;
+    acic_ref: string;
+
+    /** The payment breakdown; `amount` (net) is derived server-side from these. */
+    gross_amount: string;
+    wtax: Record<string, string>;
+    vat: Record<string, string>;
+    retention: string;
+    liquidated_damages: string;
+    advance_payment: string;
+
+    fwd_to_lbp_at: string;
+    date_loaded: string;
+    note: string;
+    remarks: string;
+}
+
+/** An office unit an LDDAP is drawn for. */
+export interface Unit {
+    id: number;
+    name: string;
+}
+
+/** One of a payee's bank accounts, labelled "account number – bank" for a select. */
+export interface PayeeAccount {
+    id: number;
+    account_no: string;
+    bank: string;
+    label: string;
+}
+
+/** A registered payee with the accounts a payment can go to. */
+export interface Payee {
+    id: number;
+    name: string;
+    accounts: PayeeAccount[];
+}
+
+/** The LDDAP table's filter bar, as sent to `GET /lddaps` (and kept in the page's URL). */
+export interface LddapListFilters {
+    search?: string;
+    /** "all" (or empty) for every status. */
+    status?: LddapStatus | 'all' | '';
+    /** "all" (or empty) for every nature of payment. */
+    nature?: string;
+    page?: number;
+    perPage?: number;
+}
+
+/** What the register dialog's selects offer. */
+export interface LddapOptions {
+    natures: { value: string; label: string }[];
+    units: Unit[];
 }
 
 /** Counts for the LDDAP check series. */
@@ -151,11 +310,10 @@ export interface LddapSeries {
     used: number;
 }
 
-/** The next check numbers in the LDDAP series, previewed for the "Use Check Number" modal. */
+/** The next check numbers in the LDDAP series; the first is what "Add Check Number" assigns. */
 export interface NextCheckNumbers {
     numbers: number[];
     available: number;
-    max_batch: number;
 }
 
 /** Counts for the ACIC number series. */
@@ -230,6 +388,48 @@ export interface Summary {
     next: Cheque | null;
 }
 
+/** One thing waiting on the signed-in user, with where to go to deal with it. */
+export interface AttentionItem {
+    key: string;
+    label: string;
+    hint: string;
+    count: number;
+    to: string;
+    /** Colours the tile: `accent` (act now), `warn` (returned to you), `brand` (next up). */
+    tone: 'accent' | 'warn' | 'brand';
+}
+
+/** A number series as the dashboard shows it. */
+export interface SeriesGlance {
+    available: number;
+    next: number | null;
+    /** Fewer than DashboardService::LOW_SERIES numbers left. */
+    low: boolean;
+    registered?: number;
+    used?: number;
+}
+
+/** `GET /dashboard`: attention items by role, then every register's counts. */
+export interface Dashboard {
+    attention: AttentionItem[];
+    cheques: Summary;
+    lddaps: {
+        counts: Record<'total' | LddapStatus, number>;
+        awaiting_acic: number;
+        on_acic: number;
+    };
+    acics: {
+        counts: Record<'total' | AcicStatus, number>;
+    };
+    series: {
+        cheques: SeriesGlance;
+        lddap_checks: SeriesGlance;
+        acic_numbers: SeriesGlance;
+    };
+    /** Admin only: the latest audit rows, newest first. Empty for other roles. */
+    recent: Pick<ChequeLog, 'id' | 'username' | 'action' | 'cheque_number' | 'description' | 'created_at'>[];
+}
+
 export type NotificationKind = 'request' | 'approved' | 'rejected' | 'used';
 
 export interface AppNotification {
@@ -263,6 +463,9 @@ export interface PageMeta {
     last_page: number;
     per_page: number;
     total: number;
+    /** The first and last row numbers on this page; null when the page is empty. */
+    from: number | null;
+    to: number | null;
 }
 
 export interface Paginated<T> {

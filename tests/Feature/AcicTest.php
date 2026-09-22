@@ -4,11 +4,11 @@ namespace Tests\Feature;
 
 use App\Enums\AcicStatus;
 use App\Enums\ChequeStatus;
-use App\Enums\LddapStatus;
 use App\Enums\UserRole;
 use App\Models\Acic;
 use App\Models\Cheque;
 use App\Models\Lddap;
+use App\Models\Unit;
 use App\Models\User;
 use App\Services\AcicService;
 use App\Services\ChequeService;
@@ -69,17 +69,23 @@ class AcicTest extends TestCase
     {
         $lddaps = app(LddapService::class);
         $lddaps->addRange($this->admin(), 1, 10);
+        $staff = $this->staff();
 
-        $lddap = $lddaps->useCheckNumbers($this->staff(), 1, [[
+        // Registered, forwarded, received back, approved — ready for an ACIC, which is when it
+        // will take its check number.
+        $unit = Unit::firstOrCreate(['name' => 'ACCOUNTING']);
+        $lddap = $lddaps->register($staff, [
             'lddap_no' => 'LDDAP-0001',
             'obj_no' => 'OBJ-1',
             'payee_name' => 'Payee 1',
             'amount' => 100,
-        ]])->first();
+        ]);
+        $lddap = $lddaps->forward($staff, $lddap, [
+            'forward_to' => 'Accounting', 'unit_id' => $unit->id, 'date_forwarded' => '2026-09-22',
+        ]);
+        $lddap = $lddaps->receive($staff, $lddap, ['unit_id' => $unit->id, 'date_received' => '2026-09-23']);
 
-        $lddap->update(['status' => LddapStatus::Approved]);
-
-        return $lddap->fresh();
+        return $lddaps->approve($this->admin(), $lddap);
     }
 
     /** @return list<int> ids of the approved cheques, in number order */

@@ -249,7 +249,7 @@
 }
 
 @media print {
-    body > *:not(.acic-print) {
+    body > *:not(.acic-print):not(.cheque-print) {
         display: none !important;
     }
 
@@ -486,5 +486,164 @@
     @page {
         size: portrait;
         margin: 12mm;
+    }
+}
+
+/*
+ * The cheque face — the Landbank cheque at its real size.
+ *
+ * ==========================================================================================
+ *  EVERY MEASUREMENT IS HERE. After a test print on pre-printed stock, adjust these values
+ *  and nothing else. All are millimetres from the cheque's top-left corner.
+ * ==========================================================================================
+ */
+.cheque-face {
+    /* The stock. */
+    --cheque-w: 178mm;
+    --cheque-h: 76mm;
+
+    /* Type. */
+    --cheque-font: 3.4mm;
+    --cheque-font-words: 3.1mm;
+    --cheque-font-checkno: 3.6mm;
+    --cheque-font-ref: 2.4mm;
+
+    /* Check No. — top right. */
+    --pos-checkno-top: 5mm;
+    --pos-checkno-left: 138mm;
+
+    /* Date — below the check number. */
+    --pos-date-top: 14mm;
+    --pos-date-left: 138mm;
+    --pos-date-w: 34mm;
+
+    /* Pay to the order of — the payee line. */
+    --pos-payee-top: 24mm;
+    --pos-payee-left: 42mm;
+    --pos-payee-w: 92mm;
+
+    /* Amount in figures — the boxed amount to the right of the payee. */
+    --pos-figures-top: 24mm;
+    --pos-figures-left: 138mm;
+    --pos-figures-w: 34mm;
+
+    /* Amount in words — the long line under the payee. */
+    --pos-words-top: 33mm;
+    --pos-words-left: 8mm;
+    --pos-words-w: 150mm;
+
+    /* Account number — bottom left. */
+    --pos-account-top: 58mm;
+    --pos-account-left: 8mm;
+
+    /* Reference (ACIC / LDDAP) — small, bottom middle. */
+    --pos-ref-top: 66mm;
+    --pos-ref-left: 60mm;
+    --pos-ref-w: 70mm;
+
+    /* Pre-printed labels, drawn on screen only. */
+    --pos-lbl-date-top: 14mm;
+    --pos-lbl-date-left: 126mm;
+    --pos-lbl-payee-top: 24mm;
+    --pos-lbl-payee-left: 8mm;
+    --pos-lbl-figures-top: 24mm;
+    --pos-lbl-figures-left: 134mm;
+    --pos-lbl-words-top: 33mm;
+    --pos-lbl-words-left: 160mm;
+    --pos-lbl-account-top: 54mm;
+    --pos-lbl-account-left: 8mm;
+    --pos-lbl-sign-top: 62mm;
+    --pos-lbl-sign-left: 128mm;
+    --pos-rule-sign-top: 60mm;
+    --pos-rule-sign-left: 120mm;
+    --pos-rule-sign-w: 50mm;
+
+    position: relative;
+    width: var(--cheque-w);
+    height: var(--cheque-h);
+    flex: none;
+    background: #fff;
+    color: #000;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: var(--cheque-font);
+    line-height: 1.2;
+    border: 1px solid #c8c8c8;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+/* Every field and label is absolutely placed from the corner. */
+.cheque-face > * {
+    position: absolute;
+    white-space: nowrap;
+}
+
+.cheque-field {
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.cheque-checkno { top: var(--pos-checkno-top); left: var(--pos-checkno-left); font-size: var(--cheque-font-checkno); }
+.cheque-date    { top: var(--pos-date-top);    left: var(--pos-date-left);    width: var(--pos-date-w); }
+.cheque-payee   { top: var(--pos-payee-top);   left: var(--pos-payee-left);   width: var(--pos-payee-w); overflow: hidden; text-overflow: ellipsis; text-transform: uppercase; }
+.cheque-figures { top: var(--pos-figures-top); left: var(--pos-figures-left); width: var(--pos-figures-w); text-align: right; }
+.cheque-words   { top: var(--pos-words-top);   left: var(--pos-words-left);   width: var(--pos-words-w); font-size: var(--cheque-font-words); white-space: normal; line-height: 1.25; }
+.cheque-account { top: var(--pos-account-top); left: var(--pos-account-left); }
+.cheque-ref     { top: var(--pos-ref-top);     left: var(--pos-ref-left);     width: var(--pos-ref-w); font-size: var(--cheque-font-ref); font-weight: 400; color: #444; }
+
+/* The stock's own printing, drawn faintly on screen so the layout reads as a cheque. */
+.cheque-label {
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 2.2mm;
+    letter-spacing: 0.08em;
+    color: #8a8a8a;
+}
+
+.cheque-bank { top: 5mm; left: 8mm; display: flex; flex-direction: column; gap: 0.5mm; }
+.cheque-bank-name { font-weight: 700; font-size: 3.2mm; color: #2a6f3d; letter-spacing: 0.04em; }
+.cheque-bank-branch { font-size: 2.2mm; }
+
+.cheque-lbl-date    { top: var(--pos-lbl-date-top);    left: var(--pos-lbl-date-left); }
+.cheque-lbl-payee   { top: var(--pos-lbl-payee-top);   left: var(--pos-lbl-payee-left); }
+.cheque-lbl-figures { top: var(--pos-lbl-figures-top); left: var(--pos-lbl-figures-left); font-size: 3.2mm; color: #444; }
+.cheque-lbl-words   { top: var(--pos-lbl-words-top);   left: var(--pos-lbl-words-left); }
+.cheque-lbl-account { top: var(--pos-lbl-account-top); left: var(--pos-lbl-account-left); }
+.cheque-lbl-sign    { top: var(--pos-lbl-sign-top);    left: var(--pos-lbl-sign-left); }
+
+.cheque-rule { border-bottom: 0.3mm solid #c8c8c8; height: 0; }
+.cheque-rule-payee { top: calc(var(--pos-payee-top) + 4.5mm); left: var(--pos-payee-left); width: var(--pos-payee-w); }
+.cheque-rule-words { top: calc(var(--pos-words-top) + 8.5mm); left: var(--pos-words-left); width: var(--pos-words-w); }
+.cheque-rule-sign  { top: var(--pos-rule-sign-top); left: var(--pos-rule-sign-left); width: var(--pos-rule-sign-w); }
+
+/* The print target: hidden on screen, the only thing on paper. */
+.cheque-print {
+    display: none;
+}
+
+@page cheque {
+    size: 178mm 76mm;
+    margin: 0;
+}
+
+@media print {
+    .cheque-print {
+        display: block;
+        page: cheque;
+        width: 178mm;
+        height: 76mm;
+        overflow: hidden;
+    }
+
+    /* Only the fields print; the labels and rules are on the stock already. */
+    .cheque-print .cheque-face {
+        border: 0;
+    }
+
+    .cheque-print .cheque-label {
+        display: none !important;
+    }
+
+    .cheque-print .cheque-ref {
+        color: #000;
     }
 }

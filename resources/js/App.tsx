@@ -12,6 +12,8 @@ import AddRangePage from './pages/AddRangePage';
 import UsersPage from './pages/UsersPage';
 import LogsPage from './pages/LogsPage';
 import UpdateRequestsPage from './pages/UpdateRequestsPage';
+import ProfilePage from './pages/ProfilePage';
+import ChangePasswordPage from './pages/ChangePasswordPage';
 
 export default function App() {
     return (
@@ -26,6 +28,9 @@ export default function App() {
                 }
             >
                 <Route path="/dashboard" element={<DashboardPage />} />
+                {/* The user menu's pages — any signed-in user, their own account only. */}
+                <Route path="/profile" element={<ProfilePage />} />
+                <Route path="/change-password" element={<ChangePasswordPage />} />
                 <Route path="/cheques" element={<ChequesPage />} />
                 <Route path="/lddaps" element={<LddapsPage />} />
                 <Route path="/acics" element={<AcicsPage />} />

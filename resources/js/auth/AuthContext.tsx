@@ -17,6 +17,8 @@ interface AuthContextValue {
     isTeller: boolean;
     login: (username: string, password: string) => Promise<void>;
     logout: () => Promise<void>;
+    /** Replace the signed-in user after they edit their own profile, so the header follows. */
+    updateUser: (user: User) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -57,6 +59,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
     }, []);
 
+    const updateUser = useCallback((next: User) => setUser(next), []);
+
     const value = useMemo<AuthContextValue>(
         () => ({
             user,
@@ -65,8 +69,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             isTeller: user?.role === 'teller',
             login,
             logout,
+            updateUser,
         }),
-        [user, loading, login, logout],
+        [user, loading, login, logout, updateUser],
     );
 
     return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

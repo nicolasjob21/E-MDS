@@ -21,7 +21,10 @@ class AcicService
     /** Everything a returned ACIC is read through. */
     private const WITH = ['usedBy', 'receivedBy', 'completedBy', 'createdBy', 'cheques', 'lddaps'];
 
-    public function __construct(private readonly ActivityLogger $logger) {}
+    public function __construct(
+        private readonly ActivityLogger $logger,
+        private readonly LddapCheckAllocator $checks,
+    ) {}
 
     /**
      * Register a block of ACIC numbers.
@@ -389,8 +392,15 @@ class AcicService
                 ]);
             }
 
-            // Released first, so the ACIC's membership never counts both at once.
+            // Released first, so the ACIC's membership never counts both at once. A released
+            // LDDAP keeps the check number it was issued — numbers are never reused — and the
+            // one coming on takes the next one if it has none yet.
             $release->update(['acic_id' => null]);
+
+            if (! $isCheque) {
+                $this->checks->claim($user, new Collection([$assign]));
+            }
+
             $assign->update(['acic_id' => $acic->id]);
 
             $from = $isCheque ? "#{$release->cheque_number}" : $release->lddap_no;

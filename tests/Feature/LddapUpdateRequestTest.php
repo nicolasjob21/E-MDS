@@ -8,7 +8,9 @@ use App\Enums\UserRole;
 use App\Models\ChequeLog;
 use App\Models\Lddap;
 use App\Models\LddapUpdateRequest;
+use App\Models\Unit;
 use App\Models\User;
+use App\Services\AcicService;
 use App\Services\LddapService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
@@ -17,6 +19,13 @@ use Tests\TestCase;
 class LddapUpdateRequestTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // A numbered record goes on an ACIC, which needs a registered ACIC series.
+        $this->seedAcicSeries(1, 50);
+    }
 
     private function admin(): User
     {
@@ -33,21 +42,42 @@ class LddapUpdateRequestTest extends TestCase
         return User::factory()->teller()->create();
     }
 
-    /** Register a series and use `$count` numbers, returning the LDDAPs. */
-    private function seedLddap(int $count = 1): Lddap
+    /**
+     * Register a series and `$count` LDDAPs, forwarded and received back — Returned for ACIC,
+     * awaiting the admin's action. With `$numbered`, the first is also approved and put on an
+     * ACIC, which is when it takes its check number.
+     */
+    private function seedLddap(int $count = 1, bool $numbered = false): Lddap
     {
-        app(LddapService::class)->addRange($this->admin(), 1, 10);
+        $service = app(LddapService::class);
+        $service->addRange($this->admin(), 1, 10);
+        $staff = $this->staff();
+        $unit = Unit::firstOrCreate(['name' => 'ACCOUNTING']);
+        $first = null;
 
-        $rows = array_map(fn (int $i) => [
-            'lddap_no' => 'LDDAP-000'.$i,
-            'obj_no' => 'OBJ-'.$i,
-            'payee_name' => 'Payee '.$i,
-            'amount' => 100 * $i,
-        ], range(1, $count));
+        foreach (range(1, $count) as $i) {
+            $lddap = $service->register($staff, [
+                'lddap_no' => 'LDDAP-000'.$i,
+                'obj_no' => 'OBJ-'.$i,
+                'payee_name' => 'Payee '.$i,
+                'amount' => 100 * $i,
+            ]);
+            $lddap = $service->forward($staff, $lddap, [
+                'forward_to' => 'Accounting', 'unit_id' => $unit->id, 'date_forwarded' => '2026-09-22',
+            ]);
+            $lddap = $service->receive($staff, $lddap, ['unit_id' => $unit->id, 'date_received' => '2026-09-23']);
+            $first ??= $lddap;
+        }
 
-        return app(LddapService::class)
-            ->useCheckNumbers($this->staff(), 1, $rows)
-            ->first();
+        if ($numbered) {
+            $admin = $this->admin();
+            $first = $service->approve($admin, $first);
+            $acic = app(AcicService::class)->create($admin);
+            $service->assignToAcic($staff, $acic, [$first->id]);
+            $first = $first->fresh(['lddapCheck', 'usedBy']);
+        }
+
+        return $first;
     }
 
     /** @return array<string, mixed> */
@@ -149,7 +179,7 @@ class LddapUpdateRequestTest extends TestCase
 
     public function test_a_pending_request_blocks_teller_receipt(): void
     {
-        $lddap = $this->seedLddap();
+        $lddap = $this->seedLddap(numbered: true);
         Sanctum::actingAs($this->staff());
         $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction())->assertCreated();
 
@@ -159,23 +189,23 @@ class LddapUpdateRequestTest extends TestCase
             ->assertJsonValidationErrors('lddap');
     }
 
-    public function test_a_pending_request_blocks_admin_review(): void
+    public function test_a_pending_request_blocks_the_admins_action(): void
     {
         $lddap = $this->seedLddap();
         Sanctum::actingAs($this->staff());
         $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction())->assertCreated();
 
         Sanctum::actingAs($this->admin());
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/review", ['status' => 'approved'])
+        $this->postJson("/api/v1/lddaps/{$lddap->id}/approve")
             ->assertStatus(422)
             ->assertJsonValidationErrors('lddap');
 
-        $this->assertSame(LddapStatus::Used, $lddap->fresh()->status);
+        $this->assertSame(LddapStatus::ReturnedForAcic, $lddap->fresh()->status);
     }
 
     public function test_the_hold_lifts_once_the_request_is_resolved(): void
     {
-        $lddap = $this->seedLddap();
+        $lddap = $this->seedLddap(numbered: true);
         Sanctum::actingAs($this->staff());
         $id = $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction())
             ->assertCreated()->json('data.id');
@@ -221,7 +251,7 @@ class LddapUpdateRequestTest extends TestCase
 
     public function test_the_check_number_is_never_changed_by_a_correction(): void
     {
-        $lddap = $this->seedLddap();
+        $lddap = $this->seedLddap(numbered: true);
         $checkId = $lddap->lddap_check_id;
         $checkNo = $lddap->lddapCheck->check_no;
 
@@ -442,129 +472,16 @@ class LddapUpdateRequestTest extends TestCase
         $this->assertSame('OBJ-1', $lddap->fresh()->obj_no);
     }
 
-    // ----------------------------------------------------- the compliance loop
-
-    public function test_a_compliance_record_returns_to_staff_with_the_admin_remark(): void
-    {
-        $lddap = $this->seedLddap();
-
-        Sanctum::actingAs($this->admin());
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/review", [
-            'status' => 'compliance',
-            'review_note' => 'The OBJ number belongs to a different voucher.',
-        ])->assertOk();
-
-        // The staff member sees the record flagged for their action, with the remark.
-        Sanctum::actingAs($this->staff());
-        $row = $this->getJson('/api/v1/lddaps?status=compliance')
-            ->assertOk()
-            ->assertJsonCount(1, 'data')
-            ->json('data.0');
-
-        $this->assertTrue($row['awaits_compliance']);
-        $this->assertSame('The OBJ number belongs to a different voucher.', $row['review_note']);
-        $this->assertFalse($row['is_final']);
-    }
+    // ----------------------------------------------------------- the RTS loop
 
     /**
-     * A returned record is handed back to one person — the staff member who used the check
-     * number. Another staff member correcting it would be answering a remark they never got.
+     * The correction path now runs through RTS: the admin sends the record back to Registered,
+     * the details are corrected, and it is forwarded again. Approving a correction changes the
+     * details only — it never moves the record in its routing.
      */
-    public function test_only_the_staff_member_a_record_was_returned_to_may_correct_it(): void
+    public function test_approving_a_correction_leaves_the_routing_alone(): void
     {
         $lddap = $this->seedLddap();
-
-        Sanctum::actingAs($this->admin());
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/review", [
-            'status' => 'compliance',
-            'review_note' => 'OBJ number is wrong.',
-        ])->assertOk();
-
-        // A different staff member is refused, by name.
-        Sanctum::actingAs($this->staff());
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction())
-            ->assertStatus(422)
-            ->assertJsonPath('errors.lddap.0', "LDDAP LDDAP-0001 was returned to {$lddap->usedBy->name}. Only they can update it.");
-
-        $this->assertDatabaseCount('lddap_update_requests', 0);
-
-        // The staff member it was returned to may.
-        Sanctum::actingAs($lddap->usedBy);
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction())
-            ->assertCreated();
-    }
-
-    /** The restriction is specific to a returned record; an ordinary correction is open. */
-    public function test_any_staff_member_may_propose_a_correction_on_a_record_not_returned(): void
-    {
-        $lddap = $this->seedLddap();
-
-        Sanctum::actingAs($this->staff());
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction())
-            ->assertCreated();
-    }
-
-    public function test_returning_a_record_notifies_the_staff_member_it_was_returned_to(): void
-    {
-        $lddap = $this->seedLddap();
-        $owner = $lddap->usedBy;
-
-        Sanctum::actingAs($this->admin());
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/review", [
-            'status' => 'compliance',
-            'review_note' => 'OBJ number is wrong.',
-        ])->assertOk();
-
-        Sanctum::actingAs($owner);
-        $note = $this->getJson('/api/v1/notifications')->assertOk()->json('data.0');
-
-        $this->assertSame('request', $note['kind']);
-        $this->assertSame('LDDAP LDDAP-0001 returned to you', $note['title']);
-        $this->assertStringContainsString('it needs your attention', $note['message']);
-        $this->assertStringContainsString('OBJ number is wrong.', $note['message']);
-    }
-
-    public function test_the_full_compliance_loop_ends_in_approval(): void
-    {
-        $lddap = $this->seedLddap();
-
-        // 1. Admin returns it for compliance with a remark.
-        Sanctum::actingAs($this->admin());
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/review", [
-            'status' => 'compliance',
-            'review_note' => 'OBJ number is wrong.',
-        ])->assertOk();
-
-        // 2. The staff member it was returned to updates the details against that remark.
-        Sanctum::actingAs($lddap->usedBy);
-        $id = $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction([
-            'obj_no' => 'OBJ-CORRECT',
-        ]))->assertCreated()->json('data.id');
-
-        // 3. While it waits, the record is on hold — it cannot be reviewed.
-        Sanctum::actingAs($this->admin());
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/review", ['status' => 'approved'])
-            ->assertStatus(422);
-
-        // 4. Admin confirms the correction. That approval *is* the sign-off: the deficiency is
-        //    fixed and accepted, so the record moves straight to Approved.
-        $this->postJson("/api/v1/lddap-update-requests/{$id}/approve")->assertOk();
-
-        $lddap->refresh();
-        $this->assertSame('OBJ-CORRECT', $lddap->obj_no);
-        $this->assertSame(LddapStatus::Approved, $lddap->status);
-
-        // 5. ...and it is immediately eligible for an ACIC.
-        Sanctum::actingAs($this->staff());
-        $this->getJson('/api/v1/lddaps/linkable')
-            ->assertOk()
-            ->assertJsonPath('data.0.lddap_no', 'LDDAP-0001');
-    }
-
-    public function test_approving_a_correction_on_a_record_not_in_compliance_leaves_its_status_alone(): void
-    {
-        $lddap = $this->seedLddap();
-
         Sanctum::actingAs($this->staff());
         $id = $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction())
             ->assertCreated()->json('data.id');
@@ -572,33 +489,69 @@ class LddapUpdateRequestTest extends TestCase
         Sanctum::actingAs($this->admin());
         $this->postJson("/api/v1/lddap-update-requests/{$id}/approve")->assertOk();
 
-        // Still merely Used — only a compliance record is signed off by the approval.
-        $this->assertSame(LddapStatus::Used, $lddap->fresh()->status);
+        $lddap->refresh();
+        $this->assertSame('OBJ-999', $lddap->obj_no);
+        $this->assertSame(LddapStatus::ReturnedForAcic, $lddap->status);
+        $this->assertNull($lddap->reviewed_at);
     }
 
-    public function test_an_admin_can_resolve_compliance_by_correcting_it_themselves(): void
+    public function test_an_rtsd_record_is_corrected_and_forwarded_again(): void
     {
         $lddap = $this->seedLddap();
+        $service = app(LddapService::class);
+        $unit = Unit::firstOrCreate(['name' => 'ACCOUNTING']);
+
+        // Admin sends it back.
+        $service->rts($this->admin(), $lddap, [
+            'received_on' => '2026-09-23', 'received_by' => 'M. Santos', 'unit_id' => $unit->id,
+            'rts_date' => '2026-09-24', 'note' => 'Wrong OBJ code.',
+        ]);
+        $this->assertSame(LddapStatus::Rts, $lddap->fresh()->status);
+
+        // Staff correct it, admin approves the correction — still RTS.
+        Sanctum::actingAs($this->staff());
+        $id = $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction())
+            ->assertCreated()->json('data.id');
         Sanctum::actingAs($this->admin());
+        $this->postJson("/api/v1/lddap-update-requests/{$id}/approve")->assertOk();
+        $this->assertSame(LddapStatus::Rts, $lddap->fresh()->status);
 
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/review", [
-            'status' => 'compliance',
-            'review_note' => 'OBJ number is wrong.',
-        ])->assertOk();
+        // Forwarded again, received again, approved.
+        $staff = $this->staff();
+        $lddap = $service->forward($staff, $lddap->fresh(), [
+            'forward_to' => 'Accounting', 'unit_id' => $unit->id, 'date_forwarded' => '2026-09-24',
+        ]);
+        $lddap = $service->receive($staff, $lddap, ['unit_id' => $unit->id, 'date_received' => '2026-09-25']);
+        $this->assertSame(LddapStatus::Approved, $service->approve($this->admin(), $lddap)->status);
+    }
 
-        $this->patchJson("/api/v1/lddaps/{$lddap->id}", [
-            'lddap_no' => 'LDDAP-0001',
-            'obj_no' => 'OBJ-CORRECT',
-            'payee_name' => 'Payee 1',
-            'amount' => 100,
-            'reason' => 'Fixed the OBJ number myself rather than sending it back.',
-        ])->assertOk();
+    /** A canceled record is closed to corrections, from staff and from an admin alike. */
+    public function test_a_canceled_record_takes_no_correction(): void
+    {
+        $lddap = $this->seedLddap();
+        app(LddapService::class)->cancel($this->admin(), $lddap, ['note' => 'Withdrawn.']);
 
-        $this->assertSame('OBJ-CORRECT', $lddap->fresh()->obj_no);
+        Sanctum::actingAs($this->staff());
+        $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction())
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('lddap');
 
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/review", ['status' => 'approved'])
-            ->assertOk()
-            ->assertJsonPath('data.status', 'approved');
+        Sanctum::actingAs($this->admin());
+        $this->patchJson("/api/v1/lddaps/{$lddap->id}", $this->correction())
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('lddap');
+
+        $this->assertSame('OBJ-1', $lddap->fresh()->obj_no);
+    }
+
+    public function test_any_staff_member_may_propose_a_correction(): void
+    {
+        $lddap = $this->seedLddap();
+
+        // Not only the staff member who registered it.
+        Sanctum::actingAs($this->staff());
+        $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction())
+            ->assertCreated();
     }
 
     public function test_staff_cannot_read_the_admin_queue(): void

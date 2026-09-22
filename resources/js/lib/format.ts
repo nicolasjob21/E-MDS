@@ -52,6 +52,8 @@ export function formatRelative(iso?: string | null): string {
 const ACTION_LABELS: Record<string, string> = {
     login: 'Signed in',
     logout: 'Signed out',
+    updated_profile: 'Updated profile',
+    changed_password: 'Changed password',
     used_cheque: 'Used cheque',
     added_lddap_check_range: 'Added LDDAP check range',
     used_lddap_check: 'Used LDDAP check',

@@ -175,7 +175,7 @@ export default function AcicReassignModal({ acic, onClose, onReassigned }: Props
             aria-labelledby="acic-reassign-title"
         >
             <div
-                className="card flex max-h-[92vh] w-full max-w-lg flex-col overflow-y-auto p-6"
+                className="card flex max-h-[92vh] w-full max-w-xl flex-col overflow-y-auto p-6"
                 onClick={(e) => e.stopPropagation()}
             >
                 <div className="mb-4 flex items-start justify-between gap-4">
