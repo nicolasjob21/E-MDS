@@ -133,47 +133,60 @@ class AcicTellerService
         });
     }
 
-    // --------------------------------------------------------------- 3. off to the bank
+    // ------------------------------------------------- 3. lodged with the bank, and closed
 
     /**
-     * Lodge the ACIC with Land Bank — the first time, or again after the bank sent it back.
+     * **Confirm and Complete.** Lodging the ACIC with Land Bank and closing it are one step:
+     * the teller records when it went over the counter, and the ACIC and every record on it
+     * become Completed.
      *
-     * @param  array{forwarded_at?: string|null, transmittal_no?: string|null, note?: string|null}  $details
+     * Taken the first time from Accepted by Teller, and again after the bank has sent it back —
+     * each pass adding its own history row, never overwriting the last.
+     *
+     * @param  array{forwarded_at?: string|null, note?: string|null}  $details
      *
      * @throws ValidationException
      */
-    public function forwardToLandBank(User $teller, Acic $acic, array $details, ?string $expected = null): Acic
+    public function confirmAndComplete(User $teller, Acic $acic, array $details, ?string $expected = null): Acic
     {
         return DB::transaction(function () use ($teller, $acic, $details, $expected) {
             $acic = $this->lock($acic);
             $from = $acic->teller_status;
             $this->assertAccepter($teller, $acic);
-            $this->assertMove($acic, AcicTellerStatus::ForwardedToLandBank, $expected);
+            $this->assertMove($acic, AcicTellerStatus::Completed, $expected);
 
             $at = $this->moment($details['forwarded_at'] ?? null);
-            // Never before it was claimed, and never in the future.
             $this->assertNotFuture($at, 'forwarded_at');
             $this->assertNotBefore($at, $acic->accepted_at, 'forwarded_at', 'the date and time the ACIC was accepted');
 
+            // Completing after a return has to come after that return, not before it.
+            $this->assertNotBefore($at, $acic->returned_by_bank_at, 'forwarded_at', 'the date and time the bank returned it');
+
             $acic->update([
-                'teller_status' => AcicTellerStatus::ForwardedToLandBank,
+                'teller_status' => AcicTellerStatus::Completed,
                 'forwarded_to_land_bank_at' => $at,
-                'transmittal_no' => $this->text($details['transmittal_no'] ?? null),
-                'land_bank_note' => $this->text($details['note'] ?? null),
-                // Lodging it again clears the bank's last return from the ACIC; the records
-                // keep their own flags until they are resolved.
+                'completion_note' => $this->text($details['note'] ?? null),
+                'completed_by' => $teller->id,
+                'completed_at' => Carbon::now(),
+                'status' => AcicStatus::Completed,
+                // The bank's last return is settled by this pass.
                 'returned_by_bank_at' => null,
                 'bank_return_reason' => null,
             ]);
 
-            $this->moveRecords($teller, $acic, $acic->records(), ChequeStatus::ForwardedToLandBank, LddapStatus::ForwardedToLandBank, 'forwarded_to_land_bank');
-            $this->trail($acic, $from, AcicTellerStatus::ForwardedToLandBank,
-                $from === AcicTellerStatus::ReturnedByBank ? 're_forwarded_to_land_bank' : 'forwarded_to_land_bank',
-                $teller, $details);
+            // Whatever the bank sent back has been put right, or it would not be going again.
+            $acic->cheques()->update(['returned_by_bank' => false, 'bank_return_note' => null]);
+            $acic->lddaps()->update(['returned_by_bank' => false, 'bank_return_note' => null]);
+
+            $this->moveRecords($teller, $acic, $acic->records(), ChequeStatus::Completed, LddapStatus::Completed, 'completed');
+            $this->trail($acic, $from, AcicTellerStatus::Completed,
+                $from === AcicTellerStatus::ReturnedByBank ? 're_completed' : 'completed',
+                $teller, ['forwarded_at' => $at->toDateTimeString()] + $details);
 
             $this->tell($acic->forwardedToTellerBy, 'approved',
-                "ACIC #{$acic->acic_number} lodged with ".self::BANK,
-                "{$teller->name} forwarded ACIC #{$acic->acic_number} to ".self::BANK." on {$at->toDayDateTimeString()}.");
+                "ACIC #{$acic->acic_number} completed",
+                "{$teller->name} forwarded ACIC #{$acic->acic_number} to ".self::BANK.
+                    " on {$at->setTimezone(Validity::TZ)->toDayDateTimeString()} and completed it.");
 
             return $acic->fresh(self::WITH);
         });
@@ -182,8 +195,8 @@ class AcicTellerService
     // ------------------------------------------------------------- 4. the bank sends it back
 
     /**
-     * The bank returned it. The records it actually affected are flagged; the rest are left
-     * alone, so what has to be fixed is on the record that needs fixing.
+     * The bank returned a completed ACIC. The records it actually affected are flagged; the
+     * rest are left alone, so what has to be fixed is on the record that needs fixing.
      *
      * @param  array{returned_at?: string|null, reason: string, cheque_ids?: list<int>, lddap_ids?: list<int>}  $details
      *
@@ -213,6 +226,8 @@ class AcicTellerService
                 'teller_status' => AcicTellerStatus::ReturnedByBank,
                 'returned_by_bank_at' => $at,
                 'bank_return_reason' => $reason,
+                // It is open again, whatever its own axis said.
+                'status' => AcicStatus::Approved,
             ]);
 
             foreach ($affected as $record) {
@@ -220,86 +235,12 @@ class AcicTellerService
             }
 
             $this->moveRecords($teller, $acic, $affected, ChequeStatus::ReturnedByBank, LddapStatus::ReturnedByBank, 'returned_by_bank', $reason);
-            $this->trail($acic, AcicTellerStatus::ForwardedToLandBank, AcicTellerStatus::ReturnedByBank, 'returned_by_bank', $teller,
+            $this->trail($acic, AcicTellerStatus::Completed, AcicTellerStatus::ReturnedByBank, 'returned_by_bank', $teller,
                 ['affected' => $affected->count()] + $details, $reason);
 
             $this->tell($acic->forwardedToTellerBy, 'rejected',
                 "ACIC #{$acic->acic_number} returned by the bank",
                 "{$teller->name} recorded ".self::BANK." returning ACIC #{$acic->acic_number} ({$affected->count()} record(s)): {$reason}");
-
-            return $acic->fresh(self::WITH);
-        });
-    }
-
-    // ------------------------------------------------------------------- 5. credited
-
-    /**
-     * The bank credited it. Final — nothing may happen to the ACIC or its records after this.
-     *
-     * `handed_to_bank_at` is when the ACIC actually went over the counter. A teller who
-     * lodged it earlier already recorded that, and it stands; one closing the ACIC in a single
-     * visit gives it here, so the trip to the bank is never lost just because it was short.
-     *
-     * @param  array{credited_at?: string|null, handed_to_bank_at?: string|null, bank_confirmation_no: string, note?: string|null}  $details
-     *
-     * @throws ValidationException
-     */
-    public function complete(User $teller, Acic $acic, array $details, ?string $expected = null): Acic
-    {
-        return DB::transaction(function () use ($teller, $acic, $details, $expected) {
-            $acic = $this->lock($acic);
-            $this->assertAccepter($teller, $acic);
-            $from = $acic->teller_status;
-            $this->assertMove($acic, AcicTellerStatus::Completed, $expected);
-
-            // A record the bank sent back has to be put right before the ACIC can be closed.
-            if ($acic->hasUnresolvedBankReturns()) {
-                throw ValidationException::withMessages([
-                    'acic' => 'Resolve returned records before completing.',
-                ]);
-            }
-
-            $reference = trim((string) ($details['bank_confirmation_no'] ?? ''));
-
-            if ($reference === '') {
-                throw ValidationException::withMessages([
-                    'bank_confirmation_no' => 'Enter the bank confirmation or reference number.',
-                ]);
-            }
-
-            // When it was handed over: what was already recorded, or what the teller gives now.
-            $handed = $acic->forwarded_to_land_bank_at
-                ?? $this->moment($details['handed_to_bank_at'] ?? null);
-
-            if ($acic->forwarded_to_land_bank_at === null) {
-                $this->assertNotFuture($handed, 'handed_to_bank_at');
-                $this->assertNotBefore($handed, $acic->accepted_at, 'handed_to_bank_at', 'the date and time the ACIC was accepted');
-            }
-
-            $at = $this->moment($details['credited_at'] ?? null);
-            $this->assertNotFuture($at, 'credited_at');
-            $this->assertNotBefore($at, $handed, 'credited_at', 'the date and time it was handed to the bank');
-
-            $acic->update([
-                'teller_status' => AcicTellerStatus::Completed,
-                'forwarded_to_land_bank_at' => $handed,
-                'credited_at' => $at,
-                'bank_confirmation_no' => $reference,
-                'confirmed_by' => $teller->id,
-                'completion_note' => $this->text($details['note'] ?? null),
-                // The ACIC's own axis is finished with too.
-                'status' => AcicStatus::Completed,
-                'completed_by' => $teller->id,
-                'completed_at' => Carbon::now(),
-            ]);
-
-            $this->moveRecords($teller, $acic, $acic->records(), ChequeStatus::Completed, LddapStatus::Completed, 'completed');
-            $this->trail($acic, $from, AcicTellerStatus::Completed, 'completed', $teller,
-                ['handed_to_bank_at' => $handed->toDateTimeString()] + $details);
-
-            $this->tell($acic->forwardedToTellerBy, 'approved',
-                "ACIC #{$acic->acic_number} credited",
-                "{$teller->name} confirmed ".self::BANK." credited ACIC #{$acic->acic_number} on {$at->toDayDateTimeString()} (ref {$reference}).");
 
             return $acic->fresh(self::WITH);
         });

@@ -7,10 +7,9 @@ use App\Enums\AcicTellerStatus;
 use App\Http\Requests\AcceptAcicRequest;
 use App\Http\Requests\AddAcicRangeRequest;
 use App\Http\Requests\AssignChequesToAcicRequest;
-use App\Http\Requests\CompleteAcicRequest;
+use App\Http\Requests\ConfirmCompleteAcicRequest;
 use App\Http\Requests\ForwardAcicRequest;
 use App\Http\Requests\ForwardAcicToTellerRequest;
-use App\Http\Requests\ForwardToLandBankRequest;
 use App\Http\Requests\ReassignAcicRequest;
 use App\Http\Requests\ReturnAcicToAdminRequest;
 use App\Http\Requests\ReturnedByBankRequest;
@@ -205,10 +204,12 @@ class AcicController extends Controller
         return $this->asResource($this->teller->accept($request->user(), $acic, $request->expectedStatus()));
     }
 
-    /** Teller: lodge it with Land Bank — the first time, or again after a return. */
-    public function forwardToLandBank(ForwardToLandBankRequest $request, Acic $acic): JsonResponse
+    /**
+     * Teller: lodge it with Land Bank and close it — the first time, or again after a return.
+     */
+    public function confirmAndComplete(ConfirmCompleteAcicRequest $request, Acic $acic): JsonResponse
     {
-        return $this->asResource($this->teller->forwardToLandBank(
+        return $this->asResource($this->teller->confirmAndComplete(
             $request->user(), $acic, $request->validated(), $request->expectedStatus(),
         ));
     }
@@ -217,14 +218,6 @@ class AcicController extends Controller
     public function returnedByBank(ReturnedByBankRequest $request, Acic $acic): JsonResponse
     {
         return $this->asResource($this->teller->returnedByBank(
-            $request->user(), $acic, $request->validated(), $request->expectedStatus(),
-        ));
-    }
-
-    /** Teller: the bank credited it. Final. */
-    public function markCredited(CompleteAcicRequest $request, Acic $acic): JsonResponse
-    {
-        return $this->asResource($this->teller->complete(
             $request->user(), $acic, $request->validated(), $request->expectedStatus(),
         ));
     }
@@ -282,8 +275,6 @@ class AcicController extends Controller
                 // Pending is everyone's; the rest are the viewer's own (an admin sees all).
                 'pending' => AcicResource::collection($base()->where('teller_status', AcicTellerStatus::Pending)->get()),
                 'accepted' => AcicResource::collection($base()->where('teller_status', AcicTellerStatus::AcceptedByTeller)
-                    ->when(! $user->isAdmin(), $mine)->get()),
-                'forwarded' => AcicResource::collection($base()->where('teller_status', AcicTellerStatus::ForwardedToLandBank)
                     ->when(! $user->isAdmin(), $mine)->get()),
                 'returned' => AcicResource::collection($base()->where('teller_status', AcicTellerStatus::ReturnedByBank)
                     ->when(! $user->isAdmin(), $mine)->get()),

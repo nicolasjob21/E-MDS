@@ -40,7 +40,6 @@ const EXTRA_TABS: { key: ChequeTab; label: string }[] = [
     { key: 'for_acic', label: 'For ACIC' },
     { key: 'approved', label: 'Approved' },
     { key: 'forwarded_to_teller', label: 'Forwarded to Teller' },
-    { key: 'forwarded_to_land_bank', label: 'With Land Bank' },
     { key: 'returned_by_bank', label: 'Returned by Bank' },
     { key: 'accepted_by_teller', label: 'Accepted by Teller' },
 ];

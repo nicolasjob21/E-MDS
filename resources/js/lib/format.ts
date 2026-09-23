@@ -107,7 +107,6 @@ const CHEQUE_STATUS_LABELS: Record<string, string> = {
     released_to_payee: 'Released to Payee',
     forwarded_to_teller: 'Forwarded to Teller',
     accepted_by_teller: 'Accepted by Teller',
-    forwarded_to_land_bank: 'Forwarded to Land Bank',
     returned_by_bank: 'Returned by Bank',
     completed: 'Completed',
     cancelled: 'Cancelled',

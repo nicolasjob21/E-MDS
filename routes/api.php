@@ -59,9 +59,9 @@ Route::prefix('v1')->group(function () {
         // Admin sends it out; the rest belong to the teller who claimed it.
         Route::post('acics/{acic}/forward-to-teller', [AcicController::class, 'forwardToTeller']);
         Route::post('acics/{acic}/accept', [AcicController::class, 'acceptByTeller']);
-        Route::post('acics/{acic}/forward-to-land-bank', [AcicController::class, 'forwardToLandBank']);
+        // Lodging with Land Bank and closing are one step.
+        Route::post('acics/{acic}/confirm-complete', [AcicController::class, 'confirmAndComplete']);
         Route::post('acics/{acic}/returned-by-bank', [AcicController::class, 'returnedByBank']);
-        Route::post('acics/{acic}/complete-teller', [AcicController::class, 'markCredited']);
         Route::post('acics/{acic}/return-to-admin', [AcicController::class, 'returnToAdmin']);
 
         // Teller only: confirm a used cheque has been received, and complete a forwarded ACIC.

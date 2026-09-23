@@ -47,7 +47,6 @@ export type ChequeStatus =
     | 'released_to_payee'
     | 'forwarded_to_teller'
     | 'accepted_by_teller'
-    | 'forwarded_to_land_bank'
     | 'returned_by_bank'
     | 'completed'
     | 'cancelled'
@@ -458,21 +457,15 @@ export interface AcicSeries {
 /**
  * Where an ACIC stands with the tellers and the bank:
  *
- *   pending → accepted_by_teller → forwarded_to_land_bank → completed
- *                                          └─▶ returned_by_bank → lodged again
+ *   pending → accepted_by_teller → completed
+ *                                      └─▶ returned_by_bank → completed again
  */
-export type AcicTellerStatus =
-    | 'pending'
-    | 'accepted_by_teller'
-    | 'forwarded_to_land_bank'
-    | 'returned_by_bank'
-    | 'completed';
+export type AcicTellerStatus = 'pending' | 'accepted_by_teller' | 'returned_by_bank' | 'completed';
 
 /** The teller dashboard's five lists. */
 export interface TellerQueue {
     pending: Acic[];
     accepted: Acic[];
-    forwarded: Acic[];
     returned: Acic[];
     completed: Acic[];
     bank_name: string;

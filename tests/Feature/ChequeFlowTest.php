@@ -24,7 +24,7 @@ use Tests\TestCase;
  *
  *   Registered → Out for Signature → (Received) → For ACIC → Approved ─┬─▶ Released to Payee
  *                                                                      └─▶ Forwarded to Teller
- *                                                                               → Accepted → Deposited
+ *                                                                               → Accepted → Completed
  *
  * and the three ways out of it — RTS, Cancel and Void.
  */
@@ -332,7 +332,7 @@ class ChequeFlowTest extends TestCase
         $this->assertSame($first->id, $acic->fresh()->accepted_by);
     }
 
-    public function test_only_the_accepting_teller_lodges_it_with_the_bank(): void
+    public function test_only_the_accepting_teller_completes_it(): void
     {
         $admin = $this->admin();
         $mine = $this->teller('First Teller');
@@ -342,17 +342,18 @@ class ChequeFlowTest extends TestCase
         app(AcicTellerService::class)->accept($mine, $acic);
 
         Sanctum::actingAs($other);
-        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-land-bank", [])
-            ->assertStatus(422)->assertJsonValidationErrors(['acic' => 'only they can act on it']);
+        $this->postJson("/api/v1/acics/{$acic->id}/confirm-complete", [
+            'forwarded_at' => now()->setTimezone(Validity::TZ)->format('Y-m-d H:i:s'),
+        ])->assertStatus(422)->assertJsonValidationErrors(['acic' => 'only they can act on it']);
 
         Sanctum::actingAs($mine);
-        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-land-bank", ['transmittal_no' => 'TR-99812'])
-            ->assertOk();
+        $this->postJson("/api/v1/acics/{$acic->id}/confirm-complete", [
+            'forwarded_at' => now()->setTimezone(Validity::TZ)->format('Y-m-d H:i:s'),
+        ])->assertOk();
 
         $acic->refresh();
-        $this->assertSame(ChequeStatus::ForwardedToLandBank, $cheque->fresh()->status);
-        $this->assertSame('TR-99812', $acic->transmittal_no);
-        $this->assertSame(AcicTellerStatus::ForwardedToLandBank, $acic->teller_status);
+        $this->assertSame(ChequeStatus::Completed, $cheque->fresh()->status);
+        $this->assertSame(AcicTellerStatus::Completed, $acic->teller_status);
     }
 
     public function test_return_to_admin_puts_every_cheque_back_to_approved(): void
@@ -501,7 +502,7 @@ class ChequeFlowTest extends TestCase
         }
     }
 
-    public function test_only_tellers_accept_deposit_or_return(): void
+    public function test_only_tellers_accept_complete_or_return(): void
     {
         $admin = $this->admin();
         $staff = $this->staff();
@@ -510,7 +511,9 @@ class ChequeFlowTest extends TestCase
 
         Sanctum::actingAs($staff);
         $this->postJson("/api/v1/acics/{$acic->id}/accept")->assertForbidden();
-        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-land-bank", [])->assertForbidden();
+        $this->postJson("/api/v1/acics/{$acic->id}/confirm-complete", [
+            'forwarded_at' => now()->setTimezone(Validity::TZ)->format('Y-m-d H:i:s'),
+        ])->assertForbidden();
         $this->postJson("/api/v1/acics/{$acic->id}/return-to-admin", ['reason' => 'No.'])->assertForbidden();
     }
 
@@ -523,21 +526,25 @@ class ChequeFlowTest extends TestCase
         [$cheque, $acic] = $this->onAcic($admin);
         app(AcicTellerService::class)->forwardToTeller($admin, $acic);
         app(AcicTellerService::class)->accept($teller, $acic);
-        app(AcicTellerService::class)->forwardToLandBank($teller, $acic, []);
+        // The trip to the bank happens after the ACIC was accepted.
+        $this->travelTo(now()->addHours(2));
+        app(AcicTellerService::class)->confirmAndComplete($teller, $acic, [
+            'forwarded_at' => now()->setTimezone(Validity::TZ)->format('Y-m-d H:i:s'),
+        ]);
 
         Sanctum::actingAs($admin);
 
         $history = $this->getJson("/api/v1/cheques/{$cheque->id}/status-history")->assertOk()->json('data');
 
         $this->assertSame(
-            ['routed', 'received', 'ready_for_acic', 'assigned', 'forwarded_to_teller', 'accepted_by_teller', 'forwarded_to_land_bank'],
+            ['routed', 'received', 'ready_for_acic', 'assigned', 'forwarded_to_teller', 'accepted_by_teller', 'completed'],
             array_column($history, 'action'),
         );
 
         $last = end($history);
-        $this->assertSame('forwarded_to_land_bank', $last['action']);
+        $this->assertSame('completed', $last['action']);
         $this->assertSame('Accepted by Teller', $last['from_status_label']);
-        $this->assertSame('Forwarded to Land Bank', $last['to_status_label']);
+        $this->assertSame('Completed', $last['to_status_label']);
         $this->assertSame($teller->name, $last['user']['name']);
         $this->assertSame($acic->acic_number, $last['acic_number']);
     }

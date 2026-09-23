@@ -142,7 +142,6 @@ class ChequePrintTest extends TestCase
             [ChequeStatus::Approved, true],
             [ChequeStatus::ForwardedToTeller, true],
             [ChequeStatus::AcceptedByTeller, true],
-            [ChequeStatus::ForwardedToLandBank, true],
             [ChequeStatus::Completed, true],
             [ChequeStatus::ReleasedToPayee, true],
             [ChequeStatus::Cancelled, false],

@@ -64,7 +64,6 @@ export function StatusBadge({ status }: { status: ChequeStatus }) {
         released_to_payee: { styles: 'border-teal-400/50 text-teal-300 bg-teal-400/10', dot: 'bg-teal-400' },
         forwarded_to_teller: { styles: 'border-purple-400/50 text-purple-300 bg-purple-400/10', dot: 'bg-purple-400' },
         accepted_by_teller: { styles: 'border-indigo-400/50 text-indigo-300 bg-indigo-400/10', dot: 'bg-indigo-400' },
-        forwarded_to_land_bank: { styles: 'border-blue-400/50 text-blue-300 bg-blue-400/10', dot: 'bg-blue-400' },
         returned_by_bank: { styles: 'border-amber-400/50 text-amber-400 bg-amber-400/10', dot: 'bg-amber-400' },
         completed: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success' },
         cancelled: { styles: 'border-danger/40 text-danger-fg bg-danger/10', dot: 'bg-danger' },
@@ -96,10 +95,10 @@ export function ValidityBadge({ cheque }: { cheque: Cheque }) {
     }
 
     // Once the bank has it, the clock is the bank's business, not the cheque's.
-    if (status === 'completed' || status === 'forwarded_to_land_bank') {
+    if (status === 'completed') {
         return (
             <span className="text-xs text-blue-300">
-                {status === 'completed' ? 'Credited' : 'With Land Bank'}
+                Completed
                 {cheque.acic_teller?.deposit_date ? ` ${formatDate(cheque.acic_teller.deposit_date)}` : ''}
             </span>
         );

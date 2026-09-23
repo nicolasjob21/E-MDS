@@ -6,10 +6,13 @@ namespace App\Enums;
  * Where an ACIC stands with the tellers and the bank — the teller's own axis, alongside
  * `AcicStatus` (which tracks the ACIC's own life: open, used, approved, …).
  *
- *   Pending → Accepted by Teller → Forwarded to Land Bank → Completed (credited)
- *                                          │
- *                                          └─▶ Returned by Bank ─┬─▶ Forwarded to Land Bank again
- *                                                                └─▶ back to the admin
+ *   Pending → Accepted by Teller → Completed
+ *                                      │
+ *                                      └─▶ Returned by Bank ─┬─▶ Completed again
+ *                                                            └─▶ back to the admin
+ *
+ * Lodging the ACIC with Land Bank is not a resting state: **Confirm and Complete** records when
+ * it went over the counter and closes it in the same step.
  *
  * Null means the ACIC has never been sent to a teller. Returning it to the admin clears the
  * axis back to null, so the next forward starts a fresh cycle.
@@ -22,13 +25,13 @@ enum AcicTellerStatus: string
     /** One teller has claimed it. Only they may act on it from here. */
     case AcceptedByTeller = 'accepted_by_teller';
 
-    /** Lodged with Land Bank, awaiting the credit. */
-    case ForwardedToLandBank = 'forwarded_to_land_bank';
-
-    /** The bank sent it back. Fix it and lodge it again, or hand it to the admin. */
+    /** The bank sent it back. Put it right and complete it again, or hand it to the admin. */
     case ReturnedByBank = 'returned_by_bank';
 
-    /** Credited and confirmed by the bank. Final. */
+    /**
+     * Lodged with Land Bank and closed. Not the end of the road: the bank may still send it
+     * back, which is the one way out of here.
+     */
     case Completed = 'completed';
 
     public function label(): string
@@ -36,7 +39,6 @@ enum AcicTellerStatus: string
         return match ($this) {
             self::Pending => 'Pending',
             self::AcceptedByTeller => 'Accepted by Teller',
-            self::ForwardedToLandBank => 'Forwarded to Land Bank',
             self::ReturnedByBank => 'Returned by Bank',
             self::Completed => 'Completed',
         };
@@ -51,14 +53,12 @@ enum AcicTellerStatus: string
     {
         return match ($this) {
             self::Pending => [self::AcceptedByTeller],
-            // Return to Admin clears the axis, so it is not a state here. A teller who hands
-            // the ACIC over and gets the credit in one visit closes it straight from here,
-            // recording when it was handed to the bank as part of that.
-            self::AcceptedByTeller => [self::ForwardedToLandBank, self::Completed],
-            self::ForwardedToLandBank => [self::Completed, self::ReturnedByBank],
-            // Re-forward after the bank sent it back; every cycle is kept in the history.
-            self::ReturnedByBank => [self::ForwardedToLandBank],
-            self::Completed => [],
+            // Return to Admin clears the axis, so it is not a state here.
+            self::AcceptedByTeller => [self::Completed],
+            // The bank can send back an ACIC that was already closed.
+            self::Completed => [self::ReturnedByBank],
+            // Put it right and complete it again; every cycle is kept in the history.
+            self::ReturnedByBank => [self::Completed],
         };
     }
 
@@ -67,10 +67,16 @@ enum AcicTellerStatus: string
         return in_array($to, $this->nextStates(), true);
     }
 
-    /** Credited. Nothing further is allowed — no edit, return, re-forward or void. */
-    public function isFinal(): bool
+    /** Has the ACIC been lodged and closed? The bank may still return it. */
+    public function isCompleted(): bool
     {
         return $this === self::Completed;
+    }
+
+    /** May the teller complete it from here — the first time, or after a bank return? */
+    public function canComplete(): bool
+    {
+        return in_array($this, [self::AcceptedByTeller, self::ReturnedByBank], true);
     }
 
     /** May the teller holding it hand it back to the admin? Not once the bank has credited it. */

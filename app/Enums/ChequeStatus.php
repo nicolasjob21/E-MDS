@@ -8,7 +8,6 @@ namespace App\Enums;
  *   Registered → Out for Signature → (Mark as Received) → For ACIC → Approved ─┬─▶ Released to Payee
  *                                                                              └─▶ Forwarded to Teller
  *                                                                                        → Accepted by Teller
- *                                                                                        → Forwarded to Land Bank
  *                                                                                        → Completed
  *
  * `Available` sits outside the flow: it is a number the bank printed and an admin registered as
@@ -57,9 +56,6 @@ enum ChequeStatus: string
     /** A teller has claimed the ACIC and is holding it. */
     case AcceptedByTeller = 'accepted_by_teller';
 
-    /** Its ACIC is lodged with Land Bank, awaiting the credit. */
-    case ForwardedToLandBank = 'forwarded_to_land_bank';
-
     /** The bank sent its ACIC back. It goes round again once the issue is fixed. */
     case ReturnedByBank = 'returned_by_bank';
 
@@ -90,7 +86,6 @@ enum ChequeStatus: string
             self::ReleasedToPayee => 'Released to Payee',
             self::ForwardedToTeller => 'Forwarded to Teller',
             self::AcceptedByTeller => 'Accepted by Teller',
-            self::ForwardedToLandBank => 'Forwarded to Land Bank',
             self::ReturnedByBank => 'Returned by Bank',
             self::Completed => 'Completed',
             self::Cancelled => 'Cancelled',
@@ -121,12 +116,13 @@ enum ChequeStatus: string
             self::Approved => [self::ReleasedToPayee, self::ForwardedToTeller, self::Voided, self::Stale, self::ForAcic],
             // The teller steps, and Return to Admin from either of them.
             self::ForwardedToTeller => [self::AcceptedByTeller, self::Approved, self::Stale],
-            // Completed sits here too: a teller who hands the ACIC over and gets the credit
-            // in one visit closes it without a separate lodging step.
-            self::AcceptedByTeller => [self::ForwardedToLandBank, self::Completed, self::Approved, self::Stale],
-            // With the bank: credited, sent back, or handed to the admin.
-            self::ForwardedToLandBank => [self::Completed, self::ReturnedByBank, self::Approved, self::Stale],
-            self::ReturnedByBank => [self::ForwardedToLandBank, self::Approved, self::Stale],
+            // Confirm and Complete closes it straight from here; lodging with the bank is
+            // part of that step, not a resting place of its own.
+            self::AcceptedByTeller => [self::Completed, self::Approved, self::Stale],
+            // The bank may send back an ACIC that was already closed; putting it right
+            // completes it again.
+            self::Completed => [self::ReturnedByBank],
+            self::ReturnedByBank => [self::Completed, self::Approved, self::Stale],
             // A released cheque still ages: it can go stale uncashed.
             self::ReleasedToPayee => [self::Stale],
             self::Stale => [self::Replaced],
@@ -162,7 +158,7 @@ enum ChequeStatus: string
     {
         return in_array($this, [
             self::Approved, self::ForwardedToTeller, self::AcceptedByTeller,
-            self::ForwardedToLandBank, self::ReturnedByBank, self::Completed, self::ReleasedToPayee,
+            self::ReturnedByBank, self::Completed, self::ReleasedToPayee,
         ], true);
     }
 
@@ -195,7 +191,7 @@ enum ChequeStatus: string
         return [
             self::Registered, self::OutForSignature, self::Received, self::ForAcic,
             self::Approved, self::ForwardedToTeller, self::AcceptedByTeller,
-            self::ForwardedToLandBank, self::ReturnedByBank, self::ReleasedToPayee,
+            self::ReturnedByBank, self::ReleasedToPayee,
         ];
     }
 
@@ -214,7 +210,6 @@ enum ChequeStatus: string
             self::Approved => 'approved on an ACIC, neither released nor forwarded',
             self::ForwardedToTeller => 'with the tellers, unclaimed',
             self::AcceptedByTeller => 'with a teller, not yet lodged with the bank',
-            self::ForwardedToLandBank => 'with the bank, not yet credited',
             self::ReturnedByBank => 'sent back by the bank',
             self::ReleasedToPayee => 'released, not encashed',
             default => $this->label(),
@@ -228,7 +223,7 @@ enum ChequeStatus: string
             self::Registered, self::OutForSignature => 'Unsigned',
             self::ReleasedToPayee => 'With payee',
             self::ForwardedToTeller, self::AcceptedByTeller => 'With teller',
-            self::ForwardedToLandBank, self::ReturnedByBank => 'With bank',
+            self::ReturnedByBank => 'With bank',
             self::Received, self::ForAcic, self::Approved => 'In office',
             default => null,
         };

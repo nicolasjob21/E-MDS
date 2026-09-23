@@ -41,9 +41,6 @@ enum LddapStatus: string
     /** A teller has claimed its ACIC. */
     case AcceptedByTeller = 'accepted_by_teller';
 
-    /** Its ACIC is lodged with Land Bank, awaiting the credit. */
-    case ForwardedToLandBank = 'forwarded_to_land_bank';
-
     /** The bank sent its ACIC back. It goes round again once the issue is fixed. */
     case ReturnedByBank = 'returned_by_bank';
 
@@ -66,7 +63,6 @@ enum LddapStatus: string
             self::Approved => 'Approved',
             self::ForwardedToTeller => 'Forwarded to Teller',
             self::AcceptedByTeller => 'Accepted by Teller',
-            self::ForwardedToLandBank => 'Forwarded to Land Bank',
             self::ReturnedByBank => 'Returned by Bank',
             self::Completed => 'Completed',
             self::Canceled => 'Canceled',
@@ -93,8 +89,7 @@ enum LddapStatus: string
     public function isWithTeller(): bool
     {
         return in_array($this, [
-            self::ForwardedToTeller, self::AcceptedByTeller,
-            self::ForwardedToLandBank, self::ReturnedByBank,
+            self::ForwardedToTeller, self::AcceptedByTeller, self::ReturnedByBank,
         ], true);
     }
 
