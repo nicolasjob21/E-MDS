@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Enums\ChequeStatus;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -22,9 +23,8 @@ class IndexChequesRequest extends FormRequest
             'status' => ['nullable', 'string', 'max:32'],
             // Matches against the cheque number or the ACIC no.
             'search' => ['nullable', 'string', 'max:100'],
-            // The validity/disposition tab: all · valid · released · for_deposit ·
-            // expiring · deposited · stale.
-            'tab' => ['nullable', 'string', Rule::in(self::TABS)],
+            // The tab is one of the two derived views, or any status in the flow.
+            'tab' => ['nullable', 'string', Rule::in(self::tabs())],
             // "expiry" puts the cheques closest to going stale first.
             'sort' => ['nullable', 'string', Rule::in(['number', 'expiry'])],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:200'],
@@ -32,15 +32,26 @@ class IndexChequesRequest extends FormRequest
         ];
     }
 
-    /** The tabs the cheque page offers, in the order it shows them. */
-    public const TABS = ['all', 'valid', 'released', 'for_deposit', 'expiring', 'deposited', 'stale'];
+    /**
+     * Every tab the cheque page may ask for: the two derived views, plus **any** status in the
+     * flow.
+     *
+     * Derived from the enum rather than listed, so adding a status can never leave the page
+     * sending a tab the server calls invalid.
+     *
+     * @return list<string>
+     */
+    public static function tabs(): array
+    {
+        return ['all', 'valid', 'expiring', ...array_column(ChequeStatus::cases(), 'value')];
+    }
 
     /** The chosen tab; "all" when none or an unknown one was asked for. */
     public function tab(): string
     {
         $tab = (string) $this->input('tab', 'all');
 
-        return in_array($tab, self::TABS, true) ? $tab : 'all';
+        return in_array($tab, self::tabs(), true) ? $tab : 'all';
     }
 
     public function sortsByExpiry(): bool

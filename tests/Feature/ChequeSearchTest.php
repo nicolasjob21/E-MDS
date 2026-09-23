@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Enums\ChequeStatus;
 use App\Enums\UserRole;
+use App\Http\Requests\IndexChequesRequest;
 use App\Models\Acic;
 use App\Models\Cheque;
 use App\Models\User;
@@ -145,5 +146,47 @@ class ChequeSearchTest extends TestCase
         $this->seedCheques();
 
         $this->getJson('/api/v1/cheques?search=10001')->assertUnauthorized();
+    }
+
+    /**
+     * Every tab the page offers must be a tab the server accepts. This is the pairing that
+     * broke once already: the page was rebuilt around the flow's statuses while the request
+     * still whitelisted the old names, so selecting a tab answered "the selected tab is
+     * invalid" instead of filtering.
+     */
+    public function test_every_status_is_a_valid_tab(): void
+    {
+        Sanctum::actingAs($this->staff());
+
+        foreach (IndexChequesRequest::tabs() as $tab) {
+            $this->getJson("/api/v1/cheques?tab={$tab}")
+                ->assertOk("tab={$tab} should be accepted");
+        }
+
+        // And the page's own two derived views, named explicitly.
+        foreach (['valid', 'expiring'] as $derived) {
+            $this->assertContains($derived, IndexChequesRequest::tabs());
+        }
+
+        $this->getJson('/api/v1/cheques?tab=not-a-tab')
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('tab');
+    }
+
+    /** The tab actually filters — it is not merely accepted and ignored. */
+    public function test_a_tab_filters_the_list(): void
+    {
+        $this->seedCheques();
+        Sanctum::actingAs($this->staff());
+
+        $numbers = fn (string $tab) => array_column(
+            $this->getJson("/api/v1/cheques?tab={$tab}")->assertOk()->json('data'),
+            'cheque_number',
+        );
+
+        $this->assertSame([10001, 10002], $numbers('approved'));
+        $this->assertSame([10003], $numbers('registered'));
+        $this->assertSame([10004, 10005], $numbers('available'));
+        $this->assertSame([], $numbers('completed'));
     }
 }
