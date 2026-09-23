@@ -44,10 +44,10 @@ class ChequeSearchTest extends TestCase
             ]);
         }
 
-        // Approve #10001 and #10002 and put them on ACIC #7.
-        Cheque::whereIn('cheque_number', [10001, 10002])->update(['status' => ChequeStatus::Approved]);
+        // Put #10001 and #10002 on ACIC #7.
         $acic = Acic::create(['acic_number' => 7, 'status' => 'used']);
-        Cheque::whereIn('cheque_number', [10001, 10002])->update(['acic_id' => $acic->id]);
+        Cheque::whereIn('cheque_number', [10001, 10002])
+            ->update(['status' => ChequeStatus::Approved, 'acic_id' => $acic->id]);
     }
 
     /** @return list<int> */
@@ -90,10 +90,10 @@ class ChequeSearchTest extends TestCase
         $this->seedCheques();
         Sanctum::actingAs($this->staff());
 
-        // 10001–10002 were approved and put on ACIC #7; 10003 is still used;
+        // 10001–10002 are on ACIC #7; 10003 is still registered;
         // 10004–10005 are still available.
         $this->assertSame([10001, 10002], $this->search('1000', 'approved'));
-        $this->assertSame([10003], $this->search('1000', 'used'));
+        $this->assertSame([10003], $this->search('1000', 'registered'));
         $this->assertSame([10004, 10005], $this->search('1000', 'available'));
     }
 

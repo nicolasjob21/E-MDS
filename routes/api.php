@@ -41,9 +41,31 @@ Route::prefix('v1')->group(function () {
         // The cheque view/print payload; refused unless the cheque is approved.
         Route::get('cheques/{cheque}/print', [ChequeController::class, 'print']);
 
+        // The 90-day validity axis — the banner's counts, the deposit queue and the tellers.
+        Route::get('cheques/validity-summary', [ChequeController::class, 'validitySummary']);
+        // The cheque's own steps. Each one is admin-only, gated in its Form Request.
+        Route::get('cheques/{cheque}/status-history', [ChequeController::class, 'statusHistory']);
+        Route::post('cheques/{cheque}/route', [ChequeController::class, 'routeForSignature']);
+        Route::post('cheques/{cheque}/receive', [ChequeController::class, 'markAsReceived']);
+        Route::post('cheques/{cheque}/release', [ChequeController::class, 'release']);
+        Route::post('cheques/{cheque}/rts', [ChequeController::class, 'rts']);
+        Route::post('cheques/{cheque}/cancel', [ChequeController::class, 'cancel']);
+        Route::post('cheques/{cheque}/void', [ChequeController::class, 'void']);
+
+        // Branch B is taken by the whole ACIC: the admin forwards it, the first teller to
+        // accept claims it, and only that teller deposits or hands it back.
+        Route::get('acics/teller-queue', [AcicController::class, 'tellerQueue']);
+        Route::get('acics/{acic}/history', [AcicController::class, 'history']);
+        // Admin sends it out; the rest belong to the teller who claimed it.
+        Route::post('acics/{acic}/forward-to-teller', [AcicController::class, 'forwardToTeller']);
+        Route::post('acics/{acic}/accept', [AcicController::class, 'acceptByTeller']);
+        Route::post('acics/{acic}/forward-to-land-bank', [AcicController::class, 'forwardToLandBank']);
+        Route::post('acics/{acic}/returned-by-bank', [AcicController::class, 'returnedByBank']);
+        Route::post('acics/{acic}/complete-teller', [AcicController::class, 'markCredited']);
+        Route::post('acics/{acic}/return-to-admin', [AcicController::class, 'returnToAdmin']);
+
         // Teller only: confirm a used cheque has been received, and complete a forwarded ACIC.
         Route::middleware('teller')->group(function () {
-            Route::post('cheques/{cheque}/receive', [ChequeController::class, 'confirmReceipt']);
             Route::post('lddaps/{lddap}/receive', [LddapController::class, 'confirmReceipt']);
             Route::post('acics/{acic}/complete', [AcicController::class, 'complete']);
         });
@@ -99,6 +121,9 @@ Route::prefix('v1')->group(function () {
         // Admin only
         Route::middleware('admin')->group(function () {
             Route::post('cheques/add-range', [ChequeController::class, 'addRange']);
+            Route::post('cheques/{cheque}/replace', [ChequeController::class, 'replace']);
+            // Replacing a stale cheque, and correcting release details after the fact.
+            Route::post('cheques/{cheque}/replace', [ChequeController::class, 'replace']);
             Route::post('lddaps/add-range', [LddapController::class, 'addRange']);
             // The admin's action on a record Returned for ACIC.
             Route::post('lddaps/{lddap}/approve', [LddapController::class, 'approve']);

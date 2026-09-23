@@ -76,7 +76,8 @@ class ChequePrintTest extends TestCase
     /** The view carries every field the cheque prints, formatted as the cheque shows them. */
     public function test_the_view_carries_the_cheques_data(): void
     {
-        $cheque = $this->cheque();
+        // For ACIC first, so putting it on one is the step that approves it.
+        $cheque = $this->cheque(ChequeStatus::ForAcic);
         $admin = $this->admin();
         $acic = app(AcicService::class)->create($admin);
         app(AcicService::class)->assignCheques($admin, $acic, [$cheque->id]);
@@ -103,7 +104,7 @@ class ChequePrintTest extends TestCase
     {
         Sanctum::actingAs($this->admin());
 
-        foreach ([ChequeStatus::Used, ChequeStatus::Received, ChequeStatus::Complies, ChequeStatus::Disapproved] as $status) {
+        foreach ([ChequeStatus::Registered, ChequeStatus::OutForSignature, ChequeStatus::ForAcic, ChequeStatus::Cancelled] as $status) {
             $cheque = $this->cheque($status);
             $this->getJson("/api/v1/cheques/{$cheque->id}/print")
                 ->assertStatus(422)

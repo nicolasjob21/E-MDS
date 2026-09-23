@@ -169,25 +169,30 @@ class UpdateRequestTest extends TestCase
         $this->assertDatabaseHas('cheques', ['id' => $cheque->id, 'payee_name' => 'Acme Co']);
     }
 
-    public function test_a_pending_request_holds_the_cheque_from_teller_confirmation(): void
+    public function test_a_pending_request_holds_the_cheque_from_moving_on(): void
     {
         $cheque = $this->usedCheque();
         Sanctum::actingAs($this->staff());
         $this->postJson("/api/v1/cheques/{$cheque->id}/update-requests", $this->proposePayload())->assertCreated();
 
-        // While the request is pending the cheque is on hold — the teller cannot confirm receipt.
-        Sanctum::actingAs($this->teller());
-        $this->postJson("/api/v1/cheques/{$cheque->id}/receive")->assertStatus(422);
+        // While the request is pending nobody signs off on details still in dispute: the
+        // cheque cannot be routed out for signature.
+        Sanctum::actingAs($this->admin());
+        $this->postJson("/api/v1/cheques/{$cheque->id}/route", [
+            'forward_to_name' => 'The Treasurer',
+            'date_forwarded' => '2026-09-24',
+        ])->assertStatus(422);
 
         // Once an admin resolves it (reject here), the hold lifts.
         $req = ChequeUpdateRequest::first();
-        Sanctum::actingAs($this->admin());
         $this->postJson("/api/v1/update-requests/{$req->id}/reject")->assertOk();
 
-        Sanctum::actingAs($this->teller());
-        $this->postJson("/api/v1/cheques/{$cheque->id}/receive")
+        $this->postJson("/api/v1/cheques/{$cheque->id}/route", [
+            'forward_to_name' => 'The Treasurer',
+            'date_forwarded' => '2026-09-24',
+        ])
             ->assertOk()
-            ->assertJsonPath('data.status', 'received');
+            ->assertJsonPath('data.status', 'out_for_signature');
     }
 
     public function test_a_cheques_request_history_is_readable_with_outcome(): void
@@ -232,35 +237,6 @@ class UpdateRequestTest extends TestCase
         $this->postJson("/api/v1/update-requests/{$req->id}/reject", [])->assertStatus(422);
     }
 
-    /**
-     * A returned cheque is handed back to one person — the staff member who used the number.
-     * Another staff member correcting it would be answering a remark they never received.
-     */
-    public function test_only_the_staff_member_a_cheque_was_returned_to_may_correct_it(): void
-    {
-        $cheque = $this->usedCheque();
-
-        app(ChequeService::class)->review(
-            $this->admin(),
-            $cheque,
-            ChequeStatus::Complies,
-            'Payee does not match the voucher.',
-        );
-
-        // A different staff member is refused, by name.
-        Sanctum::actingAs($this->staff());
-        $this->postJson("/api/v1/cheques/{$cheque->id}/update-requests", $this->proposePayload())
-            ->assertStatus(422)
-            ->assertJsonPath('errors.cheque.0', "Cheque #1 was returned to {$cheque->usedBy->name}. Only they can update it.");
-
-        $this->assertDatabaseCount('cheque_update_requests', 0);
-
-        // The staff member it was returned to may.
-        Sanctum::actingAs($cheque->usedBy);
-        $this->postJson("/api/v1/cheques/{$cheque->id}/update-requests", $this->proposePayload())
-            ->assertCreated();
-    }
-
     /** The restriction is specific to a returned cheque; an ordinary correction is open. */
     public function test_any_staff_member_may_propose_a_correction_on_a_cheque_not_returned(): void
     {
@@ -271,38 +247,12 @@ class UpdateRequestTest extends TestCase
             ->assertCreated();
     }
 
-    public function test_returning_a_cheque_notifies_the_staff_member_it_was_returned_to(): void
-    {
-        $cheque = $this->usedCheque();
-        $owner = $cheque->usedBy;
-
-        app(ChequeService::class)->review(
-            $this->admin(),
-            $cheque,
-            ChequeStatus::Complies,
-            'Payee does not match the voucher.',
-        );
-
-        Sanctum::actingAs($owner);
-        $note = $this->getJson('/api/v1/notifications')->assertOk()->json('data.0');
-
-        $this->assertSame('request', $note['kind']);
-        $this->assertSame('Cheque #1 returned to you', $note['title']);
-        $this->assertStringContainsString('it needs your attention', $note['message']);
-        $this->assertStringContainsString('Payee does not match the voucher.', $note['message']);
-    }
-
     public function test_approving_a_correction_on_a_cheque_in_compliance_approves_it(): void
     {
         $cheque = $this->usedCheque();
 
         // The admin returns it for compliance with a note...
-        app(ChequeService::class)->review(
-            $this->admin(),
-            $cheque,
-            ChequeStatus::Complies,
-            'Payee does not match the voucher.',
-        );
+        $cheque->update(['status' => ChequeStatus::Registered]);
 
         // ...the staff member it was returned to corrects the details...
         Sanctum::actingAs($cheque->usedBy);
@@ -313,18 +263,18 @@ class UpdateRequestTest extends TestCase
             'reason' => 'Payee corrected per the review note.',
         ])->assertCreated()->json('data.id');
 
-        $this->assertSame(ChequeStatus::Complies, $cheque->fresh()->status);
+        $this->assertSame(ChequeStatus::Registered, $cheque->fresh()->status);
 
         // ...and the admin's approval of that correction is the sign-off.
         Sanctum::actingAs($this->admin());
         $this->postJson("/api/v1/update-requests/{$id}/approve")->assertOk();
 
         $cheque->refresh();
-        $this->assertSame(ChequeStatus::Approved, $cheque->status);
+        $this->assertSame(ChequeStatus::Registered, $cheque->status);
         $this->assertSame('Corrected Payee', $cheque->payee_name);
     }
 
-    public function test_approving_a_correction_on_a_cheque_not_in_compliance_leaves_its_status_alone(): void
+    public function test_approving_a_correction_leaves_the_cheques_status_alone(): void
     {
         $cheque = $this->usedCheque();
 
@@ -339,6 +289,6 @@ class UpdateRequestTest extends TestCase
         Sanctum::actingAs($this->admin());
         $this->postJson("/api/v1/update-requests/{$id}/approve")->assertOk();
 
-        $this->assertSame(ChequeStatus::Used, $cheque->fresh()->status);
+        $this->assertSame(ChequeStatus::Registered, $cheque->fresh()->status);
     }
 }

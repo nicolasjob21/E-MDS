@@ -12,6 +12,7 @@ import {
     Hash,
     BookOpen,
     ChevronDown,
+    Landmark,
     Menu,
     X,
     ShieldCheck,
@@ -50,6 +51,7 @@ const NAV: NavEntry[] = [
     { to: '/cheques', label: 'Cheques', icon: ListChecks },
     { to: '/lddaps', label: 'LDDAP', icon: Receipt },
     { to: '/acics', label: 'ACIC', icon: FileText },
+    { to: '/deposit-queue', label: 'Deposit Queue', icon: Landmark },
     { to: '/admin/update-requests', label: 'Update Requests', icon: ClipboardCheck, adminOnly: true },
     {
         // The three number registers share one job — issuing the numbers everything else draws

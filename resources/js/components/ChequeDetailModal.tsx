@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { X, CheckCircle2, Landmark, PencilLine, Clock, History, Check, Ban, ShieldCheck } from 'lucide-react';
+import { X, CheckCircle2, Landmark, PencilLine, Clock, History, Check, Ban, Route } from 'lucide-react';
 import { ChequeApi, UpdateRequestApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
-import type { Cheque, RequestStatus, UpdateRequest } from '../lib/types';
+import type { Cheque, ChequeStatusStep, RequestStatus, UpdateRequest } from '../lib/types';
 import { formatDate, formatDateTime, formatMoney } from '../lib/format';
 import { Alert, StatusBadge } from './ui';
 
@@ -55,12 +55,17 @@ export default function ChequeDetailModal({ cheque, mode = 'view', onClose, onCh
     const [pendingRequest, setPendingRequest] = useState(!!cheque.has_pending_update);
     const [history, setHistory] = useState<UpdateRequest[]>([]);
 
+    // The cheque's own status history, straight from the server: every step it took, who
+    // took it and when. Nothing here is inferred.
+    const [timeline, setTimeline] = useState<ChequeStatusStep[]>([]);
+
     // Load the cheque's request history on open; this also re-derives the true hold state
     // (so a teller never sees the confirm button on a cheque that is actually on hold).
     const loadHistory = useCallback(async () => {
         try {
             const list = await UpdateRequestApi.forCheque(cheque.id);
             setHistory(list);
+            setTimeline(await ChequeApi.statusHistory(cheque.id));
             setPendingRequest(list.some((r) => r.status === 'pending'));
         } catch {
             /* non-fatal — history just won't show */
@@ -81,10 +86,8 @@ export default function ChequeDetailModal({ cheque, mode = 'view', onClose, onCh
 
     const isIssued = current.status !== 'available';
     const isReceived = !!current.received_at;
-    const isPending = current.status === 'used';
-    const isReviewed = !!current.is_reviewed;
-    // A used cheque with an open update request is on hold: the teller can't confirm it yet.
-    const onHold = isPending && pendingRequest;
+    // A cheque with an open update request is on hold: it cannot move on until that is settled.
+    const onHold = pendingRequest;
 
     async function handleConfirm() {
         setBusy(true);
@@ -140,14 +143,8 @@ export default function ChequeDetailModal({ cheque, mode = 'view', onClose, onCh
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
-                        <StatusBadge
-                            status={current.status}
-                            complied={pendingRequest}
-                            viewer={user?.role}
-                        />
-                        {/* On a Returned cheque the badge itself already carries the hold,
-                            so the chip would only repeat it. */}
-                        {onHold && current.status !== 'complies' && (
+                        <StatusBadge status={current.effective_status ?? current.status} />
+                        {onHold && (
                             <span className="inline-flex items-center gap-1 rounded-xs border border-accent-400/50 bg-accent-400/10 px-2 py-0.5 text-xs font-medium text-accent-400">
                                 <Clock className="h-3 w-3" />
                                 On hold
@@ -224,9 +221,7 @@ export default function ChequeDetailModal({ cheque, mode = 'view', onClose, onCh
                                 </>
                             ) : (
                                 <p className="text-sm text-muted">
-                                    {isPending
-                                        ? 'Awaiting confirmation by a teller.'
-                                        : 'Not yet confirmed as received.'}
+                                    Not yet confirmed as received.
                                 </p>
                             )}
                         </section>
@@ -251,29 +246,38 @@ export default function ChequeDetailModal({ cheque, mode = 'view', onClose, onCh
                             </section>
                         )}
 
-                        {/* Admin review outcome — the final step of the lifecycle. */}
-                        {mode !== 'action' && isReviewed && (
-                            <section className="rounded-xs border border-line bg-well p-4">
-                                <h3 className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-brandink">
-                                    <ShieldCheck className="h-4 w-4" />
-                                    Review outcome
+
+                        {/* Where the cheque has been: assigned, then released, or forwarded and
+                            deposited — with whatever happened to it along the way. */}
+                        {timeline.length > 0 && (
+                            <section>
+                                <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle">
+                                    <Route className="h-4 w-4" />
+                                    Timeline
                                 </h3>
-                                <Row label="Outcome" value={<StatusBadge status={current.status} />} />
-                                <Row
-                                    label="Reviewed by"
-                                    value={current.reviewed_by?.name ?? current.reviewed_by_name ?? '—'}
-                                />
-                                <Row label="Reviewed at" value={formatDateTime(current.reviewed_at)} />
-                                {current.review_note && (
-                                    <p className="mt-3 text-sm text-fg">“{current.review_note}”</p>
-                                )}
-                                {current.awaits_compliance && (
-                                    <p className="mt-3 flex items-start gap-1.5 text-xs text-accent-400">
-                                        <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                                        Returned — once the notes above are addressed, an admin can review
-                                        this cheque again.
-                                    </p>
-                                )}
+                                <ol className="space-y-0">
+                                    {timeline.map((entry, i) => (
+                                        <li key={entry.id} className="flex gap-3">
+                                            <span className="flex flex-col items-center">
+                                                <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-brand-400" />
+                                                {i < timeline.length - 1 && <span className="w-px flex-1 bg-line" />}
+                                            </span>
+                                            <span className="min-w-0 flex-1 pb-4">
+                                                <span className="block text-sm font-medium text-fg">
+                                                    {entry.from_status_label
+                                                        ? `${entry.from_status_label} → ${entry.to_status_label}`
+                                                        : entry.to_status_label}
+                                                </span>
+                                                {entry.note && <span className="mt-0.5 block text-xs text-muted">{entry.note}</span>}
+                                                <span className="mt-0.5 block text-xs text-subtle">
+                                                    {entry.user?.name ? `${entry.user.name} · ` : ''}
+                                                    {formatDateTime(entry.created_at)}
+                                                    {entry.acic_number ? ` · ACIC #${entry.acic_number}` : ''}
+                                                </span>
+                                            </span>
+                                        </li>
+                                    ))}
+                                </ol>
                             </section>
                         )}
 

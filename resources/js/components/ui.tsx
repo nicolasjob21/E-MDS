@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
-import { Moon, Sun } from 'lucide-react';
-import type { AcicStatus, ChequeStatus, LddapStatus, Role } from '../lib/types';
+import { AlertTriangle, Moon, Sun } from 'lucide-react';
+import type { AcicStatus, Cheque, ChequeStatus, LddapStatus } from '../lib/types';
+import { chequeStatusLabel, formatDate } from '../lib/format';
 import { useTheme } from '../theme/ThemeContext';
 
 export function ThemeToggle() {
@@ -52,43 +53,84 @@ export function PageHeader({ title, subtitle, action }: { title: string; subtitl
  * label changes — the status value and the Returned tab it is filtered under stay put.
  * {@see LddapStatusBadge}, which does the same for the LDDAP table.
  */
-export function StatusBadge({
-    status,
-    complied = false,
-    viewer,
-}: {
-    status: ChequeStatus;
-    /** A correction is pending, i.e. the compliance note has been acted on. */
-    complied?: boolean;
-    /** Whose reading of the status this is. */
-    viewer?: Role;
-}) {
-    const config = {
-        available: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300', label: 'Available' },
-        used: { styles: 'border-slate-600/50 text-muted bg-slate-500/10', dot: 'bg-slate-400', label: 'Used' },
-        received: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success', label: 'Received' },
-        approved: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success', label: 'Approved' },
-        complies: { styles: 'border-accent-400/50 text-accent-400 bg-accent-400/10', dot: 'bg-accent-400', label: 'Returned' },
-        disapproved: { styles: 'border-danger/40 text-danger-fg bg-danger/10', dot: 'bg-danger', label: 'Disapproved' },
-    }[status];
-
-    const isComplied = complied && status === 'complies';
-    const label = isComplied ? (viewer === 'staff' ? 'On Hold' : 'Complied') : config.label;
-    const styles = isComplied ? 'border-brand-400/40 text-brandink bg-brand-500/10' : config.styles;
-    const dot = isComplied ? 'bg-brand-300' : config.dot;
+export function StatusBadge({ status }: { status: ChequeStatus }) {
+    const config: Record<ChequeStatus, { styles: string; dot: string }> = {
+        available: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300' },
+        registered: { styles: 'border-line text-muted bg-well', dot: 'bg-slate-400' },
+        out_for_signature: { styles: 'border-accent-400/50 text-accent-400 bg-accent-400/10', dot: 'bg-accent-400' },
+        received: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300' },
+        for_acic: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300' },
+        approved: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success' },
+        released_to_payee: { styles: 'border-teal-400/50 text-teal-300 bg-teal-400/10', dot: 'bg-teal-400' },
+        forwarded_to_teller: { styles: 'border-purple-400/50 text-purple-300 bg-purple-400/10', dot: 'bg-purple-400' },
+        accepted_by_teller: { styles: 'border-indigo-400/50 text-indigo-300 bg-indigo-400/10', dot: 'bg-indigo-400' },
+        forwarded_to_land_bank: { styles: 'border-blue-400/50 text-blue-300 bg-blue-400/10', dot: 'bg-blue-400' },
+        returned_by_bank: { styles: 'border-amber-400/50 text-amber-400 bg-amber-400/10', dot: 'bg-amber-400' },
+        completed: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success' },
+        cancelled: { styles: 'border-danger/40 text-danger-fg bg-danger/10', dot: 'bg-danger' },
+        voided: { styles: 'border-danger/40 text-danger-fg bg-danger/10', dot: 'bg-danger' },
+        stale: { styles: 'border-danger/60 text-danger-fg bg-danger/15', dot: 'bg-danger' },
+        replaced: { styles: 'border-line text-subtle bg-well', dot: 'bg-slate-500' },
+    };
+    const { styles, dot } = config[status] ?? config.registered;
 
     return (
-        <span
-            className={`inline-flex items-center gap-1.5 rounded-xs border px-2 py-0.5 text-xs font-medium ${styles}`}
-            title={isComplied ? 'Complied with — the cheque stays Returned until an admin approves the correction.' : undefined}
-        >
+        <span className={`inline-flex items-center gap-1.5 rounded-xs border px-2 py-0.5 text-xs font-medium whitespace-nowrap ${styles}`}>
             <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
-            {label}
+            {chequeStatusLabel(status)}
         </span>
     );
 }
 
-/** The ACIC equivalent of StatusBadge — same shape, same colour language. */
+
+/**
+ * How long a cheque has left: green while there is room, amber inside the ten-day window
+ * (with a tag saying who is holding it up), red once it has gone stale.
+ */
+export function ValidityBadge({ cheque }: { cheque: Cheque }) {
+    const settled: ChequeStatus[] = ['available', 'cancelled', 'voided', 'replaced', 'completed'];
+    const status = cheque.effective_status;
+
+    if (!status || settled.includes(status)) {
+        return <span className="text-subtle">—</span>;
+    }
+
+    // Once the bank has it, the clock is the bank's business, not the cheque's.
+    if (status === 'completed' || status === 'forwarded_to_land_bank') {
+        return (
+            <span className="text-xs text-blue-300">
+                {status === 'completed' ? 'Credited' : 'With Land Bank'}
+                {cheque.acic_teller?.deposit_date ? ` ${formatDate(cheque.acic_teller.deposit_date)}` : ''}
+            </span>
+        );
+    }
+
+    const stale = status === 'stale';
+    const soon = cheque.is_expiring_soon;
+    const tone = stale
+        ? 'border-danger/60 bg-danger/15 text-danger-fg'
+        : soon
+          ? 'border-amber-400/50 bg-amber-400/10 text-amber-400'
+          : 'border-success/40 bg-success/10 text-success-fg';
+
+    return (
+        <span className="inline-flex flex-col items-start gap-1">
+            <span className={`inline-flex items-center gap-1.5 rounded-xs border px-2 py-0.5 text-xs font-medium ${tone}`}>
+                {stale ? <AlertTriangle className="h-3 w-3" /> : null}
+                {cheque.countdown ?? '—'}
+            </span>
+            <span className="inline-flex flex-wrap items-center gap-1 text-[11px] text-subtle">
+                {cheque.validity_until ? `Valid to ${formatDate(cheque.validity_until)}` : null}
+                {soon && cheque.expiring_tag && (
+                    <span className="rounded-xs border border-amber-400/40 px-1 py-px text-[10px] uppercase tracking-wider text-amber-400">
+                        {cheque.expiring_tag}
+                    </span>
+                )}
+            </span>
+        </span>
+    );
+}
+
 export function AcicStatusBadge({ status }: { status: AcicStatus }) {
     const config = {
         open: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300', label: 'Open' },

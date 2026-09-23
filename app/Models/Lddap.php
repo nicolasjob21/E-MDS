@@ -52,6 +52,7 @@ class Lddap extends Model
             'date_forwarded' => 'date',
             'date_returned' => 'date',
             'date_canceled' => 'date',
+            'returned_by_bank' => 'boolean',
             'nature_of_payment' => NatureOfPayment::class,
             'status' => LddapStatus::class,
             'used_at' => 'datetime',

@@ -3,11 +3,13 @@ import { Link } from 'react-router-dom';
 import {
     Layers,
     CircleDot,
-    CheckCheck,
     BadgeCheck,
-    ShieldCheck,
     ScrollText,
-    ShieldX,
+    Send,
+    HandCoins,
+    FilePlus2,
+    ListChecks,
+    Landmark,
     Receipt,
     FileText,
     Hash,
@@ -28,12 +30,13 @@ import { actionLabel, formatRelative } from '../lib/format';
 
 const CHEQUE_TILES = [
     { key: 'total', label: 'Total cheques', icon: Layers, color: 'text-fg', to: '/cheques' },
-    { key: 'available', label: 'Available', icon: CircleDot, color: 'text-brandink', to: '/cheques?status=available' },
-    { key: 'used', label: 'Used', icon: CheckCheck, color: 'text-accent-400', to: '/cheques?status=used' },
-    { key: 'received', label: 'Received', icon: BadgeCheck, color: 'text-success-fg', to: '/cheques?status=received' },
-    { key: 'approved', label: 'Approved', icon: ShieldCheck, color: 'text-success-fg', to: '/cheques?status=approved' },
-    { key: 'complies', label: 'Returned', icon: ScrollText, color: 'text-accent-400', to: '/cheques?status=complies' },
-    { key: 'disapproved', label: 'Disapproved', icon: ShieldX, color: 'text-danger-fg', to: '/cheques?status=disapproved' },
+    { key: 'available', label: 'Available', icon: CircleDot, color: 'text-brandink', to: '/cheques?tab=available' },
+    { key: 'registered', label: 'Registered', icon: FilePlus2, color: 'text-fg', to: '/cheques?tab=registered' },
+    { key: 'out_for_signature', label: 'Out for Signature', icon: Send, color: 'text-accent-400', to: '/cheques?tab=out_for_signature' },
+    { key: 'for_acic', label: 'For ACIC', icon: ListChecks, color: 'text-brandink', to: '/cheques?tab=for_acic' },
+    { key: 'approved', label: 'Approved', icon: BadgeCheck, color: 'text-success-fg', to: '/cheques?tab=approved' },
+    { key: 'released_to_payee', label: 'Released', icon: HandCoins, color: 'text-teal-300', to: '/cheques?tab=released_to_payee' },
+    { key: 'completed', label: 'Completed', icon: Landmark, color: 'text-blue-300', to: '/cheques?tab=completed' },
 ] as const;
 
 const LDDAP_TILES: { key: LddapStatus; label: string; color: string }[] = [
@@ -236,12 +239,10 @@ export default function DashboardPage() {
                         >
                             Cheques
                         </SectionTitle>
-                        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xs border border-line bg-line sm:grid-cols-4 xl:grid-cols-7">
+                        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xs border border-line bg-line sm:grid-cols-4">
                             {CHEQUE_TILES.map(({ key, label, icon, color, to }) => (
                                 <Tile key={key} label={label} value={data.cheques.counts[key]} color={color} to={to} icon={icon} />
                             ))}
-                            {/* Filler so the 7 tiles don't leave a bare seam-coloured cell below xl. */}
-                            <div className="bg-card xl:hidden" />
                         </div>
                         {!isTeller && (
                             <div className="mt-4">
@@ -305,7 +306,7 @@ export default function DashboardPage() {
                                 icon={BookOpen}
                                 series={data.series.cheques}
                                 unit="cheques"
-                                to="/cheques?status=available"
+                                to="/cheques?tab=available"
                                 registerTo="/admin/add-range"
                                 isAdmin={isAdmin}
                             />

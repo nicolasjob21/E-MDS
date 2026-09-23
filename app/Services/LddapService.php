@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\AcicType;
 use App\Enums\ChequeAction;
 use App\Enums\LddapCheckStatus;
 use App\Enums\LddapRoutingAction;
@@ -675,9 +676,9 @@ class LddapService
             $lddap->update([
                 'status' => $to,
                 // Approve and Cancel are verdicts and are stamped as such; RTS is not.
-                'reviewed_by' => $to->isFinal() ? $admin->id : $lddap->reviewed_by,
-                'reviewed_at' => $to->isFinal() ? $now : $lddap->reviewed_at,
-                'review_note' => $to->isFinal() ? $note : $lddap->review_note,
+                'reviewed_by' => $to->isReviewOutcome() ? $admin->id : $lddap->reviewed_by,
+                'reviewed_at' => $to->isReviewOutcome() ? $now : $lddap->reviewed_at,
+                'review_note' => $to->isReviewOutcome() ? $note : $lddap->review_note,
             ]);
 
             $this->trail($lddap, $action, LddapStatus::ReturnedForAcic, $to, $admin, [
@@ -872,6 +873,10 @@ class LddapService
 
         return DB::transaction(function () use ($user, $acic, $lddapIds, $expectedCheckNos) {
             $acic = Acic::query()->whereKey($acic->getKey())->lockForUpdate()->firstOrFail();
+
+            // What the ACIC carries is the clearer refusal, so it goes first: an ACIC holding
+            // cheques is not merely "closed", it is the wrong ACIC entirely.
+            $this->acics->stampType($acic, AcicType::Lddap);
 
             if (! $acic->status->acceptsRecords()) {
                 throw ValidationException::withMessages([

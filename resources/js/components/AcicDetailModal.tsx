@@ -11,12 +11,14 @@ import {
     Printer,
     ShieldCheck,
     Plus,
+    HandCoins,
 } from 'lucide-react';
 import { AcicApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
-import type { Acic } from '../lib/types';
+import type { Acic, Cheque } from '../lib/types';
 import { formatDate, formatDateTime, formatMoney } from '../lib/format';
 import { Alert, Spinner, StatusBadge, LddapStatusBadge, AcicStatusBadge } from './ui';
+import ChequeStepModal from './ChequeStepModal';
 import AcicReassignModal from './AcicReassignModal';
 import AcicUseModal from './AcicUseModal';
 import LddapAssignModal from './LddapAssignModal';
@@ -139,6 +141,10 @@ export default function AcicDetailModal({
     }
 
     const cheques = acic?.cheques ?? [];
+    // The cheque being handed to its payee, and the picker when more than one could be.
+    const [releasing, setReleasing] = useState<Cheque | null>(null);
+    const [picking, setPicking] = useState(false);
+    const releasable = cheques.filter((c) => c.can_release);
     const lddaps = acic?.lddaps ?? [];
     const total =
         cheques.reduce((sum, c) => sum + Number(c.amount ?? 0), 0) +
@@ -295,7 +301,12 @@ export default function AcicDetailModal({
                                                         {formatMoney(c.amount)}
                                                     </td>
                                                     <td className="px-3 py-2">
-                                                        <StatusBadge status={c.status} />
+                                                        <StatusBadge status={c.effective_status ?? c.status} />
+                                                        {c.release?.received_by_name && (
+                                                            <span className="mt-0.5 block text-xs text-subtle">
+                                                                to {c.release.received_by_name}
+                                                            </span>
+                                                        )}
                                                     </td>
                                                 </tr>
                                             ))}
@@ -406,6 +417,26 @@ export default function AcicDetailModal({
                                 >
                                     <Printer className="h-4 w-4" />
                                     Print
+                                </button>
+                            )}
+
+                            {/* Branch A, beside Branch B's Forward: hand a cheque to its payee.
+                                One releasable cheque goes straight to the dialog; several put
+                                the choice first, since a release is per cheque. */}
+                            {!isConfirm && isAdmin && releasable.length > 0 && (
+                                <button
+                                    type="button"
+                                    className="btn btn-primary sm:flex-1"
+                                    onClick={() => (releasable.length === 1 ? setReleasing(releasable[0]) : setPicking(true))}
+                                    disabled={busy}
+                                >
+                                    <HandCoins className="h-4 w-4" />
+                                    Release to Payee
+                                    {releasable.length > 1 && (
+                                        <span className="ml-1 rounded-xs bg-black/15 px-1.5 text-[10px] font-bold">
+                                            {releasable.length}
+                                        </span>
+                                    )}
                                 </button>
                             )}
 
@@ -640,6 +671,66 @@ export default function AcicDetailModal({
                         onChanged?.();
                     }}
                 />
+            )}
+
+            {/* Which cheque is being released. Only shown when the ACIC carries more than one. */}
+            {picking && (
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        setPicking(false);
+                    }}
+                    role="dialog"
+                    aria-modal="true"
+                >
+                    <div className="card w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+                        <h2 className="font-display text-xl font-extrabold text-fg">Release which cheque?</h2>
+                        <p className="mt-1 text-sm text-muted">
+                            A cheque is released one at a time, to the person who collects it.
+                        </p>
+                        <div className="mt-4 space-y-2">
+                            {releasable.map((c) => (
+                                <button
+                                    key={c.id}
+                                    type="button"
+                                    className="flex w-full items-center justify-between gap-4 rounded-xs border border-line bg-well px-4 py-3 text-left transition-colors hover:border-brand-400"
+                                    onClick={() => {
+                                        setPicking(false);
+                                        setReleasing(c);
+                                    }}
+                                >
+                                    <span className="min-w-0">
+                                        <span className="block font-display font-bold text-fg">#{c.cheque_number}</span>
+                                        <span className="block text-xs text-muted">{c.payee_name ?? '—'}</span>
+                                    </span>
+                                    <span className="font-mono text-sm text-muted">{formatMoney(c.amount)}</span>
+                                </button>
+                            ))}
+                        </div>
+                        <div className="mt-5 flex justify-end border-t border-line pt-4">
+                            <button type="button" className="btn btn-ghost" onClick={() => setPicking(false)}>
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Releasing a cheque is taken from here; the ACIC reloads so the row follows. */}
+            {releasing && (
+                <div onClick={(e) => e.stopPropagation()}>
+                    <ChequeStepModal
+                        cheque={releasing}
+                        step="release"
+                        onClose={() => setReleasing(null)}
+                        onDone={() => {
+                            setReleasing(null);
+                            void load();
+                            onChanged?.();
+                        }}
+                    />
+                </div>
             )}
         </div>
     );

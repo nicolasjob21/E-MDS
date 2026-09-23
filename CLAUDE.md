@@ -34,16 +34,30 @@ Default seeded accounts: `admin` / `staff`, password `password` (override via `S
 - `ChequeService::addRange($user, $startAt, $endAt)` registers a book's serial range; it rejects
   any range overlapping an already-registered number, checked under a lock.
 - Every login/logout, profile edit, password change, cheque use, and admin action is written to
-  `cheque_logs` (append-only).
-- Both tables' actions follow the record's status: **Used/Received** → Review (all three outcomes in
-  one dialog); **Returned** → staff get Action (outcome section hidden, Edit Details →
-  update request; approving it applies the details *and* signs the record off as **Approved**),
-  admin get Review; **Approved** → Assign to an ACIC. The LDDAP table works the same way; its teller receipt and admin direct
-  correction live in the detail modal, reached from the LDDAP number. The LDDAP table is filtered
-  by a bar (Search — part of the LDDAP or check number, or the gross amount exactly, typed with or
-  without ₱/commas via `Money::parse()` — Status, Nature of Payment; Filter / Clear) applied
-  server-side through `GET lddaps?search=&status=&nature=&page=` (`FilterLddapsRequest`,
-  `Lddap::scopeSearch()`) and mirrored in the page URL so it survives a refresh.
+  `cheque_logs` (append-only); the nightly validity sweep logs as `system`.
+- A cheque is **valid exactly 90 calendar days from `cheque_date`** (`App\Support\Validity`,
+  Asia/Manila, day 91 = stale); `validity_until` is derived on save. Eight statuses perish
+  (registered → accepted_by_teller, plus released_to_payee); deposited/cancelled/voided/stale/
+  replaced never do. `Cheque::effectiveStatus()` / `scopeEffectivelyIn()` report stale **on
+  read**, so correctness never waits on `cheques:sweep-validity` (daily 00:05 Manila,
+  idempotent), which also sends the **one-time 10-day alert** (`expiry_alert_sent_at`; email
+  optional via `cheques.alert_email`). Stale is terminal, the number stays consumed, and an admin
+  may **Replace** it with the next available number (`replaces_id`/`replaced_by_id`,
+  `ChequeStaleService`).
+- **Cheques run one ordered flow** (`ChequeStatus`, enforced server-side):
+  `available` → **registered** (claims the lowest available number) → **out_for_signature**
+  (Route for Signature) → **received** (pass-through) → **for_acic** → **approved**, then
+  either **released_to_payee** (Branch A, per cheque) or **forwarded_to_teller** →
+  **accepted_by_teller** → **deposited** (Branch B, the **whole ACIC**). Ways out, each needing a
+  reason: **RTS** (→ registered; at out_for_signature/received/for_acic), **Cancel** (before an
+  ACIC), **Void** (at approved only; number stays used). `nextStates()` is the whole
+  transition table — no skipping, no going back. Every step goes through
+  `ChequeFlowService::move()`: row lock, `expected_status` check (*"This record was updated by
+  another user. Refresh to continue."*), transition check, date rules (never future, never before
+  the previous step), on-hold check, and a `cheque_status_history` row. **An ACIC-level step
+  writes one history row per cheque on that ACIC.** Only **for_acic** cheques may go on an ACIC.
+  Admins route/receive/assign/release/forward/cancel/void; tellers accept/deposit/return
+  (`AcicService`, first-accept-wins via a conditional write). Teller dashboard: `/deposit-queue`.
 - An **LDDAP-ADA** draws on its **own check series** (`lddap_checks`), independent of
   `cheques.cheque_number` and `acics.acic_number` — using one consumes no cheque. Admins
   register blocks of it (`addRange`); an LDDAP takes the **lowest unused** number, never one out
@@ -84,10 +98,8 @@ Default seeded accounts: `admin` / `staff`, password `password` (override via `S
   no Edit. Once out of the registrant's hands, staff propose a correction (LDDAP No., OBJ No.,
   Payee, Amount — never the check number) and an admin approves it. A pending request puts the
   record **on hold**: it can't be edited, received or reviewed until resolved.
-- For **cheques**, **Returned** hands the record back to **the staff member who used the
-  number** — only they may correct it, and approving that correction is the sign-off. For
-  **LDDAPs** the equivalent is **RTS**: back to Registered, corrected, forwarded again; a
-  correction never changes an LDDAP's status.
+- A correction (cheque or LDDAP) changes **details only** and never moves the record; **RTS** is
+  the way back for one that came in wrong. A pending request puts the record on hold.
 - An admin may instead `PATCH lddaps/{lddap}` to correct details **immediately** — reason
   required, recorded in the same history (`applied_directly`), refused while a request pends.
 - An **ACIC** groups **approved cheques** and/or **approved LDDAPs** for transmittal. Its number
@@ -107,8 +119,12 @@ Default seeded accounts: `admin` / `staff`, password `password` (override via `S
 - `app/Support/AmountInWords.php` — spells amounts: the ACIC form's caps line and the cheque's
   Title-Case "… Pesos and 86/100 Only"
 - `app/Support/Money.php`, `Tax.php` — decimal money arithmetic and the W/TAX–VAT rule
+- `app/Support/Validity.php` — the 90-day cheque rule, in Asia/Manila calendar days
+- `app/Console/Commands/SweepChequeValidity.php` — the nightly stale/alert sweep
 - `app/Services/` — `DashboardService` (attention items by role + every register's counts),
-  `ChequeService` (business logic + locking), `LddapCheckAllocator` (issues
+  `ChequeService` (the register + locking), `ChequeFlowService` (every step of the cheque flow
+  and its guards), `ChequeStaleService` (stale marking + Replace), `ChequeExpiryService` (the
+  nightly sweep and the 10-day alert), `LddapCheckAllocator` (issues
   LDDAP check numbers under a row lock), `AcicService` (ACIC sequence +
   cheque linking), `LddapService` (the LDDAP check series, its use, review + ACIC linking),
   `LddapUpdateRequestService` (LDDAP corrections), `ActivityLogger` (audit)
@@ -121,7 +137,9 @@ Default seeded accounts: `admin` / `staff`, password `password` (override via `S
 ## API (`/api/v1`)
 
 `POST login` · `POST logout` · `GET me` · `PUT me` (own profile) · `PUT me/password` · `GET dashboard` · `GET cheques` · `GET cheques/summary` ·
-`GET cheques/next` · `GET cheques/{cheque}/print` · `POST cheques/use` · `GET acics` · `GET acics/series` · `GET lddaps` · `GET lddaps/next-numbers` ·
+`GET cheques/next` · `GET cheques/{cheque}/print` · `POST cheques/use` · `GET cheques/validity-summary` ·
+`GET cheques/{cheque}/status-history` · **admin:** `POST cheques/{cheque}/route|receive|release|rts|cancel|void|replace` ·
+`POST acics/{acic}/forward-to-teller` · **teller:** `POST acics/{acic}/accept|deposit|return-to-admin` · `GET acics/teller-queue` · `GET acics` · `GET acics/series` · `GET lddaps` · `GET lddaps/next-numbers` ·
 `GET lddaps/options` · `GET payees` ·
 `GET lddaps/series` · `GET lddaps/linkable` · **teller:** `POST lddaps/{lddap}/receive` ·
 **admin/staff:** `POST acics` · `POST acics/{acic}/cheques` · `POST lddaps` ·

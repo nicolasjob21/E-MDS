@@ -12,6 +12,7 @@ import AddRangePage from './pages/AddRangePage';
 import UsersPage from './pages/UsersPage';
 import LogsPage from './pages/LogsPage';
 import UpdateRequestsPage from './pages/UpdateRequestsPage';
+import TellerQueuePage from './pages/TellerQueuePage';
 import ProfilePage from './pages/ProfilePage';
 import ChangePasswordPage from './pages/ChangePasswordPage';
 
@@ -34,6 +35,8 @@ export default function App() {
                 <Route path="/cheques" element={<ChequesPage />} />
                 <Route path="/lddaps" element={<LddapsPage />} />
                 <Route path="/acics" element={<AcicsPage />} />
+                {/* Branch B's teller dashboard: Pending and Accepted. */}
+                <Route path="/deposit-queue" element={<TellerQueuePage />} />
                 <Route
                     path="/admin/lddap-series"
                     element={

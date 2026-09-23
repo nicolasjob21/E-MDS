@@ -3,6 +3,9 @@ import type {
     AppNotification,
     Cheque,
     ChequeDetails,
+    ChequeStatusStep,
+    ChequeTab,
+    ChequeValiditySummary,
     ChequePrintData,
     ChequeLog,
     Dashboard,
@@ -18,11 +21,13 @@ import type {
     NextCheckNumbers,
     NotificationFeed,
     Acic,
+    AcicHistoryStep,
     AcicSeries,
     Paginated,
     Payee,
     ReviewOutcome,
     Summary,
+    TellerQueue,
     UpdateRequest,
     User,
 } from './types';
@@ -106,10 +111,76 @@ export const ChequeApi = {
         const { data } = await http.get('/cheques/summary');
         return data.data as Summary;
     },
+    /**
+     * The validity banner's counts, the tellers a cheque can be forwarded to, and the size of
+     * the viewer's own deposit queue.
+     */
+    async validitySummary(): Promise<ChequeValiditySummary> {
+        const { data } = await http.get('/cheques/validity-summary');
+        return data.data as ChequeValiditySummary;
+    },
+    /** Step 2 — route a registered cheque out for signature. */
+    async routeForSignature(
+        id: number,
+        details: { forward_to_name: string; forward_unit_name?: string; date_forwarded: string; note?: string; expected_status?: string },
+    ): Promise<Cheque> {
+        await ensureCsrf();
+        const { data } = await http.post(`/cheques/${id}/route`, details);
+        return data.data as Cheque;
+    },
+    /** Step 3 — the signed cheque is back. It carries straight on to For ACIC. */
+    async markAsReceived(
+        id: number,
+        details: { received_by_name?: string; date_received: string; from_unit_name?: string; note?: string; expected_status?: string },
+    ): Promise<Cheque> {
+        await ensureCsrf();
+        const { data } = await http.post(`/cheques/${id}/receive`, details);
+        return data.data as Cheque;
+    },
+    /** Branch A — hand a cheque on an ACIC to the payee. */
+    async release(
+        id: number,
+        details: { received_by_name: string; date_received: string; note?: string; expected_status?: string },
+    ): Promise<Cheque> {
+        await ensureCsrf();
+        const { data } = await http.post(`/cheques/${id}/release`, details);
+        return data.data as Cheque;
+    },
+    /** RTS, Cancel and Void — each needs a reason. */
+    async except(id: number, step: 'rts' | 'cancel' | 'void', reason: string, expectedStatus?: string): Promise<Cheque> {
+        await ensureCsrf();
+        const { data } = await http.post(`/cheques/${id}/${step}`, { reason, expected_status: expectedStatus });
+        return data.data as Cheque;
+    },
+    /** Admin: issue a replacement for a stale cheque, on the next available number. */
+    async replace(id: number, chequeDate?: string): Promise<Cheque> {
+        await ensureCsrf();
+        const { data } = await http.post(`/cheques/${id}/replace`, chequeDate ? { cheque_date: chequeDate } : {});
+        return data.data as Cheque;
+    },
+    /** Every step the cheque has taken, oldest first. */
+    async statusHistory(id: number): Promise<ChequeStatusStep[]> {
+        const { data } = await http.get(`/cheques/${id}/status-history`);
+        return data.data as ChequeStatusStep[];
+    },
     /** `search` matches the cheque number or the number of the ACIC it sits on. */
-    async list(status: string, page = 1, perPage = 50, search = ''): Promise<Paginated<Cheque>> {
+    async list(
+        status: string,
+        page = 1,
+        perPage = 50,
+        search = '',
+        tab: ChequeTab = 'all',
+        sort: 'number' | 'expiry' = 'number',
+    ): Promise<Paginated<Cheque>> {
         const { data } = await http.get('/cheques', {
-            params: { status, page, per_page: perPage, ...(search ? { search } : {}) },
+            params: {
+                status,
+                page,
+                per_page: perPage,
+                ...(search ? { search } : {}),
+                ...(tab !== 'all' ? { tab } : {}),
+                ...(sort !== 'number' ? { sort } : {}),
+            },
         });
         return data as Paginated<Cheque>;
     },
@@ -324,6 +395,77 @@ function lddapPayload(draft: LddapDraft): Record<string, unknown> {
         remarks: draft.remarks.trim() || null,
     };
 }
+
+export const AcicTellerApi = {
+    /** Admin: send a whole ACIC — cheque or LDDAP — to the tellers. */
+    async forwardToTeller(id: number, details: { note?: string } = {}): Promise<Acic> {
+        await ensureCsrf();
+        const { data } = await http.post(`/acics/${id}/forward-to-teller`, details);
+        return data.data as Acic;
+    },
+    /** Teller: claim a Pending ACIC. The first to get here takes it. */
+    async accept(id: number, expectedStatus?: string): Promise<Acic> {
+        await ensureCsrf();
+        const { data } = await http.post(`/acics/${id}/accept`, { expected_status: expectedStatus });
+        return data.data as Acic;
+    },
+    /** Teller: lodge it with Land Bank — the first time, or again after a return. */
+    async forwardToLandBank(
+        id: number,
+        details: { forwarded_at?: string; transmittal_no?: string; note?: string; expected_status?: string },
+    ): Promise<Acic> {
+        await ensureCsrf();
+        const { data } = await http.post(`/acics/${id}/forward-to-land-bank`, details);
+        return data.data as Acic;
+    },
+    /** Teller: the bank sent it back. Naming no records means all of them. */
+    async returnedByBank(
+        id: number,
+        details: {
+            returned_at?: string;
+            reason: string;
+            cheque_ids?: number[];
+            lddap_ids?: number[];
+            expected_status?: string;
+        },
+    ): Promise<Acic> {
+        await ensureCsrf();
+        const { data } = await http.post(`/acics/${id}/returned-by-bank`, details);
+        return data.data as Acic;
+    },
+    /** Teller: the bank credited it. Final. */
+    async complete(
+        id: number,
+        details: {
+            credited_at?: string;
+            /** When it went over the counter — only needed if it was not lodged separately. */
+            handed_to_bank_at?: string;
+            bank_confirmation_no: string;
+            note?: string;
+            expected_status?: string;
+        },
+    ): Promise<Acic> {
+        await ensureCsrf();
+        const { data } = await http.post(`/acics/${id}/complete-teller`, details);
+        return data.data as Acic;
+    },
+    /** Teller: hand it back to the admin, with a reason. */
+    async returnToAdmin(id: number, reason: string, expectedStatus?: string): Promise<Acic> {
+        await ensureCsrf();
+        const { data } = await http.post(`/acics/${id}/return-to-admin`, { reason, expected_status: expectedStatus });
+        return data.data as Acic;
+    },
+    /** Every step of an ACIC's teller life, oldest first. */
+    async history(id: number): Promise<AcicHistoryStep[]> {
+        const { data } = await http.get(`/acics/${id}/history`);
+        return data.data as AcicHistoryStep[];
+    },
+    /** The teller dashboard's five lists, with the filters applied. */
+    async queue(filters: { type?: string; from?: string; to?: string } = {}): Promise<TellerQueue> {
+        const { data } = await http.get('/acics/teller-queue', { params: filters });
+        return data.data as TellerQueue;
+    },
+};
 
 export const LddapApi = {
     /**

@@ -4,7 +4,7 @@
 > workflows, routes, or data model), update this document and its flow-charts in the **same change**.
 > See [Maintaining this document](#maintaining-this-document).
 
-_Last reviewed against the code: 2026-09-22._
+_Last reviewed against the code: 2026-09-24._
 
 ---
 
@@ -31,30 +31,186 @@ finance/accounting staff, bank tellers, and administrators.
 
 ## 2. Architecture
 
+### 2.1 The shape of it
+
+One Laravel monolith serves both the JSON API and the built SPA, from the same origin — which is
+what lets Sanctum authenticate with an ordinary session cookie rather than a token.
+
 ```mermaid
 flowchart LR
-    Browser["React + TypeScript SPA<br/>(Vite)"] -->|"Sanctum cookie / session"| API["Laravel 13 API<br/>/api/v1/*"]
-    API --> Services["Services<br/>ChequeService · UpdateRequestService · ActivityLogger"]
-    Services --> DB[("PostgreSQL<br/>emds")]
+    subgraph Browser
+        SPA["React 19 + TypeScript (Vite)<br/>react-router · AuthContext<br/>lib/api.ts — axios + XSRF header"]
+    end
+
+    subgraph App["Laravel 13 · PHP 8.3+ — one deployable"]
+        direction TB
+        WEB["routes/web.php<br/>SPA catch-all + built assets"]
+        API["routes/api.php — /api/v1/*<br/>auth:sanctum · admin · teller"]
+        REQ["Form Requests (29)<br/>authorize() + rules()"]
+        CTRL["Controllers (12, thin)"]
+        SVC["Services (8)<br/>business rules · transactions · row locks"]
+        MDL["Models (14) · Enums (10)<br/>Support: Money · Tax · AmountInWords"]
+        RES["JsonResources"]
+    end
+
+    DB[("PostgreSQL — emds")]
+
+    SPA -->|"document + assets"| WEB
+    SPA -->|"JSON · same-origin session cookie"| API
+    API --> REQ
+    REQ --> CTRL
+    CTRL --> SVC
+    SVC --> MDL
+    MDL --> DB
+    SVC --> RES
+    RES -->|"JSON"| SPA
 ```
 
 | Layer | Technology |
 |---|---|
-| Backend | Laravel 13, PHP 8.3+ |
-| Auth | Laravel Sanctum (same-origin SPA cookie/session) |
-| Frontend | React 19 + TypeScript, built with Vite, served by Laravel |
-| Styling | Tailwind CSS v4 |
-| Database | PostgreSQL |
+| Backend | Laravel 13, PHP 8.3+ (8.5 in development) |
+| Auth | Laravel Sanctum — same-origin SPA cookie/session, no tokens |
+| Frontend | React 19 + TypeScript, react-router 7, built with Vite, served by Laravel |
+| Styling | Tailwind CSS v4 (CSS-based `@theme`) |
+| Database | PostgreSQL (`emds`); the test suite runs on in-memory SQLite |
+
+### 2.2 How a write travels
+
+Every endpoint takes the same path, and each layer has exactly one job. The rules that matter —
+no number twice, lowest first, only the next valid step — are enforced in the **service**, inside
+a transaction, under a row lock: never in the controller, and never only in the UI.
+
+```mermaid
+flowchart TD
+    R["Request — e.g. POST /api/v1/lddaps/assign-acic"] --> MW{"Middleware<br/>auth:sanctum, then admin / teller"}
+    MW -- "not signed in / wrong role" --> E401["401 · 403"]
+    MW -- "passes" --> FR{"Form Request<br/>authorize() + rules()"}
+    FR -- "invalid" --> E422["422 with per-field errors"]
+    FR -- "validated()" --> CTRL["Controller<br/>hands the data to a service"]
+    CTRL --> SVC["Service<br/>DB::transaction + lockForUpdate"]
+    SVC -- "domain rule broken" --> E422
+    SVC --> W[("Records written")]
+    SVC --> LOG["ActivityLogger<br/>→ cheque_logs (append-only)"]
+    SVC --> HIST["Histories<br/>routing · edit · correction"]
+    SVC --> NOTE["ActivityNotification<br/>→ notifications → bell"]
+    W --> OUT["JsonResource → JSON"]
+```
+
+- **Middleware** answers *may this user reach the route at all* (`EnsureUserIsAdmin`,
+  `EnsureUserIsTeller`); finer gates — admin **or** staff — live in the Form Request's
+  `authorize()`.
+- **Form Requests** hold *all* input validation. Controllers never validate.
+- **Services** own the invariants and are the only place a transaction or a lock is opened. They
+  throw `ValidationException`, so a broken rule reaches the client as the same 422 shape as a
+  bad field.
+- **Audit, histories and notifications are side effects of the service call**, inside the same
+  transaction — an action and its record of itself cannot come apart.
+
+### 2.3 Services, and what each one owns
+
+```mermaid
+flowchart LR
+    DSH["DashboardService<br/>attention items · register counts"]
+    CHS["ChequeService<br/>cheque register"]
+    LDS["LddapService<br/>LDDAP records + check series"]
+    ACS["AcicService<br/>ACIC numbers + linking"]
+    ALC["LddapCheckAllocator<br/>consecutive check blocks"]
+    URS["UpdateRequestService<br/>cheque corrections"]
+    LUR["LddapUpdateRequestService<br/>LDDAP corrections"]
+    LOG["ActivityLogger"]
+
+    DSH --> CHS
+    DSH --> LDS
+    DSH --> ACS
+    LDS --> ACS
+    LDS --> ALC
+    ACS --> ALC
+    CHS --> LOG
+    LDS --> LOG
+    ACS --> LOG
+    URS --> LOG
+    LUR --> LOG
+```
+
+**Three independent number series**, each registered in blocks by an admin, each handing out the
+**lowest unused** number next, none ever registering a number twice:
+
+| Series | Table · column | Registered by | Issued by |
+|---|---|---|---|
+| Cheque numbers | `cheques.cheque_number` | `ChequeService::addRange()` | `ChequeService::useNext()` — locks the lowest available row |
+| LDDAP check numbers | `lddap_checks.check_no` | `LddapService::addRange()` | `LddapCheckAllocator::claim()` — N consecutive, on ACIC assignment |
+| ACIC numbers | `acic_numbers.acic_number` | `AcicService::addRange()` | `AcicService` — the lowest unused, when an ACIC is opened |
+
+They are **unrelated to one another**: using an LDDAP check number consumes no cheque, and an
+ACIC number is neither.
+
+### 2.4 The data, grouped
+
+```mermaid
+flowchart TB
+    subgraph SER["Number series — registered in blocks"]
+        S1["cheques<br/>status: available"]
+        S2["lddap_checks"]
+        S3["acic_numbers"]
+    end
+
+    subgraph REC["Records"]
+        R1["cheques<br/>used → … → approved"]
+        R2["lddaps"]
+        R3["acics"]
+    end
+
+    subgraph REF["Reference data"]
+        F1["users"]
+        F2["units"]
+        F3["payees · payee_accounts"]
+    end
+
+    subgraph TRL["Trails — append-only"]
+        T1["cheque_logs<br/>the audit log"]
+        T2["lddap_routing_history"]
+        T3["lddap_edit_history"]
+        T4["cheque_update_requests<br/>lddap_update_requests"]
+        T5["notifications"]
+    end
+
+    S1 -->|"useNext()"| R1
+    S2 -->|"lddap_check_id"| R2
+    S3 -->|"acic_number"| R3
+    R1 -->|"acic_id"| R3
+    R2 -->|"acic_id"| R3
+    F2 --> R2
+    F3 --> R2
+    R1 --> T4
+    R2 --> T2
+    R2 --> T3
+    R2 --> T4
+    F1 --> T1
+    F1 --> T5
+```
+
+`cheques` is one table living two lives: a row is **registered** as part of a book (available),
+and becomes a **record** the moment it is used. The other two series keep their numbers in their
+own tables, and the record points at the number it took.
+
+Full column-level detail is in [§ 10 Data model](#10-data-model).
 
 **Where the logic lives**
 
-- `app/Enums/` — `UserRole`, `ChequeStatus`, `ChequeAction`, `RequestStatus`, `AcicStatus`
-- `app/Services/ChequeService.php` — sequential usage, row locking, receipt confirmation, ranges
-- `app/Services/UpdateRequestService.php` — the detail-correction request/approval workflow
-- `app/Services/AcicService.php` — the ACIC sequence, cheque linking, and forwarding
-- `app/Services/ActivityLogger.php` — append-only audit log
+- `app/Enums/` — `UserRole`, `ChequeStatus`, `ChequeAction`, `RequestStatus`, `AcicStatus`,
+  `AcicNumberStatus`, `LddapStatus`, `LddapRoutingAction`, `LddapCheckStatus`, `NatureOfPayment`
+- `app/Services/ChequeService.php` — sequential usage, row locking, receipt, review, ranges
+- `app/Services/LddapService.php` — registration, the edit, the routing, the check series, ACIC linking
+- `app/Services/LddapCheckAllocator.php` — claims a run of consecutive check numbers under a lock
+- `app/Services/AcicService.php` — the ACIC number series, membership, sign-off and forwarding
+- `app/Services/DashboardService.php` — what awaits the signed-in user, and every register's counts
+- `app/Services/UpdateRequestService.php`, `LddapUpdateRequestService.php` — the correction workflows
+- `app/Services/ActivityLogger.php` — the append-only audit log
+- `app/Support/` — `Money` (bcmath decimals), `Tax` (the W/TAX–VAT rule), `AmountInWords`
 - `app/Http/Controllers/` — thin controllers; validation lives in `app/Http/Requests/`
-- `routes/api.php` — all endpoints under `/api/v1`
+- `routes/api.php` — all endpoints under `/api/v1`; `routes/web.php` — the SPA catch-all
+- `resources/js/` — `pages/` (one per route), `components/` (dialogs + shared UI),
+  `auth/AuthContext.tsx` (the session), `lib/api.ts` (every call), `lib/tax.ts` (mirrors `Support\Tax`)
 
 ---
 
@@ -63,6 +219,10 @@ flowchart LR
 | Capability | Admin | Staff | Teller |
 |---|:---:|:---:|:---:|
 | Sign in / view cheques & dashboard | ✓ | ✓ | ✓ |
+| **Route** · **receive** · **assign** · **release** a cheque | ✓ | | |
+| **Forward an ACIC** to the tellers | ✓ | | |
+| **Accept** · **deposit** · **return** an ACIC | | | ✓ *(the one who accepted it)* |
+| **RTS** · **cancel** · **void** a cheque · **replace** a stale one | ✓ | | |
 | Edit **own profile** (full name, email) / **change own password** | ✓ | ✓ | ✓ |
 | Use the next cheque | ✓ | ✓ | ✓ |
 | Confirm a used cheque as **received** | | | ✓ |
@@ -114,48 +274,284 @@ name, and `aria-expanded` follows the state (`resources/js/components/UserMenu.t
 
 ## 4. Cheque lifecycle
 
-A cheque moves through exactly one status at a time: **available → used → received**, then a
-final **admin review** outcome. **Approved** and **Disapproved** settle the cheque;
-**Returned** hands it back to the staff member to fix what the reviewer noted, after
-which it can be reviewed again.
+A cheque moves through **one ordered flow**, enforced server-side. `Available` sits outside it:
+a number the bank printed and an admin registered as part of a book, waiting to be claimed.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Available: admin registers a cheque book
-    Available --> Used: staff uses the next (lowest available) cheque
-    Used --> Received: teller confirms receipt
+    state "Available" as AV
+    state "Registered" as R
+    state "Out for Signature" as OS
+    state "For ACIC" as FA
+    state "Approved" as AA
+    state "Released to Payee" as RP
+    state "Forwarded to Teller" as FT
+    state "Accepted by Teller" as AT
+    state "Deposited" as D
 
-    Used --> Approved: admin approves
-    Used --> Returned: admin reviews
-    Used --> Disapproved: admin reviews
-    Received --> Approved: admin approves
-    Received --> Returned: admin reviews
-    Received --> Disapproved: admin reviews
-
-    Returned --> Approved: reviewed again once staff comply
-    Returned --> Disapproved: reviewed again once staff comply
-
-    Approved --> [*]
-    Disapproved --> [*]
-
-    note right of Used
-        HOLD: while a detail-update request is pending,
-        neither teller receipt nor admin review can proceed
-        until an admin approves or rejects it.
-    end note
+    [*] --> AV: admin registers a cheque book
+    AV --> R: Register — claims the lowest available number
+    R --> OS: Route for Signature
+    OS --> FA: Mark as Received (passes through Received)
+    FA --> AA: Assign Cheque to ACIC
+    AA --> RP: Release to Payee
+    AA --> FT: Forward to Teller (whole ACIC)
+    FT --> AT: a teller accepts — first wins
+    AT --> D: Mark as Deposited
+    FT --> AA: Return to Admin
+    AT --> AA: Return to Admin
+    OS --> R: RTS
+    FA --> R: RTS
+    R --> Cancelled
+    AA --> Voided
+    RP --> [*]: final
+    D --> [*]: final
 ```
 
-- **Available → Used** — `ChequeService::useNext()` locks the lowest available row `FOR UPDATE`
-  inside a transaction and rejects any number that isn't the genuine next one (concurrency-safe,
-  skip-proof).
-- **Used → Received** — `ChequeService::confirmReceipt()`; teller-only. Blocked while the cheque
-  is on hold (see §6).
-- **Used / Received → Approved | Returned | Disapproved** — `ChequeService::review()`;
-  admin-only (see §6a). **Approved and Disapproved are final** and cannot be revisited;
-  **Returned is not** — the cheque returns to the staff member and can be reviewed
-  again afterwards. A reviewed cheque can no longer be confirmed as received.
-- Receipt is recorded by its own `received_at` / `received_by` columns rather than by the status,
-  so confirming receipt is never lost when a review moves the cheque on to its final status.
+**The two branches after Approved.** A cheque goes **either** to the payee **or** to the
+bank, never both:
+
+| Branch | Steps | Unit | Who |
+|---|---|---|---|
+| **A — to the payee** | Approved → **Release to Payee** | one cheque | Admin |
+| **B — to the bank** | Approved → **Forward to Teller** → Accepted → **Deposited** | the **whole ACIC** | Admin, then a teller |
+
+### The steps
+
+1. **Registered** — set automatically when a cheque is claimed from the book. The number is the
+   **lowest available**, exactly as it always was; a cheque number is never allocated at ACIC
+   time (that rule belongs to LDDAP check numbers).
+2. **Route for Signature** (`POST /cheques/{cheque}/route`) — *Forward to*, *Unit name*, *Date
+   forwarded*, *Note*. Forwarded by is the signed-in user.
+3. **Mark as Received** (`POST /cheques/{cheque}/receive`) — *Received by* (defaults to the
+   signed-in user, editable), *Date received*, *From unit name*, *Note*. **Received is a
+   pass-through**: the step carries the cheque straight on to **For ACIC**, and the history
+   records both moves.
+4. **For ACIC** — the only status *Assign Cheque to ACIC* offers. Several cheques share one ACIC
+   number. Assigning sets **Approved**.
+5. **Release to Payee** (`POST /cheques/{cheque}/release`) — *Received by* (payee or authorised
+   representative), *Date received*, *Note*. Refused without an ACIC or without a cheque number.
+   Final.
+
+### Branch B — the ACIC goes to the tellers
+
+The ACIC is the unit here, not the cheque:
+
+- **Forward to Teller** (`POST /acics/{acic}/forward-to-teller`, admin) — refused unless **every**
+  cheque on the ACIC is Approved, and refused outright if any has already been released to
+  its payee. Every teller is notified; the ACIC shows as **Pending** on the deposit queue.
+- **Accept** (`POST /acics/{acic}/accept`, teller) — **the first teller to accept claims it**,
+  through a conditional write (`accepted_by` is set only where it is still null), so two tellers
+  clicking at the same instant cannot both succeed. The second is told *"Already accepted by
+  {name}."* and the ACIC leaves every other teller's Pending list.
+- **Mark as Deposited** (`POST /acics/{acic}/deposit`) — *Deposit date* (one date for the whole
+  ACIC, not in the future, not before the date accepted), the bank read-only as **Land Bank of
+  the Philippines**, *Deposit slip / reference no.*, *Note*. Every cheque becomes **Deposited**.
+- **Return to Admin** (`POST /acics/{acic}/return-to-admin`) — reason required. Every cheque goes
+  back to **Approved**, the claim is released and the admin is notified, who can forward it
+  again or release the cheques individually.
+
+Only the teller who accepted an ACIC (or an admin) may deposit or return it. The teller
+dashboard is **Deposit queue** (`/deposit-queue`), with Pending and Accepted lists.
+
+### The three ways out
+
+| Exception | Allowed at | Result |
+|---|---|---|
+| **RTS** | Out for Signature · Received · For ACIC | back to **Registered**, routing cleared, ready to go round again |
+| **Cancel** | before an ACIC — Registered · Out for Signature · Received · For ACIC | **Cancelled**, final |
+| **Void** | **Approved only** — never once a teller has it | **Voided**, final; the number stays used and is never reassigned |
+
+Each needs a reason, kept on the cheque as `exception_reason`.
+
+### The rules behind every step
+
+Everything funnels through `ChequeFlowService::move()`, so no step can forget a check:
+
+- **The order is enforced server-side.** `ChequeStatus::nextStates()` is the whole transition
+  table; anything not in it is refused. No skipping forward, no walking back.
+- **Optimistic concurrency.** Each step may carry `expected_status` — the status the caller's
+  page was showing. If the row has moved since, the step is refused with
+  *"This record was updated by another user. Refresh to continue."*
+- **Dates.** Never in the future, and never before the previous step's date (routed ≥ cheque
+  date, received ≥ forwarded, released ≥ the date the ACIC was assigned, deposited ≥ accepted).
+- **The hold.** A pending correction request stops a cheque moving on; only the system's own
+  step (going stale) and the exceptions that close it are not held up.
+- **Every change is written to `cheque_status_history`** — from/to status, the named action, the
+  user, the timestamp and the step's own fields. **An ACIC-level action writes one row per
+  cheque on that ACIC**, so each cheque's trail is complete on its own. Readable at
+  `GET /cheques/{cheque}/status-history`, and shown as the **Timeline** on the record.
+- **Roles.** Admins register, route, receive, assign, release, forward, cancel and void. Tellers
+  accept, deposit and return. Enforced in the Form Requests and re-checked in the services.
+
+### What this replaced
+
+The old `status` + `disposition` pair is folded into this one field — where a cheque *is* and
+how far it has *got* turned out to be the same question once the flow was written down. The
+admin **review** flow (Approved / Returned / Disapproved) retires with it: RTS, Cancel and Void
+take its place, and **Mark as Received → For ACIC** is the sign-off. The migration
+`2026_09_24_000000_rework_cheque_status_flow` remaps every existing row — a settled disposition
+wins over the review beside it, `approved` + an ACIC becomes Approved, `complies` becomes
+Registered and `disapproved` becomes Cancelled.
+
+---
+
+## 4b. Cheque validity — the 90-day clock
+
+The 90-day validity runs beside the flow above. A cheque ages from its **cheque date** wherever
+it happens to be sitting, and **Stale** overtakes whatever status it was in.
+
+```mermaid
+stateDiagram-v2
+    state "Assigned" as A
+    state "Released" as R
+    state "For Deposit" as F
+    state "Deposited" as D
+    state "Stale" as S
+    state "Replaced" as P
+    [*] --> A: number used (status → Used)
+    A --> R: Release — Path A, to the payee
+    A --> F: Forward to Teller — Path B
+    F --> D: teller approves & deposits
+    F --> A: teller returns (validity unchanged)
+    A --> Cancelled
+    A --> S: day 91
+    R --> S: day 91
+    F --> S: day 91
+    S --> P: Replace Cheque (admin)
+    D --> [*]: final
+    P --> [*]: final
+```
+
+**The rule.** A cheque is valid for **exactly 90 calendar days from its cheque date**. Day 0 is the
+cheque date, day 90 is the last valid day, and from **day 91** it is stale. Counted in whole days
+(`App\Support\Validity`), never in months, so leap years and month-ends need no special case, and
+always reckoned in **Asia/Manila** whatever the app's timezone — the rule is about the calendar
+date on a piece of paper in a Philippine office, not an instant in UTC. `validity_until` is
+derived on save: set the cheque date and it follows, change the date and it moves (and the
+one-time alert reopens).
+
+**Eight statuses perish**: Registered, Out for Signature, Received, For ACIC, Approved,
+Forwarded to Teller, Accepted by Teller and Released to Payee. A cheque can go stale while it is
+waiting for signature, sitting with a teller, or held uncashed by the payee. Deposited,
+Cancelled, Voided, Stale and Replaced are never touched again.
+
+| Path | Steps | Who |
+|---|---|---|
+| **A — direct to payee** | Assigned → **Release** → Released | Admin/staff |
+| **B — deposit via teller** | Assigned → **Forward to Teller** → For Deposit → **Approve & Deposit** → Deposited | Admin/staff, then the teller |
+
+A cheque follows **one path only**: a released cheque is never forwarded, and one with a teller is
+never released. `ChequeDisposition::canMoveTo()` is the whole transition table, and every move is
+checked three ways in `ChequeDispositionService` — signed off (`status` = Approved), a transition
+the enum allows, and still inside validity.
+
+- **Release** (`POST /cheques/{cheque}/release`) — *Received by* (the payee **or the
+  representative who collected it**, pre-filled with the payee but editable), *Date received*
+  (defaults to today; not in the future, not before the cheque date, not after `validity_until`)
+  and an optional note. `released_by` / `released_at` are the signed-in user and now. The dialog
+  asks once more before committing, because a release cannot be undone.
+- **Forward to Teller** (`POST /cheques/{cheque}/forward`) — pick an active teller; they are
+  notified.
+- **Approve & Deposit** (`POST /cheques/{cheque}/deposit`) — *Date deposited* (not in the future,
+  not after validity), the bank shown read-only as **Land Bank of the Philippines**, an optional
+  deposit reference and note. **Every active user is notified** that the cheque was deposited.
+- **Return** (`POST /cheques/{cheque}/return`) — the teller hands it back with a required reason.
+  It returns to Assigned and **keeps its original `validity_until`**: returning does not restart
+  the 90-day clock.
+- Only the teller a cheque was forwarded to, or an admin, may deposit or return it.
+
+**An action attempted past validity does not merely fail.** The cheque is marked stale then and
+there, and the refusal says so. That marking happens *before* the action's own transaction opens —
+doing it inside would work right up until the refusal threw, at which point the rollback would
+undo the very fact it had just established.
+
+### Going stale
+
+1. **The nightly sweep** — `cheques:sweep-validity`, scheduled `dailyAt('00:05')` in Asia/Manila
+   (`routes/console.php`). It marks every perishable cheque past its last valid day as Stale with
+   `stale_at`, and writes *"Auto-marked stale by system — exceeded 90-day validity"* naming the
+   stage it expired in: *never signed/released*, *released to {name} on {date}, not encashed*, or
+   *with teller, not deposited*. System entries are attributed to `system` in the audit log.
+2. **On read** — `Cheque::effectiveStatus()` reports Stale the moment the date turns, sweep or
+   no sweep, and `scopeEffectivelyIn()` is the same answer in SQL. Every guard, every badge and
+   every tab reads the effective value, so **correctness never depends on the job having run**.
+   The sweep only writes down what the model already reports.
+3. **Idempotent** — `markStale()` re-reads under a lock and returns early if the cheque is already
+   stale, and the alert is stamped on the row. Running the sweep twice changes nothing and
+   notifies nobody twice. `--dry-run` reports without writing.
+
+### The 10-day alert
+
+Fires once when a perishable cheque has **10 days or fewer** left (expiry day included), stamped
+with `expiry_alert_sent_at` so it never repeats. Changing the cheque date clears the stamp.
+
+The message carries the cheque number, payee, amount, cheque date, `validity_until`, the countdown
+and the current status, and opens the Expiring Soon tab. What it says, and who else gets it:
+
+| Status | Message | Extra recipient |
+|---|---|---|
+| Registered · Out for Signature | *Pending signature — this cheque will become stale in N days if not released or forwarded.* | — (admins are the signatories, and are always notified) |
+| Released to Payee | *Released to {name} on {date} — … if not encashed. Please follow up with the payee.* | the user who released it |
+| Forwarded / Accepted by Teller | *Awaiting teller deposit — … if not deposited to Land Bank of the Philippines.* | the teller holding the ACIC |
+
+Base recipients are the user who assigned the number and the active admins. Delivery is **in-app**
+(the header bell); **email is optional and off by default** — `cheques.alert_email`
+(`CHEQUE_ALERT_EMAIL=true`) turns it on once a mailer is configured.
+
+### Stale cheques and replacement
+
+Stale is terminal: the cheque cannot be signed, released, forwarded, deposited or edited back to an
+active state, and **its number stays consumed** — never reused, exactly as for every other number
+in this system.
+
+**Replace Cheque** (`POST /cheques/{cheque}/replace`, **admin only**) issues a new cheque on the
+next available number through the existing `useNext()` rules, carrying the payee and amount over,
+with a fresh cheque date and a fresh 90 days. The old cheque becomes **Replaced**, and the two are
+linked both ways (`replaces_id` / `replaced_by_id`); both keep their full history. A cheque can be
+replaced once. If the stale cheque had been **released**, the dialog warns first — *"This cheque
+was released to {name}. Make sure the original cheque has been returned before issuing a
+replacement."*
+
+### Editing, after the fact
+
+- **The cheque date is fixed once the cheque leaves.** It may only be changed while the
+  status is Registered; afterwards a correction naming a different date is refused, because
+  the 90-day clock runs from it.
+- **Release details cannot be edited by the person who entered them.** Only an admin may correct
+  `received_by_name` / `date_received` (`PATCH /cheques/{cheque}/release`), a reason is required,
+  and the audit log records `field 'old' → 'new'` alongside it.
+
+### On the cheque page
+
+- **Validity column** — the countdown (*12 days left* · *Expires today* · *Stale — 5 days ago*)
+  with the date beneath. Deposited cheques read *Deposited to Land Bank {date}*; Cancelled,
+  Spoiled and Replaced read *—*.
+- **Received by column** — `received_by_name` and `date_received`, for released cheques.
+- **Badges** — one per status: teal *Released to Payee*, purple *Forwarded to Teller*, indigo
+  *Accepted by Teller*, blue *Deposited*, red *Stale* / *Cancelled* / *Voided*. The Validity
+  column adds green (more than 10 days) / amber (10 or fewer, with an *Unsigned* / *With payee*
+  / *With teller* tag) / red once stale.
+- **Banner** — *"4 cheques will become stale within 10 days (2 pending signature, 1 with payee,
+  1 with teller)."* Clicking it filters to those cheques.
+- **Tabs** — All, then any status in the flow (Registered · Out for Signature · For ACIC ·
+  Approved · Released · Forwarded to Teller · Accepted by Teller · Deposited), plus
+  Expiring Soon and Stale (`GET /cheques?tab=`), and a **nearest expiry first** sort
+  (`&sort=expiry`).
+- **Row actions** — exactly the one step the cheque is ready for (Route for Signature · Mark as
+  Received · Assign to ACIC · Release to Payee), then the ways out (RTS · Cancel · Void) and
+  Replace on a stale one. Every button is driven by a `can_*` flag the server computes, so the
+  buttons and the endpoints can never disagree. The teller's actions live on the **Deposit
+  queue**, not on the cheque row.
+- **Detail page** — a **Timeline** of everything that happened: assigned → signed off → released,
+  or → forwarded → returned/deposited, then stale or replaced, each with user and timestamp.
+
+### Backfilling
+
+The migration `2026_09_23_000000_add_validity_and_disposition_to_cheques_table` computed
+`validity_until` for every existing cheque and marked anything already past it as Stale — **silently**, so a history
+of back-dated cheques does not fire a flood of old alerts. Its `backfill()` is public and
+idempotent, and the test suite exercises it directly.
 
 ---
 
@@ -433,11 +829,15 @@ on, and what is offered follows the status:
   Many cheques and LDDAPs share one ACIC number, so a Used ACIC keeps accepting more — **Add
   cheque** and **Add LDDAP** in the View dialog put them on *that* ACIC rather than opening a new
   number, and everything on it stays grouped in its one table. `AcicStatus::acceptsRecords()`
-  (Open or Used) is the gate, and it is **sign-off**, not Used, that closes membership: an
-  Approved ACIC changes only through an explicit **Re-assign**.
-- **Approve** moves `used → approved`. Only a Used ACIC can be approved, and only one that
-  actually carries something — approving an empty number would sign off nothing. It is
-  **admin-only**, like every other sign-off in the system.
+  (Open or Used) is the gate for **LDDAPs**; for cheques, see the next point.
+- **Assigning cheques signs the ACIC off in the same step.** `assignCheques()` sets the ACIC to
+  **Approved** as well as linking the cheques, so a cheque ACIC is ready to forward or print at
+  once with no separate click. It **keeps accepting cheques** while approved — many share one
+  number — so for a cheque ACIC it is **forwarding**, not approval, that closes membership.
+  Assigning **LDDAPs** leaves the ACIC `used`, to be approved on its own as before.
+- **Approve** (`POST /acics/{acic}/approve`) moves `used → approved` for an ACIC that is still
+  Used — in practice an LDDAP one. It refuses an ACIC that carries nothing, and one already
+  approved (*"has already been approved"*), which a cheque ACIC will be. **Admin-only**.
 - **Forwarding now follows the sign-off.** `AcicService::forward()` refuses an ACIC that has not
   been approved, so what leaves the office is what was approved.
 - **Re-assign** (`POST /acics/{acic}/reassign`, admin **and** staff) swaps one record on the ACIC
@@ -1001,8 +1401,13 @@ cheques not already on an ACIC are listed.
 
 ## 7. Audit log
 
-Every significant action appends an immutable row to `cheque_logs` via `ActivityLogger`.
+Every significant action appends an immutable row to `cheque_logs` via `ActivityLogger`. Actions
+the system takes unprompted — the nightly validity sweep — are recorded with no user id and the
+username `system`.
 Actions (`app/Enums/ChequeAction.php`): `login`, `logout`, `updated_profile`, `changed_password`,
+`routed_for_signature`, `ready_for_acic`, `rts_cheque`, `voided_cheque`, `accepted_by_teller`,
+`released_cheque`, `forwarded_cheque_to_teller`, `deposited_cheque`, `returned_cheque_from_teller`,
+`cancelled_cheque`, `spoiled_cheque`, `staled_cheque`, `replaced_cheque`, `corrected_release`,
 `used_cheque`, `received_cheque`,
 `reviewed_cheque`, `requested_update`, `approved_update`, `rejected_update`, `added_cheque_range`,
 `created_acic`, `used_acic`, `forwarded_acic`, `completed_acic`, `created_user`, `updated_user`,
@@ -1077,16 +1482,27 @@ the action that raised it.
 | `GET /me` | Auth | Current user |
 | `PUT /me` | Auth | Profile: the signed-in user's own full name and email (`UpdateProfileRequest`) |
 | `PUT /me/password` | Auth | Change own password — current password required, confirmed, session kept (`ChangePasswordRequest`) |
-| `GET /cheques` | Auth | List cheques (filter by `status` and `search`; includes hold flag) |
+| `GET /cheques` | Auth | List cheques (`status`, `search`, `tab`, `sort`; includes hold flag) |
 | `GET /cheques/summary` | Auth | Cheque counts + next cheque (the cheque page's header) |
 | `GET /dashboard` | Auth | The dashboard: attention items by role, every register's counts, the series, admin's recent activity |
 | `GET /cheques/next` | Auth | The next usable cheque |
 | `POST /cheques/use` | Auth | Use the next cheque |
+| `GET /cheques/validity-summary` | Auth | Banner counts, the viewer's deposit queue, the tellers, the bank |
+| `GET /cheques/{cheque}/status-history` | Auth | Every step the cheque has taken, oldest first |
+| `POST /cheques/{cheque}/route` | **Admin** | Step 2 — route out for signature (`RouteChequeRequest`) |
+| `POST /cheques/{cheque}/receive` | **Admin** | Step 3 — signed and back; carries on to For ACIC (`ReceiveChequeRequest`) |
+| `POST /cheques/{cheque}/release` | **Admin** | Branch A — release to the payee (`ReleaseChequeRequest`) |
+| `POST /cheques/{cheque}/rts` · `/cancel` · `/void` | **Admin** | The three ways out, reason required (`ChequeExceptionRequest`) |
+| `POST /cheques/{cheque}/replace` | **Admin** | Issue a replacement for a stale cheque (`ReplaceChequeRequest`) |
+| `POST /acics/{acic}/forward-to-teller` | **Admin** | Branch B — send the whole ACIC to the tellers |
+| `POST /acics/{acic}/accept` | **Teller** | Claim a forwarded ACIC — first one wins |
+| `POST /acics/{acic}/deposit` | **Teller** | Bank it; one deposit date for the whole ACIC |
+| `POST /acics/{acic}/return-to-admin` | **Teller** | Hand it back, reason required |
+| `GET /acics/teller-queue` | Auth | The deposit queue: Pending and Accepted |
 | `POST /cheques/{cheque}/receive` | **Teller** | Confirm receipt (blocked if on hold) |
 | `POST /cheques/{cheque}/update-requests` | **Staff** | Propose a detail correction |
 | `GET /cheques/{cheque}/update-requests` | Auth | A cheque's request history + outcomes |
 | `POST /cheques/add-range` | **Admin** | Register a book by `start_at` / `end_at` serial |
-| `POST /cheques/{cheque}/review` | **Admin** | Record the review outcome (blocked if on hold) |
 | `GET /lddaps` | Auth | List LDDAP records — the filter bar's `search`, `status`, `nature`, `page`, `per_page` (`FilterLddapsRequest`) |
 | `GET /lddaps/next-numbers` | Auth | The next `count` check numbers in the LDDAP series |
 | `GET /lddaps/series` | Auth | LDDAP check series counts (registered / unused / used) |
@@ -1151,6 +1567,7 @@ erDiagram
     PAYEE_ACCOUNTS ||--o{ LDDAPS : "paid into"
     USERS ||--o{ LDDAPS : "uses / receives / reviews"
     USERS ||--o{ CHEQUE_LOGS : "acts in"
+    CHEQUES ||--o{ CHEQUE_STATUS_HISTORY : "trail"
     USERS ||--o{ NOTIFICATIONS : "notified via"
 
     USERS {
@@ -1162,16 +1579,46 @@ erDiagram
     }
     CHEQUES {
         int    cheque_number "unique, sequential"
-        enum   status "available | used | received | approved | complies | disapproved"
+        enum   status "available | registered | out_for_signature | received | for_acic | approved | released_to_payee | forwarded_to_teller | accepted_by_teller | deposited | cancelled | voided | stale | replaced"
+        date   validity_until "cheque_date + 90 days, derived"
+        timestamp stale_at
+        timestamp expiry_alert_sent_at "the one-time 10-day alert"
         string payee_name
         decimal amount
         date   cheque_date
         fk     acic_id "the ACIC it sits on"
         fk     used_by
-        fk     received_by
+        fk     received_by "the teller confirming receipt"
         fk     reviewed_by
         timestamp reviewed_at
         text   review_note
+        string received_by_name "Path A: who it was RELEASED to"
+        date   date_received
+        fk     released_by
+        timestamp released_at
+        text   release_note
+        string forward_to_name "step 2: routed for signature"
+        string forward_unit_name
+        fk     forwarded_by
+        date   date_forwarded
+        string received_by_name_in "step 3: signed and back"
+        date   date_received_in
+        string from_unit_name
+        text   exception_reason "RTS / cancel / void"
+        timestamp rts_at
+        fk     replaces_id "the stale cheque this one replaces"
+        fk     replaced_by_id
+    }
+    CHEQUE_STATUS_HISTORY {
+        fk     cheque_id
+        enum   from_status
+        enum   to_status
+        string action "routed | received | assigned | released | accepted_by_teller | …"
+        fk     user_id
+        fk     acic_id "set on an ACIC-level step"
+        json   details "the step's own fields"
+        text   note
+        datetime created_at "append-only"
     }
     CHEQUE_UPDATE_REQUESTS {
         fk     cheque_id
@@ -1226,7 +1673,7 @@ erDiagram
         date   date_loaded
         text   note
         string remarks
-        date   check_date "date issued, entered
+        date   check_date "date issued, entered with the record"
         enum   status "registered | for_out | returned_for_acic | rts | approved | canceled"
         string forward_to
         fk     forward_unit_id

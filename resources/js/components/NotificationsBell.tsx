@@ -13,6 +13,8 @@ const DOT: Record<NotificationKind, string> = {
     approved: 'bg-success',
     rejected: 'bg-danger',
     used: 'bg-accent-400',
+    expiring: 'bg-amber-400',
+    stale: 'bg-danger',
 };
 
 /**

@@ -4,7 +4,6 @@ namespace App\Services;
 
 use App\Enums\ChequeAction;
 use App\Enums\ChequeStatus;
-use App\Enums\RequestStatus;
 use App\Models\Cheque;
 use App\Models\User;
 use App\Notifications\ActivityNotification;
@@ -81,7 +80,9 @@ class ChequeService
             }
 
             $next->update([
-                'status' => ChequeStatus::Used,
+                // The number is claimed and the flow starts: Registered, with its 90-day
+                // clock running from the cheque date (`validity_until` follows it, on the model).
+                'status' => ChequeStatus::Registered,
                 'used_by' => $user->id,
                 'used_at' => Carbon::now(),
                 'payee_name' => $details['payee_name'] ?? null,
@@ -113,146 +114,6 @@ class ChequeService
             );
 
             return $next->fresh(['usedBy']);
-        });
-    }
-
-    /**
-     * A teller confirms that a used cheque has been received, moving it used -> received.
-     * This is a separate lifecycle event from using/issuing the cheque, and records which
-     * teller confirmed it and when.
-     *
-     * @throws ValidationException
-     */
-    public function confirmReceipt(User $teller, Cheque $cheque): Cheque
-    {
-        if ($cheque->status === ChequeStatus::Received) {
-            throw ValidationException::withMessages([
-                'cheque' => "Cheque #{$cheque->cheque_number} has already been confirmed as received.",
-            ]);
-        }
-
-        if ($cheque->status !== ChequeStatus::Used) {
-            throw ValidationException::withMessages([
-                'cheque' => 'Only a used cheque can be confirmed as received.',
-            ]);
-        }
-
-        // A cheque with a pending detail-update request is on hold: the teller cannot confirm
-        // receipt until an admin has approved or rejected the requested change.
-        $onHold = $cheque->updateRequests()
-            ->where('status', RequestStatus::Pending)
-            ->exists();
-
-        if ($onHold) {
-            throw ValidationException::withMessages([
-                'cheque' => "Cheque #{$cheque->cheque_number} is on hold — a detail update request is awaiting admin approval and must be resolved first.",
-            ]);
-        }
-
-        $cheque->update([
-            'status' => ChequeStatus::Received,
-            'received_by' => $teller->id,
-            'received_at' => Carbon::now(),
-        ]);
-
-        $this->logger->log(
-            $teller,
-            ChequeAction::ReceivedCheque,
-            $cheque->cheque_number,
-            "Cheque number {$cheque->cheque_number} confirmed as received by teller {$teller->name}.",
-        );
-
-        return $cheque->fresh(['usedBy', 'receivedBy']);
-    }
-
-    /**
-     * An admin records the review outcome for an issued cheque, moving it to its final
-     * status: approved, complies, or disapproved.
-     *
-     * Approved and Disapproved are final and cannot be revisited. "Returned" is not:
-     * it hands the cheque back to the staff member to fix what the note describes, and the
-     * cheque can be reviewed again once they have. A cheque with a pending detail-update
-     * request is on hold, exactly as it is for teller receipt, so the details are settled
-     * before anyone signs off on them.
-     *
-     * @throws ValidationException
-     */
-    public function review(User $admin, Cheque $cheque, ChequeStatus $outcome, ?string $note = null): Cheque
-    {
-        if (! in_array($outcome, ChequeStatus::reviewOutcomes(), true)) {
-            throw ValidationException::withMessages([
-                'status' => 'That is not a valid review outcome.',
-            ]);
-        }
-
-        return DB::transaction(function () use ($admin, $cheque, $outcome, $note) {
-            $cheque = Cheque::query()->whereKey($cheque->getKey())->lockForUpdate()->firstOrFail();
-
-            if (! $cheque->status->isIssued()) {
-                throw ValidationException::withMessages([
-                    'cheque' => "Cheque #{$cheque->cheque_number} has not been used yet, so there is nothing to review.",
-                ]);
-            }
-
-            if ($cheque->status->isFinal()) {
-                throw ValidationException::withMessages([
-                    'cheque' => "Cheque #{$cheque->cheque_number} is already {$cheque->status->label()} and cannot be reviewed again.",
-                ]);
-            }
-
-            $onHold = $cheque->updateRequests()
-                ->where('status', RequestStatus::Pending)
-                ->exists();
-
-            if ($onHold) {
-                throw ValidationException::withMessages([
-                    'cheque' => "Cheque #{$cheque->cheque_number} is on hold — a detail update request is awaiting approval and must be resolved first.",
-                ]);
-            }
-
-            $cheque->update([
-                'status' => $outcome,
-                'reviewed_by' => $admin->id,
-                'reviewed_at' => Carbon::now(),
-                'review_note' => $note,
-            ]);
-
-            $this->logger->log(
-                $admin,
-                ChequeAction::ReviewedCheque,
-                $cheque->cheque_number,
-                ($outcome->awaitsCompliance()
-                    ? "Cheque number {$cheque->cheque_number} returned to the staff member by {$admin->name}."
-                    : "Cheque number {$cheque->cheque_number} reviewed as {$outcome->label()} by {$admin->name}.")
-                    .($note ? " Note: {$note}" : ''),
-            );
-
-            // Tell the staff member who issued it how their cheque was decided. "Returned"
-            // is an action item for them, not a verdict, so it lands as a request-kind notification.
-            $kind = match ($outcome) {
-                ChequeStatus::Approved => 'approved',
-                ChequeStatus::Disapproved => 'rejected',
-                default => 'request',
-            };
-
-            $message = $outcome->awaitsCompliance()
-                ? "{$admin->name} returned cheque #{$cheque->cheque_number} to you — it needs your"
-                    .' attention before it can be signed off.'
-                    .($note ? " What to fix: {$note}" : '')
-                : "{$admin->name} reviewed cheque #{$cheque->cheque_number} as {$outcome->label()}."
-                    .($note ? " Note: {$note}" : '');
-
-            $cheque->usedBy?->notify(new ActivityNotification(
-                kind: $kind,
-                title: $outcome->awaitsCompliance()
-                    ? "Cheque #{$cheque->cheque_number} returned to you"
-                    : "Cheque #{$cheque->cheque_number} {$outcome->label()}",
-                message: $message,
-                url: '/cheques',
-                chequeNumber: $cheque->cheque_number,
-            ));
-
-            return $cheque->fresh(['usedBy', 'receivedBy', 'reviewedBy']);
         });
     }
 

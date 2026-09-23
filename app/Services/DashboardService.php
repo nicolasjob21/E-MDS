@@ -88,18 +88,20 @@ class DashboardService
         $items = match (true) {
             $user->isAdmin() => [
                 $this->item('lddap_action', 'LDDAPs awaiting your action', 'Back from routing — Approve, RTS or Cancel', Lddap::query()->where('status', LddapStatus::ReturnedForAcic), '/lddaps?status=returned_for_acic', 'accent'),
-                $this->item('cheque_review', 'Cheques awaiting review', 'Used or received, not yet reviewed', Cheque::query()->whereIn('status', [ChequeStatus::Used, ChequeStatus::Received]), '/cheques?status=used', 'accent'),
+                $this->item('cheque_receive', 'Cheques back for receipt', 'Out for signature — mark them received when they return', Cheque::query()->where('status', ChequeStatus::OutForSignature), '/cheques?tab=out_for_signature', 'accent'),
+                $this->item('cheque_for_acic', 'Cheques awaiting an ACIC', 'Signed and back — put them on an ACIC', Cheque::query()->where('status', ChequeStatus::ForAcic)->whereNull('acic_id'), '/cheques?tab=for_acic', 'brand'),
                 $this->item('update_requests', 'Update requests pending', 'Corrections proposed by staff', null, '/admin/update-requests', 'brand', ChequeUpdateRequest::query()->where('status', RequestStatus::Pending)->count() + LddapUpdateRequest::query()->where('status', RequestStatus::Pending)->count()),
                 $this->item('acic_signoff', 'ACICs to sign off', 'Used, awaiting approval before they can be forwarded or printed', Acic::query()->where('status', AcicStatus::Used), '/acics?tab=all', 'brand'),
             ],
             $user->isTeller() => [
-                $this->item('cheques_to_receive', 'Cheques to receive', 'Used, not yet confirmed received', Cheque::query()->where('status', ChequeStatus::Used), '/cheques?status=used', 'accent'),
+                $this->item('acics_to_accept', 'ACICs waiting to be accepted', 'Forwarded for deposit — the first teller to accept takes it', Cheque::query()->where('status', ChequeStatus::ForwardedToTeller), '/cheques?tab=forwarded_to_teller', 'accent'),
+                $this->item('acics_to_deposit', 'ACICs you are holding', 'Accepted, not yet deposited', Cheque::query()->where('status', ChequeStatus::AcceptedByTeller)->whereHas('acic', fn ($a) => $a->where('accepted_by', $user->id)), '/cheques?tab=accepted_by_teller', 'accent'),
                 $this->item('lddaps_to_receive', 'LDDAPs to receive', 'Carrying a check number, not yet confirmed received', Lddap::query()->whereNotNull('lddap_check_id')->whereNull('received_at'), '/lddaps?status=approved', 'accent'),
                 $this->item('acics_forwarded', 'ACICs forwarded to you', 'Awaiting completion', Acic::query()->where('status', AcicStatus::Forwarded), '/acics?tab=forwarded', 'brand'),
             ],
             default => [
                 $this->item('my_rts', 'Returned to you (RTS)', 'Correct the details, then forward again', Lddap::query()->where('status', LddapStatus::Rts)->where('used_by', $user->id), '/lddaps?status=rts', 'warn'),
-                $this->item('cheques_returned', 'Cheques returned to you', 'Update the details for the admin to confirm', Cheque::query()->where('status', ChequeStatus::Complies)->where('used_by', $user->id), '/cheques?status=complies', 'warn'),
+                $this->item('cheques_rts', 'Cheques returned to sender', 'Sent back to be corrected, then routed again', Cheque::query()->where('status', ChequeStatus::Registered)->whereNotNull('rts_at')->where('used_by', $user->id), '/cheques?tab=registered', 'warn'),
                 $this->item('my_registered', 'Registered, not yet forwarded', 'Your LDDAPs still to go out for routing', Lddap::query()->where('status', LddapStatus::Registered)->where('used_by', $user->id), '/lddaps?status=registered', 'brand'),
                 $this->item('awaiting_acic', 'Approved LDDAPs awaiting an ACIC', 'Assign them to take their check numbers', Lddap::query()->where('status', LddapStatus::Approved)->whereNull('acic_id'), '/lddaps?status=approved', 'brand'),
             ],

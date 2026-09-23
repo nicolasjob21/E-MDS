@@ -46,6 +46,36 @@ class AcicResource extends JsonResource
                 $this->relationLoaded('cheques') && $this->relationLoaded('lddaps'),
                 fn () => $this->form(),
             ),
+
+            // What the ACIC carries, and where it stands with the tellers and the bank.
+            'type' => $this->type?->value,
+            'type_label' => $this->type?->label(),
+            'teller_status' => $this->teller_status?->value,
+            'teller_status_label' => $this->teller_status?->label(),
+            'forwarded_to_land_bank_at' => $this->forwarded_to_land_bank_at,
+            'transmittal_no' => $this->transmittal_no,
+            'land_bank_note' => $this->land_bank_note,
+            'returned_by_bank_at' => $this->returned_by_bank_at,
+            'bank_return_reason' => $this->bank_return_reason,
+            'credited_at' => $this->credited_at,
+            'bank_confirmation_no' => $this->bank_confirmation_no,
+            'confirmed_by' => $this->confirmedBy?->only(['id', 'name']),
+            'completion_note' => $this->completion_note,
+            'total_records' => ($this->cheque_count ?? 0) + ($this->lddap_count ?? 0),
+
+            // Branch B — the ACIC as a whole goes to the tellers.
+            'forwarded_to_teller_at' => $this->forwarded_to_teller_at,
+            'forwarded_to_teller_by' => $this->whenLoaded('forwardedToTellerBy', fn () => $this->forwardedToTellerBy?->only(['id', 'name'])),
+            'forward_note' => $this->forward_note,
+            // Null while it is still Pending for every teller.
+            'accepted_by' => $this->acceptedBy?->only(['id', 'name']),
+            'accepted_at' => $this->accepted_at,
+            'deposit_date' => $this->deposit_date?->toDateString(),
+            'deposit_bank' => $this->deposit_bank,
+            'deposit_reference' => $this->deposit_reference,
+            'deposit_note' => $this->deposit_note,
+            'returned_to_admin_at' => $this->returned_to_admin_at,
+            'return_reason' => $this->return_reason,
         ];
     }
 

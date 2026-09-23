@@ -9,6 +9,7 @@ use App\Models\Cheque;
 use App\Models\ChequeUpdateRequest;
 use App\Models\User;
 use App\Notifications\ActivityNotification;
+use App\Support\Validity;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
@@ -34,11 +35,6 @@ class UpdateRequestService
             ]);
         }
 
-        // A Returned cheque belongs to the staff member who used it: the admin handed *them* the
-        // remark, and they are the one notified. Anyone else correcting it would be answering a
-        // question they were never asked, and the audit trail would name the wrong person.
-        $this->assertOwnsReturned($staff, $cheque);
-
         $pendingExists = $cheque->updateRequests()
             ->where('status', RequestStatus::Pending)
             ->exists();
@@ -52,6 +48,11 @@ class UpdateRequestService
         $proposedDate = $proposed['cheque_date'] instanceof \DateTimeInterface
             ? Carbon::parse($proposed['cheque_date'])->toDateString()
             : (string) $proposed['cheque_date'];
+
+        // The cheque date drives the 90-day clock, so it is fixed the moment the cheque leaves
+        // the office. Everything else about a released or deposited cheque may still be
+        // corrected; its date may not.
+        $this->assertDateEditable($cheque, $proposedDate);
 
         // Reject a no-op: at least one detail must actually differ from the current cheque.
         $unchanged = (string) $cheque->payee_name === (string) $proposed['payee_name']
@@ -103,19 +104,27 @@ class UpdateRequestService
      *
      * @throws ValidationException
      */
-    private function assertOwnsReturned(User $staff, Cheque $cheque): void
+    /**
+     * The cheque date may only be changed while the cheque is still Registered — once it is
+     * released, with a teller, deposited, cancelled, spoiled, stale or replaced, its validity
+     * is settled and the date behind it cannot move.
+     *
+     * @throws ValidationException
+     */
+    private function assertDateEditable(Cheque $cheque, string $proposedDate): void
     {
-        if (! $cheque->status->awaitsCompliance() || $cheque->used_by === $staff->id) {
-            return;
+        if ((string) $cheque->cheque_date?->toDateString() === $proposedDate) {
+            return;   // not a change; nothing to refuse
         }
 
-        $owner = $cheque->usedBy?->name;
+        $status = $cheque->effectiveStatus();
 
-        throw ValidationException::withMessages([
-            'cheque' => "Cheque #{$cheque->cheque_number} was returned to "
-                .($owner !== null ? $owner : 'the staff member who used it')
-                .'. Only they can update it.',
-        ]);
+        if ($status !== ChequeStatus::Registered) {
+            throw ValidationException::withMessages([
+                'cheque_date' => "Cheque #{$cheque->cheque_number} is {$status->label()} — its cheque date can no longer be changed, because the ".
+                    Validity::DAYS.'-day validity runs from it.',
+            ]);
+        }
     }
 
     /**
@@ -138,21 +147,14 @@ class UpdateRequestService
 
             $now = Carbon::now();
 
-            // Approving a correction on a Returned cheque *is* the sign-off: the
-            // deficiency the note described has been fixed and accepted, so the cheque moves
-            // straight to Approved rather than waiting on a second review.
-            $resolvesCompliance = $cheque->status === ChequeStatus::Complies;
-
+            // A correction changes the details only. Where a cheque sits in the flow is the
+            // flow's business: putting it right does not move it along, and RTS is the way
+            // back for one that came in wrong.
             $cheque->update([
                 'payee_name' => $request->proposed_payee_name,
                 'amount' => $request->proposed_amount,
                 'cheque_date' => $request->proposed_cheque_date,
-            ] + ($resolvesCompliance ? [
-                'status' => ChequeStatus::Approved,
-                'reviewed_by' => $admin->id,
-                'reviewed_at' => $now,
-                'review_note' => $note,
-            ] : []));
+            ]);
 
             $request->update([
                 'status' => RequestStatus::Approved,
@@ -172,15 +174,14 @@ class UpdateRequestService
                 ChequeAction::ApprovedUpdate,
                 $cheque->cheque_number,
                 "Approved update to cheque number {$cheque->cheque_number}."
-                    .($changes !== '' ? " Changes: {$changes}." : ' No field changes.')
-                    .($resolvesCompliance ? ' Compliance resolved — the cheque is now Approved.' : ''),
+                    .($changes !== '' ? " Changes: {$changes}." : ' No field changes.'),
             );
 
             $request->requestedBy?->notify(new ActivityNotification(
                 kind: 'approved',
                 title: "Update approved · Cheque #{$cheque->cheque_number}",
                 message: "{$admin->name} approved your update to cheque #{$cheque->cheque_number}."
-                    .($resolvesCompliance ? ' It is now Approved.' : '')
+
                     .($note ? " Note: {$note}" : ''),
                 url: '/cheques',
                 chequeNumber: $cheque->cheque_number,

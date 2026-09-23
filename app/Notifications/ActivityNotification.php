@@ -3,6 +3,7 @@
 namespace App\Notifications;
 
 use Illuminate\Bus\Queueable;
+use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
 /**
@@ -15,7 +16,7 @@ class ActivityNotification extends Notification
     use Queueable;
 
     /**
-     * @param  'request'|'approved'|'rejected'|'used'  $kind
+     * @param  'request'|'approved'|'rejected'|'used'|'expiring'|'stale'  $kind
      */
     public function __construct(
         public readonly string $kind,
@@ -26,13 +27,33 @@ class ActivityNotification extends Notification
     ) {}
 
     /**
-     * Store in the database only — surfaced via the API, no email/broadcast.
+     * In-app by default — stored in `notifications` and surfaced in the header bell.
+     *
+     * Expiry and stale alerts may also go out by email, which is an opt-in setting
+     * (`cheques.alert_email`, off by default) and needs a configured mailer.
      *
      * @return array<int, string>
      */
     public function via(object $notifiable): array
     {
-        return ['database'];
+        $channels = ['database'];
+
+        if (in_array($this->kind, ['expiring', 'stale'], true)
+            && config('cheques.alert_email')
+            && filled($notifiable->email ?? null)) {
+            $channels[] = 'mail';
+        }
+
+        return $channels;
+    }
+
+    /** The optional email form of an expiry or stale alert. */
+    public function toMail(object $notifiable): MailMessage
+    {
+        return (new MailMessage)
+            ->subject($this->title)
+            ->line($this->message)
+            ->action('Open the cheque register', url('/cheques'));
     }
 
     /**

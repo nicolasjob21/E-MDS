@@ -3,23 +3,34 @@
 namespace App\Http\Controllers;
 
 use App\Enums\AcicStatus;
+use App\Enums\AcicTellerStatus;
+use App\Http\Requests\AcceptAcicRequest;
 use App\Http\Requests\AddAcicRangeRequest;
 use App\Http\Requests\AssignChequesToAcicRequest;
+use App\Http\Requests\CompleteAcicRequest;
 use App\Http\Requests\ForwardAcicRequest;
+use App\Http\Requests\ForwardAcicToTellerRequest;
+use App\Http\Requests\ForwardToLandBankRequest;
 use App\Http\Requests\ReassignAcicRequest;
+use App\Http\Requests\ReturnAcicToAdminRequest;
+use App\Http\Requests\ReturnedByBankRequest;
 use App\Http\Requests\StoreAcicRequest;
 use App\Http\Resources\AcicResource;
 use App\Http\Resources\ChequeResource;
 use App\Models\Acic;
 use App\Models\User;
 use App\Services\AcicService;
+use App\Services\AcicTellerService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 
 class AcicController extends Controller
 {
-    public function __construct(private readonly AcicService $acics) {}
+    public function __construct(
+        private readonly AcicService $acics,
+        private readonly AcicTellerService $teller,
+    ) {}
 
     /**
      * List ACIC records, newest number first, optionally filtered by status
@@ -56,7 +67,7 @@ class AcicController extends Controller
      */
     public function show(Acic $acic): JsonResponse
     {
-        $acic->load(['usedBy', 'receivedBy', 'completedBy', 'createdBy', 'cheques.usedBy', 'lddaps.usedBy', 'lddaps.lddapCheck']);
+        $acic->load(['usedBy', 'receivedBy', 'completedBy', 'createdBy', 'cheques.usedBy', 'cheques.acic', 'cheques.releasedBy', 'lddaps.usedBy', 'lddaps.lddapCheck']);
 
         return response()->json(['data' => new AcicResource($acic)]);
     }
@@ -179,5 +190,112 @@ class AcicController extends Controller
         );
 
         return response()->json(['data' => new AcicResource($acic)]);
+    }
+    // ----------------------------------------------------- the teller's half, ACIC-wide
+
+    /** Admin: send a whole ACIC — cheque or LDDAP — to the tellers. */
+    public function forwardToTeller(ForwardAcicToTellerRequest $request, Acic $acic): JsonResponse
+    {
+        return $this->asResource($this->teller->forwardToTeller($request->user(), $acic, $request->validated()));
+    }
+
+    /** Teller: claim a Pending ACIC. The first to get here takes it. */
+    public function acceptByTeller(AcceptAcicRequest $request, Acic $acic): JsonResponse
+    {
+        return $this->asResource($this->teller->accept($request->user(), $acic, $request->expectedStatus()));
+    }
+
+    /** Teller: lodge it with Land Bank — the first time, or again after a return. */
+    public function forwardToLandBank(ForwardToLandBankRequest $request, Acic $acic): JsonResponse
+    {
+        return $this->asResource($this->teller->forwardToLandBank(
+            $request->user(), $acic, $request->validated(), $request->expectedStatus(),
+        ));
+    }
+
+    /** Teller: the bank sent it back. */
+    public function returnedByBank(ReturnedByBankRequest $request, Acic $acic): JsonResponse
+    {
+        return $this->asResource($this->teller->returnedByBank(
+            $request->user(), $acic, $request->validated(), $request->expectedStatus(),
+        ));
+    }
+
+    /** Teller: the bank credited it. Final. */
+    public function markCredited(CompleteAcicRequest $request, Acic $acic): JsonResponse
+    {
+        return $this->asResource($this->teller->complete(
+            $request->user(), $acic, $request->validated(), $request->expectedStatus(),
+        ));
+    }
+
+    /** Teller: hand it back to the admin, with a reason. */
+    public function returnToAdmin(ReturnAcicToAdminRequest $request, Acic $acic): JsonResponse
+    {
+        return $this->asResource($this->teller->returnToAdmin(
+            $request->user(), $acic, $request->validated('reason'), $request->expectedStatus(),
+        ));
+    }
+
+    /** An ACIC's teller history, oldest first — every forward and every return it has had. */
+    public function history(Acic $acic): JsonResponse
+    {
+        $rows = $acic->history()->with('user:id,name')->orderBy('id')->get();
+
+        return response()->json([
+            'data' => $rows->map(fn ($h) => [
+                'id' => $h->id,
+                'from_status' => $h->from_status?->value,
+                'from_status_label' => $h->from_status?->label(),
+                'to_status' => $h->to_status?->value,
+                'to_status_label' => $h->to_status?->label(),
+                'action' => $h->action,
+                'user' => $h->user?->only(['id', 'name']),
+                'details' => $h->details,
+                'note' => $h->note,
+                'created_at' => $h->created_at?->toIso8601String(),
+            ])->values(),
+        ]);
+    }
+
+    /**
+     * The teller dashboard. Every ACIC that has been sent to a teller, in the five lists the
+     * page shows — and filterable by type, status and date forwarded.
+     */
+    public function tellerQueue(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        $base = fn () => Acic::query()
+            ->whereNotNull('forwarded_to_teller_at')
+            ->with(AcicTellerService::WITH)
+            ->withCount(['cheques', 'lddaps'])
+            ->when($request->filled('type'), fn ($q) => $q->where('type', $request->string('type')))
+            ->when($request->filled('from'), fn ($q) => $q->whereDate('forwarded_to_teller_at', '>=', $request->date('from')))
+            ->when($request->filled('to'), fn ($q) => $q->whereDate('forwarded_to_teller_at', '<=', $request->date('to')))
+            ->orderByDesc('forwarded_to_teller_at');
+
+        $mine = fn ($q) => $q->where('accepted_by', $user->id);
+
+        return response()->json([
+            'data' => [
+                // Pending is everyone's; the rest are the viewer's own (an admin sees all).
+                'pending' => AcicResource::collection($base()->where('teller_status', AcicTellerStatus::Pending)->get()),
+                'accepted' => AcicResource::collection($base()->where('teller_status', AcicTellerStatus::AcceptedByTeller)
+                    ->when(! $user->isAdmin(), $mine)->get()),
+                'forwarded' => AcicResource::collection($base()->where('teller_status', AcicTellerStatus::ForwardedToLandBank)
+                    ->when(! $user->isAdmin(), $mine)->get()),
+                'returned' => AcicResource::collection($base()->where('teller_status', AcicTellerStatus::ReturnedByBank)
+                    ->when(! $user->isAdmin(), $mine)->get()),
+                'completed' => AcicResource::collection($base()->where('teller_status', AcicTellerStatus::Completed)
+                    ->when(! $user->isAdmin(), $mine)->get()),
+                'bank_name' => AcicTellerService::BANK,
+            ],
+        ]);
+    }
+
+    private function asResource(Acic $acic): JsonResponse
+    {
+        return response()->json(['data' => new AcicResource($acic->load([...AcicTellerService::WITH, 'usedBy', 'createdBy']))]);
     }
 }

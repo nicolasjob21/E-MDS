@@ -68,6 +68,20 @@ const ACTION_LABELS: Record<string, string> = {
     approved_update: 'Approved update',
     rejected_update: 'Rejected update',
     added_cheque_range: 'Added range',
+    routed_for_signature: 'Routed for signature',
+    ready_for_acic: 'Ready for ACIC',
+    rts_cheque: 'Returned to sender',
+    voided_cheque: 'Voided cheque',
+    accepted_by_teller: 'Accepted by teller',
+    released_cheque: 'Released cheque',
+    forwarded_cheque_to_teller: 'Forwarded to teller',
+    deposited_cheque: 'Deposited cheque',
+    returned_cheque_from_teller: 'Returned by teller',
+    cancelled_cheque: 'Cancelled cheque',
+    spoiled_cheque: 'Spoiled cheque',
+    staled_cheque: 'Marked stale',
+    replaced_cheque: 'Replaced cheque',
+    corrected_release: 'Corrected release details',
     created_acic: 'Opened ACIC',
     used_acic: 'Assigned to ACIC',
     forwarded_acic: 'Forwarded ACIC',
@@ -80,4 +94,28 @@ const ACTION_LABELS: Record<string, string> = {
 
 export function actionLabel(action: string): string {
     return ACTION_LABELS[action] ?? action;
+}
+
+/** The cheque flow's statuses, as the UI names them. */
+const CHEQUE_STATUS_LABELS: Record<string, string> = {
+    available: 'Available',
+    registered: 'Registered',
+    out_for_signature: 'Out for Signature',
+    received: 'Received',
+    for_acic: 'For ACIC',
+    approved: 'Approved',
+    released_to_payee: 'Released to Payee',
+    forwarded_to_teller: 'Forwarded to Teller',
+    accepted_by_teller: 'Accepted by Teller',
+    forwarded_to_land_bank: 'Forwarded to Land Bank',
+    returned_by_bank: 'Returned by Bank',
+    completed: 'Completed',
+    cancelled: 'Cancelled',
+    voided: 'Voided',
+    stale: 'Stale',
+    replaced: 'Replaced',
+};
+
+export function chequeStatusLabel(status: string): string {
+    return CHEQUE_STATUS_LABELS[status] ?? status;
 }

@@ -28,7 +28,32 @@ export interface ChequePrintData {
     lddap_no: string | null;
 }
 
-export type ChequeStatus = 'available' | 'used' | 'received' | 'approved' | 'complies' | 'disapproved';
+/**
+ * Where a cheque is in its life — one ordered flow:
+ *
+ *   registered → out_for_signature → (received) → for_acic → approved
+ *     ├─ released_to_payee
+ *     └─ forwarded_to_teller → accepted_by_teller → deposited
+ *
+ * `available` sits outside it: a number registered as part of a book, not yet claimed.
+ */
+export type ChequeStatus =
+    | 'available'
+    | 'registered'
+    | 'out_for_signature'
+    | 'received'
+    | 'for_acic'
+    | 'approved'
+    | 'released_to_payee'
+    | 'forwarded_to_teller'
+    | 'accepted_by_teller'
+    | 'forwarded_to_land_bank'
+    | 'returned_by_bank'
+    | 'completed'
+    | 'cancelled'
+    | 'voided'
+    | 'stale'
+    | 'replaced';
 
 /** The three outcomes an admin review can produce. */
 export type ReviewOutcome = Extract<ChequeStatus, 'approved' | 'complies' | 'disapproved'>;
@@ -58,6 +83,96 @@ export interface Cheque {
     is_final?: boolean;
     awaits_compliance?: boolean;
     has_pending_update?: boolean;
+
+    status_label?: string;
+    /**
+     * What the cheque is **now** — the same as `status`, except that one past its validity
+     * reads as `stale` whether or not the nightly sweep has run. This is the one the UI obeys.
+     */
+    effective_status?: ChequeStatus;
+    effective_status_label?: string;
+    validity_until?: string | null;
+    days_left?: number | null;
+    /** "12 days left" · "Expires today" · "Stale — 5 days ago". */
+    countdown?: string | null;
+    is_stale?: boolean;
+    is_expiring_soon?: boolean;
+    expiring_tag?: string | null;
+    stale_at?: string | null;
+
+    // What this viewer may do next, decided server-side.
+    can_route?: boolean;
+    can_receive?: boolean;
+    can_assign?: boolean;
+    can_release?: boolean;
+    can_rts?: boolean;
+    can_cancel?: boolean;
+    can_void?: boolean;
+    can_replace?: boolean;
+
+    /** Step 2 — out for signature. */
+    routing?: {
+        forward_to_name: string | null;
+        forward_unit_name: string | null;
+        forwarded_by?: { id: number; name: string } | null;
+        date_forwarded: string | null;
+        note: string | null;
+    } | null;
+    /** Step 3 — signed and back. */
+    receipt?: {
+        received_by_name: string | null;
+        date_received: string | null;
+        from_unit_name: string | null;
+    } | null;
+    /** The reason behind an RTS, a cancel or a void. */
+    exception_reason?: string | null;
+
+    /** Branch A. */
+    release?: {
+        received_by_name: string | null;
+        date_received: string | null;
+        released_by?: { id: number; name: string; username: string } | null;
+        released_at: string | null;
+        note: string | null;
+    } | null;
+
+    /** Branch B, carried from the ACIC the cheque sits on. */
+    acic_teller?: {
+        forwarded_at: string | null;
+        accepted_by?: { id: number; name: string } | null;
+        accepted_at: string | null;
+        deposit_date: string | null;
+        deposit_bank: string | null;
+        deposit_reference: string | null;
+        return_reason: string | null;
+    } | null;
+
+    replaces?: { id: number; cheque_number: number } | null;
+    replaced_by?: { id: number; cheque_number: number } | null;
+}
+
+/** Where a signed cheque physically is — the second axis, alongside `ChequeStatus`. */
+/** The cheque page's tabs: the two derived views, or any status in the flow. */
+export type ChequeTab = 'all' | 'valid' | 'expiring' | ChequeStatus;
+
+/** What the validity banner and the deposit queue are drawn from. */
+export interface ChequeValiditySummary {
+    expiring_soon: {
+        total: number;
+        /** Pending signature. */
+        assigned: number;
+        /** Out with the payee. */
+        released: number;
+        /** Sitting with a teller. */
+        for_deposit: number;
+    };
+    stale: number;
+    /** Cheques awaiting *this* viewer's deposit (all of them, for an admin). */
+    for_deposit_mine: number;
+    tellers: { id: number; name: string }[];
+    bank_name: string;
+    validity_days: number;
+    alert_days: number;
 }
 
 export type RequestStatus = 'pending' | 'approved' | 'rejected';
@@ -88,6 +203,21 @@ export interface ChequeDetails {
 export type LddapStatus = 'registered' | 'for_out' | 'returned_for_acic' | 'rts' | 'approved' | 'canceled';
 
 /** One step of a record's routing trail. */
+/** One step in a cheque's life, as the status history records it. */
+export interface ChequeStatusStep {
+    id: number;
+    from_status: ChequeStatus | null;
+    from_status_label: string | null;
+    to_status: ChequeStatus;
+    to_status_label: string;
+    action: string;
+    user?: { id: number; name: string } | null;
+    acic_number?: number | null;
+    details?: Record<string, unknown> | null;
+    note: string | null;
+    created_at: string | null;
+}
+
 /** One edit of a record through "Edit LDDAP Record": who, when, and each field's before/after. */
 export interface LddapEdit {
     id: number;
@@ -323,6 +453,43 @@ export interface AcicSeries {
     used: number;
 }
 
+/**
+ * Where an ACIC stands with the tellers and the bank:
+ *
+ *   pending → accepted_by_teller → forwarded_to_land_bank → completed
+ *                                          └─▶ returned_by_bank → lodged again
+ */
+export type AcicTellerStatus =
+    | 'pending'
+    | 'accepted_by_teller'
+    | 'forwarded_to_land_bank'
+    | 'returned_by_bank'
+    | 'completed';
+
+/** The teller dashboard's five lists. */
+export interface TellerQueue {
+    pending: Acic[];
+    accepted: Acic[];
+    forwarded: Acic[];
+    returned: Acic[];
+    completed: Acic[];
+    bank_name: string;
+}
+
+/** One step of an ACIC's teller life. */
+export interface AcicHistoryStep {
+    id: number;
+    from_status: AcicTellerStatus | null;
+    from_status_label: string | null;
+    to_status: AcicTellerStatus | null;
+    to_status_label: string | null;
+    action: string;
+    user?: { id: number; name: string } | null;
+    details?: Record<string, unknown> | null;
+    note: string | null;
+    created_at: string | null;
+}
+
 export type AcicStatus = 'open' | 'used' | 'approved' | 'forwarded' | 'completed';
 
 /** The header block, totals and signatories printed on the ACIC form. */
@@ -371,17 +538,41 @@ export interface Acic {
     lddaps?: Lddap[];
     /** Everything the printed ACIC form needs beyond the record itself. Detail view only. */
     form?: AcicForm;
+
+    /** What the ACIC carries. Fixed by the first record on it. */
+    type?: 'cheque' | 'lddap' | null;
+    type_label?: string | null;
+    /** Where it stands with the tellers and the bank. Null until it is forwarded. */
+    teller_status?: AcicTellerStatus | null;
+    teller_status_label?: string | null;
+    forwarded_to_land_bank_at?: string | null;
+    transmittal_no?: string | null;
+    land_bank_note?: string | null;
+    returned_by_bank_at?: string | null;
+    bank_return_reason?: string | null;
+    credited_at?: string | null;
+    bank_confirmation_no?: string | null;
+    confirmed_by?: { id: number; name: string } | null;
+    completion_note?: string | null;
+    total_records?: number;
+
+    // Branch B — the ACIC as a whole goes to the tellers.
+    forwarded_to_teller_at?: string | null;
+    forwarded_to_teller_by?: { id: number; name: string } | null;
+    forward_note?: string | null;
+    /** Null while it is still Pending for every teller; the first to accept claims it. */
+    accepted_by?: { id: number; name: string } | null;
+    accepted_at?: string | null;
+    deposit_date?: string | null;
+    deposit_bank?: string | null;
+    deposit_reference?: string | null;
+    deposit_note?: string | null;
+    returned_to_admin_at?: string | null;
+    return_reason?: string | null;
 }
 
-export interface Counts {
-    total: number;
-    available: number;
-    used: number;
-    received: number;
-    approved: number;
-    complies: number;
-    disapproved: number;
-}
+/** How many cheques sit on each status, plus the total. Keyed by `ChequeStatus`. */
+export type Counts = Record<ChequeStatus, number> & { total: number };
 
 export interface Summary {
     counts: Counts;
@@ -430,7 +621,7 @@ export interface Dashboard {
     recent: Pick<ChequeLog, 'id' | 'username' | 'action' | 'cheque_number' | 'description' | 'created_at'>[];
 }
 
-export type NotificationKind = 'request' | 'approved' | 'rejected' | 'used';
+export type NotificationKind = 'request' | 'approved' | 'rejected' | 'used' | 'expiring' | 'stale';
 
 export interface AppNotification {
     id: string;

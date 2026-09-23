@@ -18,6 +18,22 @@ enum ChequeAction: string
     case ApprovedUpdate = 'approved_update';
     case RejectedUpdate = 'rejected_update';
     case AddedChequeRange = 'added_cheque_range';
+
+    // The disposition axis — where a signed cheque physically went, and its 90-day validity.
+    case RoutedForSignature = 'routed_for_signature';
+    case ReadyForAcic = 'ready_for_acic';
+    case RtsCheque = 'rts_cheque';
+    case VoidedCheque = 'voided_cheque';
+    case AcceptedByTeller = 'accepted_by_teller';
+    case ReleasedCheque = 'released_cheque';
+    case ForwardedChequeToTeller = 'forwarded_cheque_to_teller';
+    case DepositedCheque = 'deposited_cheque';
+    case ReturnedChequeFromTeller = 'returned_cheque_from_teller';
+    case CancelledCheque = 'cancelled_cheque';
+    case SpoiledCheque = 'spoiled_cheque';
+    case StaledCheque = 'staled_cheque';
+    case ReplacedCheque = 'replaced_cheque';
+    case CorrectedRelease = 'corrected_release';
     case AddedLddapCheckRange = 'added_lddap_check_range';
     case RegisteredLddap = 'registered_lddap';
     case ForwardedLddap = 'forwarded_lddap';

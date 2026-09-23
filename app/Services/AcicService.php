@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\AcicNumberStatus;
 use App\Enums\AcicStatus;
+use App\Enums\AcicType;
 use App\Enums\ChequeAction;
 use App\Enums\ChequeStatus;
 use App\Models\Acic;
@@ -24,7 +25,41 @@ class AcicService
     public function __construct(
         private readonly ActivityLogger $logger,
         private readonly LddapCheckAllocator $checks,
+        private readonly ChequeFlowService $flow,
     ) {}
+
+    /** The bank an ACIC is lodged with. Kept here for the callers that already read it. */
+    public const BANK = AcicTellerService::BANK;
+
+    /**
+     * Fix what the ACIC carries, the first time something goes on it. Called by the LDDAP
+     * service too, which links its own records.
+     * An ACIC never becomes a
+     * mixture: the teller handles one kind of paper at a time.
+     *
+     * @throws ValidationException
+     */
+    public function stampType(Acic $acic, AcicType $type): void
+    {
+        if ($acic->type === null) {
+            $acic->update(['type' => $type]);
+
+            return;
+        }
+
+        if ($acic->type !== $type) {
+            throw ValidationException::withMessages([
+                'acic' => "ACIC #{$acic->acic_number} is a {$acic->type->label()} ACIC and cannot also carry {$type->label()} records.",
+            ]);
+        }
+    }
+
+    private function text(mixed $value): ?string
+    {
+        $value = $value === null ? '' : trim((string) $value);
+
+        return $value === '' ? null : $value;
+    }
 
     /**
      * Register a block of ACIC numbers.
@@ -184,7 +219,7 @@ class AcicService
     public function linkableCheques(): Collection
     {
         return Cheque::query()
-            ->where('status', ChequeStatus::Approved)
+            ->where('status', ChequeStatus::ForAcic)
             ->whereNull('acic_id')
             ->orderBy('cheque_number')
             ->with('usedBy')
@@ -214,7 +249,9 @@ class AcicService
         return DB::transaction(function () use ($user, $acic, $chequeIds) {
             $acic = Acic::query()->whereKey($acic->getKey())->lockForUpdate()->firstOrFail();
 
-            if (! $acic->status->acceptsRecords()) {
+            // Cheques may keep joining an ACIC that assignment has already approved — many
+            // share one number. It is forwarding, not approval, that closes membership here.
+            if (! $acic->status->acceptsRecords() && $acic->status !== AcicStatus::Approved) {
                 throw ValidationException::withMessages([
                     'acic' => "ACIC #{$acic->acic_number} has already been forwarded and can no longer be changed.",
                 ]);
@@ -231,14 +268,18 @@ class AcicService
                 ]);
             }
 
-            // Every cheque must be approved — an ACIC only carries fully signed-off cheques.
-            $notApproved = $cheques->filter(fn (Cheque $c) => $c->status !== ChequeStatus::Approved);
+            // An ACIC only carries cheques that have come back signed and are waiting for one.
+            // A cheque already on *this* ACIC is a no-op, not an error — assigning the same
+            // selection twice must not fail.
+            $notEligible = $cheques->filter(
+                fn (Cheque $c) => ! $c->status->isAcicEligible() && $c->acic_id !== $acic->id,
+            );
 
-            if ($notApproved->isNotEmpty()) {
-                $numbers = $notApproved->pluck('cheque_number')->sort()->implode(', #');
+            if ($notEligible->isNotEmpty()) {
+                $numbers = $notEligible->pluck('cheque_number')->sort()->implode(', #');
 
                 throw ValidationException::withMessages([
-                    'cheque_ids' => "Only approved cheques can go on an ACIC. Not approved: #{$numbers}.",
+                    'cheque_ids' => "Only cheques that are For ACIC can be assigned. Not eligible: #{$numbers}.",
                 ]);
             }
 
@@ -255,10 +296,36 @@ class AcicService
                 ]);
             }
 
+            $this->stampType($acic, AcicType::Cheque);
             Cheque::query()->whereIn('id', $chequeIds)->update(['acic_id' => $acic->id]);
+
+            // Each cheque moves For ACIC → Approved in its own right, so the step lands in
+            // every cheque's status history rather than only on the ACIC.
+            foreach ($cheques as $cheque) {
+                if ($cheque->status === ChequeStatus::Approved) {
+                    continue;   // already on this ACIC
+                }
+
+                $this->flow->move($user, $cheque, ChequeStatus::Approved, 'assigned', null,
+                    fn () => ['acic_id' => $acic->id], null, $acic);
+            }
 
             $numbers = $cheques->pluck('cheque_number')->sort()->implode(', #');
             $this->markUsed($user, $acic, $cheques->count(), "cheque(s): #{$numbers}");
+
+            // Putting cheques on an ACIC signs it off in the same breath: there is no separate
+            // approval step for a cheque ACIC, so it is ready to forward or print at once.
+            // (Assigning LDDAPs leaves the ACIC Used, to be approved on its own as before.)
+            if ($acic->fresh()->status !== AcicStatus::Approved) {
+                $acic->update(['status' => AcicStatus::Approved]);
+
+                $this->logger->log(
+                    $user,
+                    ChequeAction::ApprovedAcic,
+                    null,
+                    "ACIC number {$acic->acic_number} approved on assignment of cheque(s): #{$numbers}.",
+                );
+            }
 
             return $acic->fresh(['usedBy', 'receivedBy', 'createdBy', 'cheques']);
         });
@@ -380,9 +447,13 @@ class AcicService
                 ]);
             }
 
-            if (! $assign->status->isApproved()) {
+            $eligible = $isCheque ? $assign->status->isAcicEligible() : $assign->status->isApproved();
+
+            if (! $eligible) {
+                $needs = $isCheque ? 'For ACIC' : 'approved';
+
                 throw ValidationException::withMessages([
-                    'assign_id' => "Only an approved {$label} can go on an ACIC.",
+                    'assign_id' => "Only a {$needs} {$label} can go on an ACIC.",
                 ]);
             }
 
@@ -402,6 +473,15 @@ class AcicService
             }
 
             $assign->update(['acic_id' => $acic->id]);
+
+            // A cheque coming off goes back into the pool of cheques waiting for an ACIC;
+            // the one taking its place moves on to Approved. Both are recorded steps.
+            if ($isCheque) {
+                $this->flow->move($user, $release, ChequeStatus::ForAcic, 'unassigned', null,
+                    fn () => ['acic_id' => null], 'Re-assigned off the ACIC.', $acic);
+                $this->flow->move($user, $assign, ChequeStatus::Approved, 'assigned', null,
+                    fn () => ['acic_id' => $acic->id], null, $acic);
+            }
 
             $from = $isCheque ? "#{$release->cheque_number}" : $release->lddap_no;
             $to = $isCheque ? "#{$assign->cheque_number}" : $assign->lddap_no;

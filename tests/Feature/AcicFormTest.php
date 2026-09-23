@@ -62,7 +62,7 @@ class AcicFormTest extends TestCase
             'amount' => 1250.50,
             'cheque_date' => '2026-08-30',
         ]);
-        Cheque::where('cheque_number', 1)->update(['status' => ChequeStatus::Approved]);
+        Cheque::where('cheque_number', 1)->update(['status' => ChequeStatus::ForAcic]);
 
         $acic = app(AcicService::class)->create($admin);
         app(AcicService::class)->assignCheques($admin, $acic, [Cheque::where('cheque_number', 1)->value('id')]);

@@ -1,32 +1,69 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Lock, BadgeCheck, CheckCircle2, Clock, Eye, Gavel, ListChecks, PencilLine, Search, X } from 'lucide-react';
+import {
+    Lock, BadgeCheck, CheckCircle2, Clock, Eye, ListChecks, Search, X,
+    AlertTriangle, ArrowDownWideNarrow, Send, Inbox, RefreshCw, Undo2, Ban, Slash,
+} from 'lucide-react';
 import { AcicApi, ChequeApi, toApiError } from '../lib/api';
-import type { Cheque, Paginated, Summary } from '../lib/types';
-import { PageHeader, Spinner, Alert, StatusBadge, EmptyState } from '../components/ui';
+import type { Cheque, ChequeTab, ChequeValiditySummary, Paginated, Summary } from '../lib/types';
+import { PageHeader, Spinner, Alert, StatusBadge, EmptyState, ValidityBadge } from '../components/ui';
 import NextChequePanel from '../components/NextChequePanel';
+import ChequeStepModal, { type ChequeStep } from '../components/ChequeStepModal';
 import ChequeDetailModal from '../components/ChequeDetailModal';
-import ChequeReviewModal, { type ReviewMode } from '../components/ChequeReviewModal';
 import AcicUseModal from '../components/AcicUseModal';
 import ChequeUseModal from '../components/ChequeUseModal';
 import ChequeViewModal from '../components/ChequeViewModal';
 import { useAuth } from '../auth/AuthContext';
 import { formatDate, formatMoney } from '../lib/format';
 
-type Tab = 'all' | 'available' | 'used' | 'received' | 'approved' | 'complies' | 'disapproved';
-
-const TABS: { key: Tab; label: string }[] = [
+/** The validity tabs, in the order the page shows them. */
+/** The tabs the page shows. */
+const VALIDITY_TABS: { key: ChequeTab; label: string }[] = [
     { key: 'all', label: 'All' },
     { key: 'available', label: 'Available' },
-    { key: 'used', label: 'Used' },
-    { key: 'received', label: 'Received' },
-    { key: 'approved', label: 'Approved' },
-    { key: 'complies', label: 'Returned' },
-    { key: 'disapproved', label: 'Disapproved' },
+    { key: 'registered', label: 'Registered' },
+    { key: 'released_to_payee', label: 'Released' },
+    { key: 'completed', label: 'Completed' },
+    { key: 'expiring', label: 'Expiring Soon' },
+    { key: 'stale', label: 'Stale' },
+    { key: 'cancelled', label: 'Cancelled' },
+    { key: 'voided', label: 'Voided' },
 ];
 
-function tabFrom(value: string | null): Tab {
-    return TABS.some((t) => t.key === value) ? (value as Tab) : 'all';
+/**
+ * Filters that work but have no button of their own — the mid-flow statuses. The dashboard
+ * links straight to them, so the page still has to honour them; it just shows the active one
+ * as a chip beside the tabs rather than carrying a button for each.
+ */
+const EXTRA_TABS: { key: ChequeTab; label: string }[] = [
+    { key: 'out_for_signature', label: 'Out for Signature' },
+    { key: 'for_acic', label: 'For ACIC' },
+    { key: 'approved', label: 'Approved' },
+    { key: 'forwarded_to_teller', label: 'Forwarded to Teller' },
+    { key: 'forwarded_to_land_bank', label: 'With Land Bank' },
+    { key: 'returned_by_bank', label: 'Returned by Bank' },
+    { key: 'accepted_by_teller', label: 'Accepted by Teller' },
+];
+
+
+function validityTabFrom(value: string | null): ChequeTab {
+    return [...VALIDITY_TABS, ...EXTRA_TABS].some((t) => t.key === value) ? (value as ChequeTab) : 'all';
+}
+
+/** The label for a filter that has no tab of its own, when one is active. */
+function extraTabLabel(tab: ChequeTab): string | null {
+    return EXTRA_TABS.find((t) => t.key === tab)?.label ?? null;
+}
+
+/** " (2 pending signature, 1 with payee, 1 with teller)" — only the parts that apply. */
+function expiringBreakdown(v: ChequeValiditySummary): string {
+    const parts = [
+        v.expiring_soon.assigned ? `${v.expiring_soon.assigned} pending signature` : null,
+        v.expiring_soon.released ? `${v.expiring_soon.released} with payee` : null,
+        v.expiring_soon.for_deposit ? `${v.expiring_soon.for_deposit} with teller` : null,
+    ].filter(Boolean);
+
+    return parts.length > 0 ? ` (${parts.join(', ')})` : '';
 }
 
 export default function ChequesPage() {
@@ -35,28 +72,31 @@ export default function ChequesPage() {
     const isStaff = user?.role === 'staff';
     // Admin and staff may both put an approved cheque on an ACIC, and both may use the
     // next-in-line number straight from its row. A teller does neither.
-    const canAssign = isAdmin || isStaff;
     const canUse = isAdmin || isStaff;
     // `?status=` picks the tab, so the dashboard's tiles land on the right list.
     const [params] = useSearchParams();
-    const [tab, setTab] = useState<Tab>(() => tabFrom(params.get('status')));
     const [page, setPage] = useState(1);
     const [search, setSearch] = useState('');
     // Debounced copy — the list only refetches once typing pauses.
     const [query, setQuery] = useState('');
     const [data, setData] = useState<Paginated<Cheque> | null>(null);
     const [selected, setSelected] = useState<{ cheque: Cheque; mode: 'view' | 'action' } | null>(null);
-    const [reviewing, setReviewing] = useState<{ cheque: Cheque; mode: ReviewMode } | null>(null);
     const [assigning, setAssigning] = useState<Cheque | null>(null);
     // Admin-only row action on a freshly added (still available) cheque.
     const [usingCheque, setUsingCheque] = useState<Cheque | null>(null);
     // The cheque face, for an approved cheque only.
     const [viewingCheque, setViewingCheque] = useState<Cheque | null>(null);
     const [summary, setSummary] = useState<Summary | null>(null);
+    // The validity axis: which tab, how it is sorted, and the banner's counts.
+    const [vTab, setVTab] = useState<ChequeTab>(() => validityTabFrom(params.get('tab')));
+    const [byExpiry, setByExpiry] = useState(false);
+    const [validity, setValidity] = useState<ChequeValiditySummary | null>(null);
+    const [moving, setMoving] = useState<{ cheque: Cheque; step: ChequeStep } | null>(null);
     // The number the ACIC opened by the Assign dialog will take.
     const [acicNext, setAcicNext] = useState<number | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [notice, setNotice] = useState('');
 
     const nextNumber = summary?.next?.cheque_number ?? null;
 
@@ -66,7 +106,7 @@ export default function ChequesPage() {
     }, [search]);
 
     useEffect(() => {
-        setTab(tabFrom(params.get('status')));
+        setVTab(validityTabFrom(params.get('tab')));
         setPage(1);
     }, [params]);
 
@@ -78,14 +118,14 @@ export default function ChequesPage() {
     const loadList = useCallback(async () => {
         setLoading(true);
         try {
-            setData(await ChequeApi.list(tab, page, 50, query));
+            setData(await ChequeApi.list('all', page, 50, query, vTab, byExpiry ? 'expiry' : 'number'));
             setError('');
         } catch (err) {
             setError(toApiError(err).message);
         } finally {
             setLoading(false);
         }
-    }, [tab, page, query]);
+    }, [page, query, vTab, byExpiry]);
 
     const loadSummary = useCallback(async () => {
         try {
@@ -98,6 +138,11 @@ export default function ChequesPage() {
         } catch {
             /* non-fatal — the Assign dialog just won't preview the number */
         }
+        try {
+            setValidity(await ChequeApi.validitySummary());
+        } catch {
+            /* non-fatal — the banner and the teller list just won't show */
+        }
     }, []);
 
     useEffect(() => {
@@ -107,6 +152,16 @@ export default function ChequesPage() {
     useEffect(() => {
         void loadSummary();
     }, [loadSummary]);
+
+    async function handleReplace(cheque: Cheque) {
+        try {
+            const replacement = await ChequeApi.replace(cheque.id);
+            setNotice(`Cheque #${cheque.cheque_number} replaced by #${replacement.cheque_number}.`);
+            refreshAll();
+        } catch (err) {
+            setError(toApiError(err).message);
+        }
+    }
 
     function refreshAll() {
         void loadList();
@@ -121,24 +176,83 @@ export default function ChequesPage() {
                 <NextChequePanel next={summary?.next ?? null} onUsed={refreshAll} compact />
             </div>
 
-            {/* Tabs */}
-            <div className="mb-4 flex flex-wrap gap-1 border-b border-line">
-                {TABS.map(({ key, label }) => (
+            {/* What is about to go stale, and how to get to it. */}
+            {validity && validity.expiring_soon.total > 0 && vTab !== 'expiring' && (
+                <button
+                    type="button"
+                    className="mb-4 flex w-full items-start gap-3 rounded-xs border border-amber-400/50 bg-amber-400/10 p-4 text-left transition-colors hover:bg-amber-400/15"
+                    onClick={() => {
+                        setVTab('expiring');
+                        setPage(1);
+                    }}
+                >
+                    <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
+                    <span className="min-w-0">
+                        <span className="block text-sm font-semibold text-fg">
+                            {validity.expiring_soon.total}{' '}
+                            {validity.expiring_soon.total === 1 ? 'cheque' : 'cheques'} will become stale within{' '}
+                            {validity.alert_days} days
+                            {expiringBreakdown(validity)}.
+                        </span>
+                        <span className="mt-0.5 block text-xs text-muted">Click to see just those cheques.</span>
+                    </span>
+                </button>
+            )}
+
+            {/* The flow's statuses — the page's one filter. */}
+            <div className="mb-4 flex flex-wrap items-center gap-2 border-b border-line pb-2">
+                <div className="flex flex-wrap gap-1">
+                    {VALIDITY_TABS.map(({ key, label }) => (
+                        <button
+                            key={key}
+                            onClick={() => {
+                                setVTab(key);
+                                setPage(1);
+                            }}
+                            className={`rounded-xs border px-3 py-1.5 font-display text-xs font-semibold uppercase tracking-wider transition-colors ${
+                                vTab === key
+                                    ? 'border-brand-400 bg-brand-500/15 text-brandink'
+                                    : 'border-line text-subtle hover:text-muted'
+                            }`}
+                        >
+                            {label}
+                            {key === 'expiring' && validity && validity.expiring_soon.total > 0 && (
+                                <span className="ml-1.5 text-amber-400">{validity.expiring_soon.total}</span>
+                            )}
+                            {key === 'stale' && validity && validity.stale > 0 && (
+                                <span className="ml-1.5 text-danger-fg">{validity.stale}</span>
+                            )}
+                        </button>
+                    ))}
+                </div>
+                {extraTabLabel(vTab) && (
                     <button
-                        key={key}
+                        type="button"
                         onClick={() => {
-                            setTab(key);
+                            setVTab('all');
                             setPage(1);
                         }}
-                        className={`-mb-px border-b-2 px-4 py-2.5 font-display text-xs font-semibold uppercase tracking-widest transition-colors ${
-                            tab === key
-                                ? 'border-accent-400 text-fg'
-                                : 'border-transparent text-subtle hover:text-muted'
-                        }`}
+                        className="inline-flex items-center gap-1.5 rounded-xs border border-brand-400 bg-brand-500/15 px-3 py-1.5 font-display text-xs font-semibold uppercase tracking-wider text-brandink"
+                        title="Clear this filter"
                     >
-                        {label}
+                        {extraTabLabel(vTab)}
+                        <X className="h-3 w-3" />
                     </button>
-                ))}
+                )}
+                <button
+                    type="button"
+                    onClick={() => {
+                        setByExpiry((v) => !v);
+                        setPage(1);
+                    }}
+                    aria-pressed={byExpiry}
+                    className={`ml-auto inline-flex items-center gap-1.5 rounded-xs border px-3 py-1.5 text-xs transition-colors ${
+                        byExpiry ? 'border-brand-400 bg-brand-500/15 text-brandink' : 'border-line text-subtle hover:text-muted'
+                    }`}
+                >
+                    <ArrowDownWideNarrow className="h-3.5 w-3.5" />
+                    Nearest expiry first
+                </button>
             </div>
 
             {/* Search */}
@@ -174,6 +288,12 @@ export default function ChequesPage() {
                 )}
             </div>
 
+            {notice && (
+                <div className="mb-4">
+                    <Alert kind="success">{notice}</Alert>
+                </div>
+            )}
+
             {error && (
                 <div className="mb-4">
                     <Alert kind="error">{error}</Alert>
@@ -192,13 +312,18 @@ export default function ChequesPage() {
                 data && (
                     <div className="card overflow-hidden">
                         <div className="overflow-x-auto">
-                            <table className="w-full text-left text-sm">
+                            {/* Ten columns, and an action cell that can hold three buttons: give
+                                the table room and let the container scroll, rather than crushing
+                                the Action column until its buttons are unusable. */}
+                            <table className="w-full min-w-[78rem] text-left text-sm">
                                 <thead>
                                     <tr className="border-b border-line text-xs uppercase tracking-wider text-subtle">
                                         <th className="px-4 py-3 font-semibold">Number</th>
                                         <th className="px-4 py-3 font-semibold">Status</th>
+                                        <th className="px-4 py-3 font-semibold">Validity</th>
                                         <th className="px-4 py-3 font-semibold">Payee</th>
                                         <th className="px-4 py-3 text-right font-semibold">Amount</th>
+                                        <th className="px-4 py-3 font-semibold">Received by</th>
                                         <th className="px-4 py-3 font-semibold">Used by</th>
                                         <th className="px-4 py-3 font-semibold">ACIC no.</th>
                                         <th className="px-4 py-3 font-semibold">Receipt</th>
@@ -232,17 +357,36 @@ export default function ChequesPage() {
                                                     )}
                                                 </td>
                                                 <td className="px-4 py-3">
-                                                    <StatusBadge
-                                                        status={cheque.status}
-                                                        complied={cheque.has_pending_update}
-                                                        viewer={user?.role}
-                                                    />
+                                                    <span className="inline-flex flex-col items-start gap-1">
+                                                        <StatusBadge status={cheque.effective_status ?? cheque.status} />
+                                                        {cheque.has_pending_update && (
+                                                            <span className="rounded-xs border border-accent-400/50 bg-accent-400/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-accent-400">
+                                                                On hold
+                                                            </span>
+                                                        )}
+                                                    </span>
+                                                </td>
+                                                <td className="px-4 py-3">
+                                                    <ValidityBadge cheque={cheque} />
                                                 </td>
                                                 <td className="px-4 py-3 text-muted">
                                                     {cheque.payee_name ?? '—'}
                                                 </td>
                                                 <td className="px-4 py-3 text-right font-mono text-muted">
                                                     {cheque.status !== 'available' ? formatMoney(cheque.amount) : '—'}
+                                                </td>
+                                                {/* Who the cheque was handed to — only a released one has been. */}
+                                                <td className="px-4 py-3 text-muted">
+                                                    {cheque.release?.received_by_name ? (
+                                                        <>
+                                                            {cheque.release.received_by_name}
+                                                            <span className="mt-0.5 block text-xs text-subtle">
+                                                                {formatDate(cheque.release.date_received)}
+                                                            </span>
+                                                        </>
+                                                    ) : (
+                                                        '—'
+                                                    )}
                                                 </td>
                                                 <td className="px-4 py-3 text-muted">
                                                     {cheque.used_by?.name ?? cheque.used_by_name ?? '—'}
@@ -256,7 +400,7 @@ export default function ChequesPage() {
                                                             <BadgeCheck className="h-3 w-3" />
                                                             {formatDate(cheque.received_at)}
                                                         </span>
-                                                    ) : cheque.status === 'used' ? (
+                                                    ) : cheque.status === 'registered' ? (
                                                         cheque.has_pending_update ? (
                                                             <span className="inline-flex items-center gap-1 rounded-xs border border-accent-400/50 bg-accent-400/10 px-2 py-0.5 text-xs font-medium text-accent-400">
                                                                 <Clock className="h-3 w-3" />
@@ -269,119 +413,89 @@ export default function ChequesPage() {
                                                         <span className="text-muted">—</span>
                                                     )}
                                                 </td>
-                                                <td className="px-4 py-3 text-right">
-                                                    {cheque.status === 'available' ? (
-                                                        isNext ? (
-                                                            /* A newly added cheque is actionable the
-                                                               moment it is the lowest available number.
-                                                               Admin and staff use it straight from the
-                                                               row; a teller is pointed at the panel. */
-                                                            canUse ? (
-                                                                <button
-                                                                    className="btn btn-primary !px-3 !py-1.5"
-                                                                    onClick={() => setUsingCheque(cheque)}
-                                                                >
+                                                <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                    <div className="flex flex-wrap items-center justify-end gap-2">
+                                                        {/* The one step this cheque is ready for, then the ways out. */}
+                                                        {cheque.can_route && (
+                                                            <button className="btn btn-primary !px-3 !py-1.5" onClick={() => setMoving({ cheque, step: 'route' })}>
+                                                                <Send className="h-3.5 w-3.5" />
+                                                                Route for Signature
+                                                            </button>
+                                                        )}
+                                                        {cheque.can_receive && (
+                                                            <button className="btn btn-primary !px-3 !py-1.5" onClick={() => setMoving({ cheque, step: 'receive' })}>
+                                                                <Inbox className="h-3.5 w-3.5" />
+                                                                Mark as Received
+                                                            </button>
+                                                        )}
+                                                        {cheque.can_assign && (
+                                                            <button className="btn btn-outline !px-3 !py-1.5" onClick={() => setAssigning(cheque)}>
+                                                                <ListChecks className="h-3.5 w-3.5" />
+                                                                Assign to ACIC
+                                                            </button>
+                                                        )}
+                                                        {/* Releasing is taken from the ACIC's own
+                                                            view, against the cheques beside it. */}
+                                                        {cheque.can_release && cheque.acic_number && (
+                                                            <span className="text-xs text-subtle">
+                                                                Release from ACIC #{cheque.acic_number}
+                                                            </span>
+                                                        )}
+                                                        {cheque.can_rts && (
+                                                            <button className="btn btn-ghost !px-3 !py-1.5" onClick={() => setMoving({ cheque, step: 'rts' })}>
+                                                                <Undo2 className="h-3.5 w-3.5" />
+                                                                RTS
+                                                            </button>
+                                                        )}
+                                                        {cheque.can_cancel && (
+                                                            <button className="btn btn-ghost !px-3 !py-1.5 !text-danger" onClick={() => setMoving({ cheque, step: 'cancel' })}>
+                                                                <Ban className="h-3.5 w-3.5" />
+                                                                Cancel
+                                                            </button>
+                                                        )}
+                                                        {cheque.can_void && (
+                                                            <button className="btn btn-ghost !px-3 !py-1.5 !text-danger" onClick={() => setMoving({ cheque, step: 'void' })}>
+                                                                <Slash className="h-3.5 w-3.5" />
+                                                                Void
+                                                            </button>
+                                                        )}
+                                                        {cheque.can_replace && (
+                                                            <button className="btn btn-outline !px-3 !py-1.5" onClick={() => void handleReplace(cheque)}>
+                                                                <RefreshCw className="h-3.5 w-3.5" />
+                                                                Replace
+                                                            </button>
+                                                        )}
+                                                        {cheque.effective_status === 'available' && (
+                                                            isNext && canUse ? (
+                                                                <button className="btn btn-primary !px-3 !py-1.5" onClick={() => setUsingCheque(cheque)}>
                                                                     <CheckCircle2 className="h-3.5 w-3.5" />
-                                                                    Use
+                                                                    Register
                                                                 </button>
                                                             ) : (
-                                                                <span className="text-xs text-brandink">
-                                                                    Use from the panel above ↑
+                                                                <span className="inline-flex items-center gap-1 text-xs text-subtle">
+                                                                    <Lock className="h-3 w-3" />
+                                                                    {isNext ? 'Register from the panel above' : 'Locked'}
                                                                 </span>
                                                             )
-                                                        ) : (
-                                                            <span className="inline-flex items-center gap-1 text-xs text-subtle">
-                                                                <Lock className="h-3 w-3" />
-                                                                Locked
-                                                            </span>
-                                                        )
-                                                    ) : cheque.status === 'approved' ? (
-                                                        /* Approved — it can be viewed and printed, and
-                                                           the next step is going on an ACIC. The View
-                                                           button exists for this status alone. */
-                                                        <div className="flex items-center justify-end gap-2">
-                                                            <button
-                                                                className="btn btn-ghost !px-3 !py-1.5"
-                                                                onClick={() => setViewingCheque(cheque)}
-                                                            >
-                                                                <Eye className="h-3.5 w-3.5" />
-                                                                View
-                                                            </button>
-                                                            {cheque.acic_number ? null : canAssign ? (
-                                                                <button
-                                                                    className="btn btn-outline !px-3 !py-1.5"
-                                                                    onClick={() => setAssigning(cheque)}
-                                                                >
-                                                                    <ListChecks className="h-3.5 w-3.5" />
-                                                                    Assign
-                                                                </button>
-                                                            ) : (
-                                                                <span className="text-xs text-subtle">
-                                                                    Awaiting assignment
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                    ) : cheque.is_final ? (
-                                                        <span className="text-xs text-subtle">
-                                                            Reviewed {formatDate(cheque.reviewed_at)}
-                                                        </span>
-                                                    ) : cheque.awaits_compliance ? (
-                                                        /* Returned — the staff member's turn to fix the
-                                                           details; the admin waits for that update. */
-                                                        cheque.has_pending_update ? (
+                                                        )}
+                                                        {/* Nothing to do: say where it is instead. */}
+                                                        {cheque.effective_status === 'forwarded_to_teller' && (
+                                                            <span className="text-xs text-subtle">With the tellers — unclaimed</span>
+                                                        )}
+                                                        {cheque.effective_status === 'accepted_by_teller' && (
                                                             <span className="text-xs text-subtle">
-                                                                Update awaiting admin approval
+                                                                With {cheque.acic_teller?.accepted_by?.name ?? 'a teller'}
                                                             </span>
-                                                        ) : isStaff && cheque.used_by?.id === user?.id ? (
-                                                            /* Returned to this staff member — only
-                                                               they can act on it. */
-                                                            <button
-                                                                className="btn btn-primary !px-3 !py-1.5"
-                                                                onClick={() =>
-                                                                    setSelected({ cheque, mode: 'action' })
-                                                                }
-                                                            >
-                                                                <PencilLine className="h-3.5 w-3.5" />
-                                                                Action
-                                                            </button>
-                                                        ) : isAdmin ? (
-                                                            <button
-                                                                className="btn btn-outline !px-3 !py-1.5"
-                                                                onClick={() =>
-                                                                    setReviewing({ cheque, mode: 'review' })
-                                                                }
-                                                            >
-                                                                <Gavel className="h-3.5 w-3.5" />
-                                                                Review
-                                                            </button>
-                                                        ) : (
-                                                            <span className="text-xs text-subtle">
-                                                                Returned to{' '}
-                                                                {cheque.used_by?.name ??
-                                                                    cheque.used_by_name ??
-                                                                    'the staff member who used it'}
-                                                            </span>
-                                                        )
-                                                    ) : isAdmin ? (
-                                                        /* Used (or received) — awaiting the admin's review. */
-                                                        cheque.has_pending_update ? (
-                                                            <span className="text-xs text-subtle">
-                                                                On hold — resolve the update request first
-                                                            </span>
-                                                        ) : (
-                                                            <button
-                                                                className="btn btn-outline !px-3 !py-1.5"
-                                                                onClick={() =>
-                                                                    setReviewing({ cheque, mode: 'review' })
-                                                                }
-                                                            >
-                                                                <Gavel className="h-3.5 w-3.5" />
-                                                                Review
-                                                            </button>
-                                                        )
-                                                    ) : (
-                                                        <span className="text-xs text-subtle">Awaiting review</span>
-                                                    )}
+                                                        )}
+                                                        <button
+                                                            className="btn btn-ghost !px-3 !py-1.5"
+                                                            onClick={() => setSelected({ cheque, mode: 'view' })}
+                                                            title="View the cheque and its history"
+                                                        >
+                                                            <Eye className="h-3.5 w-3.5" />
+                                                            View
+                                                        </button>
+                                                    </div>
                                                 </td>
                                             </tr>
                                         );
@@ -418,6 +532,19 @@ export default function ChequesPage() {
                 )
             )}
 
+            {moving && (
+                <ChequeStepModal
+                    cheque={moving.cheque}
+                    step={moving.step}
+                    onClose={() => setMoving(null)}
+                    onDone={(cheque, what) => {
+                        setMoving(null);
+                        setNotice(`Cheque #${cheque.cheque_number} ${what}.`);
+                        refreshAll();
+                    }}
+                />
+            )}
+
             {viewingCheque && (
                 <ChequeViewModal cheque={viewingCheque} onClose={() => setViewingCheque(null)} />
             )}
@@ -448,17 +575,6 @@ export default function ChequesPage() {
                 />
             )}
 
-            {reviewing && (
-                <ChequeReviewModal
-                    cheque={reviewing.cheque}
-                    mode={reviewing.mode}
-                    onClose={() => setReviewing(null)}
-                    onReviewed={() => {
-                        setReviewing(null);
-                        refreshAll();
-                    }}
-                />
-            )}
 
             {selected && (
                 <ChequeDetailModal
