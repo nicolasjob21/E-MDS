@@ -255,6 +255,7 @@ export default function AcicsPage() {
                                         <th className="px-4 py-3 font-semibold">Used By</th>
                                         <th className="px-4 py-3 font-semibold">Created Date</th>
                                         <th className="px-4 py-3 font-semibold">Forward Date</th>
+                                        <th className="px-4 py-3 font-semibold">Forwarded to Bank</th>
                                         <th className="px-4 py-3 font-semibold">Received By</th>
                                         <th className="px-4 py-3 text-right font-semibold">Action</th>
                                     </tr>
@@ -283,6 +284,27 @@ export default function AcicsPage() {
                                             </td>
                                             <td className="px-4 py-3 whitespace-nowrap text-muted">
                                                 {acic.forwarded_at ? formatDateTime(acic.forwarded_at) : '—'}
+                                            </td>
+                                            {/* When the teller handed the ACIC over the counter at
+                                                Land Bank, with the credit beneath once it lands. */}
+                                            <td className="px-4 py-3 whitespace-nowrap text-muted">
+                                                {acic.forwarded_to_land_bank_at ? (
+                                                    <>
+                                                        {formatDateTime(acic.forwarded_to_land_bank_at)}
+                                                        {acic.transmittal_no && (
+                                                            <span className="mt-0.5 block font-mono text-xs text-subtle">
+                                                                {acic.transmittal_no}
+                                                            </span>
+                                                        )}
+                                                        {acic.credited_at && (
+                                                            <span className="mt-0.5 block text-xs text-blue-300">
+                                                                Credited {formatDateTime(acic.credited_at)}
+                                                            </span>
+                                                        )}
+                                                    </>
+                                                ) : (
+                                                    <span className="text-subtle">—</span>
+                                                )}
                                             </td>
                                             <td className="px-4 py-3 text-muted">
                                                 {acic.received_by?.name ?? '—'}
