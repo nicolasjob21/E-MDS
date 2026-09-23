@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
     Lock, BadgeCheck, CheckCircle2, Clock, Eye, ListChecks, Search, X,
-    AlertTriangle, ArrowDownWideNarrow, Send, Inbox, RefreshCw, Undo2, Ban, Slash,
+    AlertTriangle, ArrowDownWideNarrow, Send, Inbox, RefreshCw, Undo2, Ban, Slash, Printer,
 } from 'lucide-react';
 import { AcicApi, ChequeApi, toApiError } from '../lib/api';
 import type { Cheque, ChequeTab, ChequeValiditySummary, Paginated, Summary } from '../lib/types';
@@ -486,6 +486,18 @@ export default function ChequesPage() {
                                                             <span className="text-xs text-subtle">
                                                                 With {cheque.acic_teller?.accepted_by?.name ?? 'a teller'}
                                                             </span>
+                                                        )}
+                                                        {/* The cheque face, at its real size, for
+                                                            printing onto pre-printed stock. */}
+                                                        {cheque.can_print && (
+                                                            <button
+                                                                className="btn btn-ghost !px-3 !py-1.5"
+                                                                onClick={() => setViewingCheque(cheque)}
+                                                                title={`Print cheque #${cheque.cheque_number}`}
+                                                            >
+                                                                <Printer className="h-3.5 w-3.5" />
+                                                                Print
+                                                            </button>
                                                         )}
                                                         <button
                                                             className="btn btn-ghost !px-3 !py-1.5"

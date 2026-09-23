@@ -82,6 +82,9 @@ class ChequeResource extends JsonResource
             'can_rts' => $this->admin($request) && $this->effectiveStatus()->canRts(),
             'can_cancel' => $this->admin($request) && $this->effectiveStatus()->canCancel(),
             'can_void' => $this->admin($request) && $this->effectiveStatus()->canVoid(),
+            // The cheque face can be printed once the cheque is on an ACIC — that is when it
+            // carries everything the printed form needs.
+            'can_print' => $this->status->isOnAcic(),
             'can_replace' => $this->admin($request) && $this->effectiveStatus() === ChequeStatus::Stale && $this->replaced_by_id === null,
 
             // Step 2 — out for signature.

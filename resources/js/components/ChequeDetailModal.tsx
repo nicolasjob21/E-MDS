@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { X, CheckCircle2, Landmark, PencilLine, Clock, History, Check, Ban, Route } from 'lucide-react';
+import { X, CheckCircle2, Landmark, PencilLine, Clock, History, Check, Ban, Route, Printer } from 'lucide-react';
 import { ChequeApi, UpdateRequestApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
 import type { Cheque, ChequeStatusStep, RequestStatus, UpdateRequest } from '../lib/types';
 import { formatDate, formatDateTime, formatMoney } from '../lib/format';
 import { Alert, StatusBadge } from './ui';
+import ChequeViewModal from './ChequeViewModal';
 
 const REQUEST_STATUS: Record<RequestStatus, { label: string; styles: string; icon: typeof Clock }> = {
     pending: { label: 'Pending', styles: 'border-accent-400/50 bg-accent-400/10 text-accent-400', icon: Clock },
@@ -58,6 +59,8 @@ export default function ChequeDetailModal({ cheque, mode = 'view', onClose, onCh
     // The cheque's own status history, straight from the server: every step it took, who
     // took it and when. Nothing here is inferred.
     const [timeline, setTimeline] = useState<ChequeStatusStep[]>([]);
+    // The cheque face, for a cheque that is on an ACIC.
+    const [printing, setPrinting] = useState(false);
 
     // Load the cheque's request history on open; this also re-derives the true hold state
     // (so a teller never sees the confirm button on a cheque that is actually on hold).
@@ -144,6 +147,16 @@ export default function ChequeDetailModal({ cheque, mode = 'view', onClose, onCh
                     </div>
                     <div className="flex items-center gap-2">
                         <StatusBadge status={current.effective_status ?? current.status} />
+                        {current.can_print && (
+                            <button
+                                className="btn btn-ghost !px-2.5 !py-1"
+                                onClick={() => setPrinting(true)}
+                                title={`Print cheque #${current.cheque_number}`}
+                            >
+                                <Printer className="h-3.5 w-3.5" />
+                                Print
+                            </button>
+                        )}
                         {onHold && (
                             <span className="inline-flex items-center gap-1 rounded-xs border border-accent-400/50 bg-accent-400/10 px-2 py-0.5 text-xs font-medium text-accent-400">
                                 <Clock className="h-3 w-3" />
@@ -450,6 +463,13 @@ export default function ChequeDetailModal({ cheque, mode = 'view', onClose, onCh
                     </div>
                 )}
             </div>
+
+            {/* The cheque face, at its real size. Its own overlay sits above this one. */}
+            {printing && (
+                <div onClick={(e) => e.stopPropagation()}>
+                    <ChequeViewModal cheque={current} onClose={() => setPrinting(false)} />
+                </div>
+            )}
         </div>
     );
 }

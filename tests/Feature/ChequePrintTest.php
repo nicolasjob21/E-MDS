@@ -127,4 +127,33 @@ class ChequePrintTest extends TestCase
         Sanctum::actingAs(User::factory()->create());
         $this->getJson("/api/v1/cheques/{$cheque->id}/print")->assertOk();
     }
+
+    /** The row and the endpoint agree: the Print button appears exactly where print works. */
+    public function test_can_print_matches_where_the_endpoint_allows_it(): void
+    {
+        $cheque = $this->cheque();
+        Sanctum::actingAs($this->admin());
+
+        // An enum cannot be an array key, so the pairs are listed instead.
+        foreach ([
+            [ChequeStatus::Registered, false],
+            [ChequeStatus::OutForSignature, false],
+            [ChequeStatus::ForAcic, false],
+            [ChequeStatus::Approved, true],
+            [ChequeStatus::ForwardedToTeller, true],
+            [ChequeStatus::AcceptedByTeller, true],
+            [ChequeStatus::ForwardedToLandBank, true],
+            [ChequeStatus::Completed, true],
+            [ChequeStatus::ReleasedToPayee, true],
+            [ChequeStatus::Cancelled, false],
+        ] as [$status, $printable]) {
+            $cheque->forceFill(['status' => $status])->save();
+
+            $row = $this->getJson("/api/v1/cheques?search={$cheque->cheque_number}")->assertOk()->json('data.0');
+            $this->assertSame($printable, $row['can_print'], $status->value);
+
+            $this->getJson("/api/v1/cheques/{$cheque->id}/print")
+                ->assertStatus($printable ? 200 : 422);
+        }
+    }
 }

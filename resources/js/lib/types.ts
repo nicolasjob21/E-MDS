@@ -108,6 +108,8 @@ export interface Cheque {
     can_rts?: boolean;
     can_cancel?: boolean;
     can_void?: boolean;
+    /** The cheque face can be printed — it is on an ACIC. */
+    can_print?: boolean;
     can_replace?: boolean;
 
     /** Step 2 — out for signature. */
