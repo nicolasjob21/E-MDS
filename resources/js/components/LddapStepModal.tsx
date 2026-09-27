@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { X, Send, Inbox, ShieldCheck, Undo2, Ban, ChevronDown } from 'lucide-react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { X, Undo2, Ban, RotateCcw } from 'lucide-react';
 import { LddapApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
-import type { Lddap, LddapOptions } from '../lib/types';
+import type { Lddap } from '../lib/types';
 import { formatMoney } from '../lib/format';
-import { Alert, Spinner, LddapStatusBadge } from './ui';
-import LddapRecordDetails from './LddapRecordDetails';
+import { Alert, LddapStatusBadge } from './ui';
+import UnitSelect from './UnitSelect';
 
-/** Which step of the routing the dialog is taking. `rts` and `cancel` are reached from `action`. */
-export type LddapStep = 'forward' | 'receive' | 'action' | 'rts' | 'cancel';
+/** Which step the dialog is taking: RTS or Cancel on a For Signature record, Resubmit on an RTS one. */
+export type LddapStep = 'rts' | 'cancel' | 'resubmit';
 
 interface Props {
     lddap: Lddap;
@@ -34,50 +34,30 @@ function Field({ label, htmlFor, optional = false, children }: { label: string; 
 }
 
 /**
- * One dialog for the three routing steps, each with its own fields:
+ * One dialog for the steps an LDDAP takes before an ACIC, each with its own fields:
  *
- *  - **Forward** (Registered → For Out): Forward To, Unit, Date Forwarded, Note. Forwarded By
- *    is the signed-in user, shown read-only.
- *  - **Receive** (For Out → Returned for ACIC): From Unit, Date Received, Note. Received By is
- *    the signed-in user.
- *  - **Action** (on Returned for ACIC): Approve, RTS or Cancel, with a note — required for
- *    Cancel, which closes the record for good.
+ *  - **RTS** (For Signature → RTS, admin): Date Received, Received By, RTS Unit, RTS Date and a
+ *    required Comment.
+ *  - **Cancel** (For Signature → Canceled, admin): Date Canceled and a required Reason.
+ *  - **Resubmit** (RTS → For Signature, once corrected): a required Comment on what was
+ *    corrected, and optional Notes.
  *
  * Only the step the record's status allows is ever opened, so the dialog never offers a move
  * the server would refuse.
  */
-export default function LddapStepModal({ lddap, step: initialStep, onClose, onDone }: Props) {
+export default function LddapStepModal({ lddap, step, onClose, onDone }: Props) {
     const { user } = useAuth();
-    // The Action dialog hands over to the RTS form when RTS is chosen.
-    const [step, setStep] = useState<LddapStep>(initialStep);
-    const [options, setOptions] = useState<LddapOptions | null>(null);
-    const [forwardTo, setForwardTo] = useState('');
-    const [unitId, setUnitId] = useState('');
+    const [unit, setUnit] = useState('');
     const [date, setDate] = useState(today());
     const [note, setNote] = useState('');
+    // Resubmit only: optional notes beside the comment.
+    const [notes, setNotes] = useState('');
     // RTS only: who received the record and when, before it is sent back.
-    const [receivedBy, setReceivedBy] = useState(lddap.returned_by?.name ?? user?.name ?? '');
-    const [receivedOn, setReceivedOn] = useState(lddap.date_returned ?? today());
+    const [receivedBy, setReceivedBy] = useState(user?.name ?? '');
+    const [receivedOn, setReceivedOn] = useState(today());
     const [busy, setBusy] = useState<string | null>(null);
     const [error, setError] = useState('');
-    // Action only: the essentials by default, the whole registered record on request.
-    const [showAll, setShowAll] = useState(false);
 
-    // Forward, Receive and RTS all pick a unit; the Action and Cancel dialogs do not.
-    const needsUnits = step !== 'action' && step !== 'cancel';
-
-    const load = useCallback(async () => {
-        if (!needsUnits) return;
-        try {
-            setOptions(await LddapApi.options());
-        } catch (err) {
-            setError(toApiError(err).message);
-        }
-    }, [needsUnits]);
-
-    useEffect(() => {
-        void load();
-    }, [load]);
 
     useEffect(() => {
         function onKey(e: KeyboardEvent) {
@@ -99,27 +79,13 @@ export default function LddapStepModal({ lddap, step: initialStep, onClose, onDo
         }
     }
 
-    function handleForward(e: FormEvent) {
+    function handleResubmit(e: FormEvent) {
         e.preventDefault();
-        void run('Forwarded', () =>
-            LddapApi.forward(lddap.id, {
-                forward_to: forwardTo.trim(),
-                unit_id: Number(unitId),
-                date_forwarded: date,
-                note,
-            }),
-        );
-    }
-
-    function handleReceive(e: FormEvent) {
-        e.preventDefault();
-        void run('Received', () =>
-            LddapApi.receiveBack(lddap.id, { unit_id: Number(unitId), date_received: date, note }),
-        );
-    }
-
-    function handleApprove() {
-        void run('Approved', () => LddapApi.approve(lddap.id, note));
+        if (note.trim().length < 3) {
+            setError('Say what was corrected.');
+            return;
+        }
+        void run('Resubmitted — now For Signature', () => LddapApi.resubmit(lddap.id, note.trim(), notes.trim()));
     }
 
     function handleCancel(e: FormEvent) {
@@ -141,20 +107,18 @@ export default function LddapStepModal({ lddap, step: initialStep, onClose, onDo
             LddapApi.rts(lddap.id, {
                 received_on: receivedOn,
                 received_by: receivedBy.trim(),
-                unit_id: Number(unitId),
+                unit_name: unit,
                 rts_date: date,
                 note,
             }),
         );
     }
 
-    const title = { forward: 'Forward', receive: 'Receive', action: 'Action', rts: 'RTS', cancel: 'Cancel' }[step];
+    const title = { rts: 'RTS', cancel: 'Cancel', resubmit: 'Resubmit' }[step];
     const eyebrow = {
-        forward: lddap.status === 'rts' ? 'RTS → For Out' : 'Registered → For Out',
-        receive: 'For Out → Returned for ACIC',
-        action: 'Returned for ACIC',
-        rts: 'Returned for ACIC → RTS',
-        cancel: 'Returned for ACIC → Canceled',
+        rts: 'For Signature → RTS',
+        cancel: 'For Signature → Canceled',
+        resubmit: 'RTS → For Signature',
     }[step];
 
     return (
@@ -165,13 +129,7 @@ export default function LddapStepModal({ lddap, step: initialStep, onClose, onDo
             aria-modal="true"
             aria-labelledby="lddap-step-title"
         >
-            {/* The Action dialog carries the whole record, so it is wider and scrolls. */}
-            <div
-                className={`card flex max-h-[92vh] w-full flex-col p-6 ${
-                    step === 'action' ? 'max-w-2xl' : 'max-w-md overflow-y-auto'
-                }`}
-                onClick={(e) => e.stopPropagation()}
-            >
+            <div className="card flex max-h-[92vh] w-full max-w-md flex-col overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
                 <div className="mb-4 flex items-start justify-between gap-4">
                     <div className="min-w-0">
                         <span className="eyebrow">{eyebrow}</span>
@@ -184,31 +142,7 @@ export default function LddapStepModal({ lddap, step: initialStep, onClose, onDo
                     </button>
                 </div>
 
-                {step === 'action' ? (
-                    /* What is being signed off: every registered detail, then the payment. */
-                    <div className="mb-5 min-h-0 flex-1 overflow-y-auto pr-1">
-                        <div className="mb-3 flex items-center justify-between gap-4 px-1">
-                            <span className="text-xs font-semibold uppercase tracking-wider text-subtle">Status</span>
-                            <span className="inline-flex items-center gap-2">
-                                <LddapStatusBadge status={lddap.status} />
-                                {lddap.check_no != null && (
-                                    <span className="font-display text-sm font-bold text-fg">Check #{lddap.check_no}</span>
-                                )}
-                            </span>
-                        </div>
-                        <LddapRecordDetails lddap={lddap} compact={!showAll} />
-                        <button
-                            type="button"
-                            className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-brandink hover:underline"
-                            onClick={() => setShowAll((v) => !v)}
-                            aria-expanded={showAll}
-                        >
-                            <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showAll ? 'rotate-180' : ''}`} />
-                            {showAll ? 'Show the essentials only' : 'Show every registered detail'}
-                        </button>
-                    </div>
-                ) : (
-                    /* The record being moved. */
+                {/* The record being moved. */}
                     <div className="mb-5 rounded-xs border border-line bg-well p-3 text-sm">
                         <div className="flex justify-between gap-4">
                             <span className="text-subtle">LDDAP No.</span>
@@ -227,86 +161,48 @@ export default function LddapStepModal({ lddap, step: initialStep, onClose, onDo
                             <LddapStatusBadge status={lddap.status} />
                         </div>
                     </div>
-                )}
 
-                {needsUnits && options === null ? (
-                    <Spinner />
-                ) : step === 'forward' ? (
-                    <form onSubmit={handleForward} className="space-y-3">
-                        <Field label="Forward To" htmlFor="step-to">
-                            <input
-                                id="step-to"
-                                className="field !py-1.5"
-                                value={forwardTo}
-                                onChange={(e) => setForwardTo(e.target.value)}
-                                placeholder="Office or person"
-                                maxLength={255}
-                                autoFocus
+                {step === 'resubmit' ? (
+                    <form onSubmit={handleResubmit} className="space-y-3">
+                        <p className="text-sm text-muted">
+                            Send the corrected record back to <span className="font-semibold text-fg">For Signature</span>, ready to
+                            be assigned to an ACIC. Both fields go on the record's history.
+                        </p>
+                        <Field label="Comment" htmlFor="resubmit-comment">
+                            <textarea
+                                id="resubmit-comment"
+                                className="field min-h-24 !py-1.5"
+                                value={note}
+                                onChange={(e) => setNote(e.target.value)}
+                                placeholder="What was corrected"
+                                minLength={3}
+                                maxLength={2000}
                                 required
+                                autoFocus
                             />
                         </Field>
-                        <div className="grid gap-3 sm:grid-cols-2">
-                            <Field label="Unit Name" htmlFor="step-unit">
-                                <select id="step-unit" className="field !py-1.5" value={unitId} onChange={(e) => setUnitId(e.target.value)} required>
-                                    <option value="">Choose…</option>
-                                    {options?.units.map((u) => (
-                                        <option key={u.id} value={u.id}>{u.name}</option>
-                                    ))}
-                                </select>
-                            </Field>
-                            <Field label="Date Forwarded" htmlFor="step-date">
-                                <input id="step-date" type="date" className="field !py-1.5" value={date} onChange={(e) => setDate(e.target.value)} required />
-                            </Field>
-                        </div>
-                        <Field label="Forwarded By" htmlFor="step-by">
-                            <input id="step-by" className="field !py-1.5" value={user?.name ?? ''} disabled readOnly />
-                        </Field>
-                        <Field label="Note" htmlFor="step-note" optional>
-                            <textarea id="step-note" className="field min-h-20 !py-1.5" value={note} onChange={(e) => setNote(e.target.value)} maxLength={2000} />
+                        <Field label="Notes" htmlFor="resubmit-notes" optional>
+                            <textarea
+                                id="resubmit-notes"
+                                className="field min-h-20 !py-1.5"
+                                value={notes}
+                                onChange={(e) => setNotes(e.target.value)}
+                                maxLength={2000}
+                            />
                         </Field>
                         {error && <Alert kind="error">{error}</Alert>}
                         <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
                             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={!!busy}>Cancel</button>
                             <button type="submit" className="btn btn-primary" disabled={!!busy}>
-                                <Send className="h-4 w-4" />
-                                {busy ? 'Forwarding…' : 'Forward'}
-                            </button>
-                        </div>
-                    </form>
-                ) : step === 'receive' ? (
-                    <form onSubmit={handleReceive} className="space-y-3">
-                        <div className="grid gap-3 sm:grid-cols-2">
-                            <Field label="From Unit Name" htmlFor="step-unit">
-                                <select id="step-unit" className="field !py-1.5" value={unitId} onChange={(e) => setUnitId(e.target.value)} required autoFocus>
-                                    <option value="">Choose…</option>
-                                    {options?.units.map((u) => (
-                                        <option key={u.id} value={u.id}>{u.name}</option>
-                                    ))}
-                                </select>
-                            </Field>
-                            <Field label="Date Received" htmlFor="step-date">
-                                <input id="step-date" type="date" className="field !py-1.5" value={date} onChange={(e) => setDate(e.target.value)} required />
-                            </Field>
-                        </div>
-                        <Field label="Received By" htmlFor="step-by">
-                            <input id="step-by" className="field !py-1.5" value={user?.name ?? ''} disabled readOnly />
-                        </Field>
-                        <Field label="Note" htmlFor="step-note" optional>
-                            <textarea id="step-note" className="field min-h-20 !py-1.5" value={note} onChange={(e) => setNote(e.target.value)} maxLength={2000} />
-                        </Field>
-                        {error && <Alert kind="error">{error}</Alert>}
-                        <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
-                            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={!!busy}>Cancel</button>
-                            <button type="submit" className="btn btn-primary" disabled={!!busy}>
-                                <Inbox className="h-4 w-4" />
-                                {busy ? 'Receiving…' : 'Receive'}
+                                <RotateCcw className="h-4 w-4" />
+                                {busy ? 'Resubmitting…' : 'Resubmit'}
                             </button>
                         </div>
                     </form>
                 ) : step === 'cancel' ? (
                     <form onSubmit={handleCancel} className="space-y-3">
                         <div className="rounded-xs border border-danger/40 bg-danger/10 p-3 text-sm text-danger-fg">
-                            This closes the record for good. It can no longer be edited, forwarded, returned or
+                            This closes the record for good. It can no longer be edited, returned, resubmitted or
                             assigned to an ACIC, and its LDDAP number stays used.
                         </div>
                         <div className="grid gap-3 sm:grid-cols-2">
@@ -335,7 +231,7 @@ export default function LddapStepModal({ lddap, step: initialStep, onClose, onDo
                             <button
                                 type="button"
                                 className="btn btn-ghost"
-                                onClick={() => (initialStep === 'action' ? setStep('action') : onClose())}
+                                onClick={onClose}
                                 disabled={!!busy}
                             >
                                 Back
@@ -364,12 +260,7 @@ export default function LddapStepModal({ lddap, step: initialStep, onClose, onDo
                                 <input id="rts-received-by" className="field !py-1.5" value={receivedBy} onChange={(e) => setReceivedBy(e.target.value)} maxLength={255} required />
                             </Field>
                             <Field label="RTS Unit" htmlFor="rts-unit">
-                                <select id="rts-unit" className="field !py-1.5" value={unitId} onChange={(e) => setUnitId(e.target.value)} required autoFocus>
-                                    <option value="">Choose…</option>
-                                    {options?.units.map((u) => (
-                                        <option key={u.id} value={u.id}>{u.name}</option>
-                                    ))}
-                                </select>
+                                <UnitSelect id="rts-unit" className="field !py-1.5" value={unit} onChange={setUnit} required autoFocus />
                             </Field>
                             <Field label="RTS Date" htmlFor="rts-date">
                                 <input id="rts-date" type="date" className="field !py-1.5" value={date} onChange={(e) => setDate(e.target.value)} required />
@@ -381,7 +272,7 @@ export default function LddapStepModal({ lddap, step: initialStep, onClose, onDo
                                 className="field min-h-24 !py-1.5"
                                 value={note}
                                 onChange={(e) => setNote(e.target.value)}
-                                placeholder="What has to be corrected before it is forwarded again"
+                                placeholder="What has to be corrected before it is resubmitted"
                                 minLength={3}
                                 maxLength={2000}
                                 required
@@ -392,7 +283,7 @@ export default function LddapStepModal({ lddap, step: initialStep, onClose, onDo
                             <button
                                 type="button"
                                 className="btn btn-ghost"
-                                onClick={() => (initialStep === 'action' ? setStep('action') : onClose())}
+                                onClick={onClose}
                                 disabled={!!busy}
                             >
                                 Back
@@ -403,62 +294,7 @@ export default function LddapStepModal({ lddap, step: initialStep, onClose, onDo
                             </button>
                         </div>
                     </form>
-                ) : (
-                    <div className="space-y-3">
-                        <p className="text-sm text-muted">
-                            <span className="font-semibold text-fg">Approve</span> makes it available to Assign LDDAP
-                            to ACIC. <span className="font-semibold text-fg">RTS</span> returns it to sender to be
-                            corrected and forwarded again — it opens its own form.{' '}
-                            <span className="font-semibold text-fg">Cancel</span> closes it for good — it opens a
-                            confirmation with the reason.
-                        </p>
-                        <Field label="Note" htmlFor="step-note" optional>
-                            <textarea
-                                id="step-note"
-                                className="field min-h-20 !py-1.5"
-                                value={note}
-                                onChange={(e) => setNote(e.target.value)}
-                                maxLength={2000}
-                                placeholder="Optional note on the approval"
-                                autoFocus
-                            />
-                        </Field>
-                        {error && <Alert kind="error">{error}</Alert>}
-                        <div className="grid gap-2 sm:grid-cols-3">
-                            <button type="button" className="btn btn-primary" onClick={handleApprove} disabled={!!busy}>
-                                <ShieldCheck className="h-4 w-4" />
-                                {busy === 'Approved' ? 'Approving…' : 'Approved'}
-                            </button>
-                            <button
-                                type="button"
-                                className="btn btn-outline"
-                                onClick={() => {
-                                    setError('');
-                                    setStep('rts');
-                                }}
-                                disabled={!!busy}
-                            >
-                                <Undo2 className="h-4 w-4" />
-                                RTS
-                            </button>
-                            <button
-                                type="button"
-                                className="btn btn-outline !border-danger/50 !text-danger-fg hover:!bg-danger hover:!text-white"
-                                onClick={() => {
-                                    setError('');
-                                    setStep('cancel');
-                                }}
-                                disabled={!!busy}
-                            >
-                                <Ban className="h-4 w-4" />
-                                Cancel
-                            </button>
-                        </div>
-                        <button type="button" className="btn btn-ghost w-full" onClick={onClose} disabled={!!busy}>
-                            Close
-                        </button>
-                    </div>
-                )}
+                ) : null}
             </div>
         </div>
     );

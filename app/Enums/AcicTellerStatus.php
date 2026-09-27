@@ -6,13 +6,14 @@ namespace App\Enums;
  * Where an ACIC stands with the tellers and the bank — the teller's own axis, alongside
  * `AcicStatus` (which tracks the ACIC's own life: open, used, approved, …).
  *
- *   Pending → Accepted by Teller → Completed
- *                                      │
- *                                      └─▶ Returned by Bank ─┬─▶ Completed again
- *                                                            └─▶ back to the admin
+ *   Pending → Accepted by Teller ─▶ Forwarded to Land Bank ─┬─▶ Completed (final)
+ *                        │         ─▶ Forwarded to Payee     ─┤
+ *                        │                                    └─▶ RTS ─┬─▶ Forward again
+ *                        └─▶ back to the admin                         └─▶ back to the admin
  *
- * Lodging the ACIC with Land Bank is not a resting state: **Confirm and Complete** records when
- * it went over the counter and closes it in the same step.
+ * Only the teller who accepted the ACIC forwards it and takes the Action (Completed or RTS).
+ * Returned by Bank belongs to the retired Confirm and Complete flow; it survives only on older
+ * ACICs, which may be forwarded again or returned to the admin.
  *
  * Null means the ACIC has never been sent to a teller. Returning it to the admin clears the
  * axis back to null, so the next forward starts a fresh cycle.
@@ -25,20 +26,29 @@ enum AcicTellerStatus: string
     /** One teller has claimed it. Only they may act on it from here. */
     case AcceptedByTeller = 'accepted_by_teller';
 
-    /** The bank sent it back. Put it right and complete it again, or hand it to the admin. */
+    /** The accepting teller took it to Land Bank. Awaiting the Action. */
+    case ForwardedToLandBank = 'forwarded_to_land_bank';
+
+    /** The accepting teller took it to the payee. Awaiting the Action. */
+    case ForwardedToPayee = 'forwarded_to_payee';
+
+    /** Returned to sender, with a reason and a status per check. Forward again, or hand back. */
+    case Rts = 'rts';
+
+    /** Retired (the old Confirm and Complete flow): the bank sent it back. Older ACICs only. */
     case ReturnedByBank = 'returned_by_bank';
 
-    /**
-     * Lodged with Land Bank and closed. Not the end of the road: the bank may still send it
-     * back, which is the one way out of here.
-     */
+    /** Closed by the teller's Action. Final. */
     case Completed = 'completed';
 
     public function label(): string
     {
         return match ($this) {
             self::Pending => 'Pending',
-            self::AcceptedByTeller => 'Accepted by Teller',
+            self::AcceptedByTeller => 'Accepted',
+            self::ForwardedToLandBank => 'Forwarded to LBP',
+            self::ForwardedToPayee => 'Forwarded to Payee',
+            self::Rts => 'RTS',
             self::ReturnedByBank => 'Returned by Bank',
             self::Completed => 'Completed',
         };
@@ -54,11 +64,11 @@ enum AcicTellerStatus: string
         return match ($this) {
             self::Pending => [self::AcceptedByTeller],
             // Return to Admin clears the axis, so it is not a state here.
-            self::AcceptedByTeller => [self::Completed],
-            // The bank can send back an ACIC that was already closed.
-            self::Completed => [self::ReturnedByBank],
-            // Put it right and complete it again; every cycle is kept in the history.
-            self::ReturnedByBank => [self::Completed],
+            self::AcceptedByTeller => [self::ForwardedToLandBank, self::ForwardedToPayee],
+            self::ForwardedToLandBank, self::ForwardedToPayee => [self::Completed, self::Rts],
+            // Put right and forwarded again; every cycle is kept in the history.
+            self::Rts, self::ReturnedByBank => [self::ForwardedToLandBank, self::ForwardedToPayee],
+            self::Completed => [],
         };
     }
 
@@ -67,21 +77,27 @@ enum AcicTellerStatus: string
         return in_array($to, $this->nextStates(), true);
     }
 
-    /** Has the ACIC been lodged and closed? The bank may still return it. */
+    /** Has the ACIC been closed? Final. */
     public function isCompleted(): bool
     {
         return $this === self::Completed;
     }
 
-    /** May the teller complete it from here — the first time, or after a bank return? */
-    public function canComplete(): bool
+    /** May the accepting teller Forward it (to Land Bank or to the payee) from here? */
+    public function canForward(): bool
     {
-        return in_array($this, [self::AcceptedByTeller, self::ReturnedByBank], true);
+        return in_array($this, [self::AcceptedByTeller, self::Rts, self::ReturnedByBank], true);
     }
 
-    /** May the teller holding it hand it back to the admin? Not once the bank has credited it. */
+    /** Is it out with Land Bank or the payee, awaiting the Action (Completed or RTS)? */
+    public function isForwarded(): bool
+    {
+        return $this === self::ForwardedToLandBank || $this === self::ForwardedToPayee;
+    }
+
+    /** May the teller holding it hand it back to the admin? Not while it is out, nor once closed. */
     public function canReturnToAdmin(): bool
     {
-        return in_array($this, [self::AcceptedByTeller, self::ReturnedByBank], true);
+        return in_array($this, [self::AcceptedByTeller, self::Rts, self::ReturnedByBank], true);
     }
 }

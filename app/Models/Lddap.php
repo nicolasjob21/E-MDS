@@ -12,15 +12,15 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 #[Fillable([
-    'lddap_check_id', 'lddap_no', 'nca_no', 'orb_no', 'dv_no', 'nature_of_payment', 'unit_id',
+    'lddap_check_id', 'lddap_no', 'nca_no', 'obr_no', 'dv_no', 'nature_of_payment', 'unit_name',
     'obj_no', 'amount', 'gross_amount',
-    'payee_name', 'payee_id', 'payee_account_id', 'payee_account_no', 'payee_bank', 'acic_ref',
+    'payee_name', 'payee_type', 'payee_id', 'payee_account_id', 'payee_account_no', 'payee_bank', 'acic_ref',
     'wtax_1', 'wtax_2', 'wtax_3', 'wtax_5',
     'vat_1', 'vat_2', 'vat_3', 'vat_5', 'vat_10', 'vat_12', 'vat_30',
     'retention', 'liquidated_damages', 'advance_payment',
     'check_date', 'fwd_to_lbp_at', 'date_loaded', 'note', 'remarks',
-    'forward_to', 'forward_unit_id', 'forwarded_by', 'date_forwarded',
-    'return_unit_id', 'returned_by', 'date_returned',
+    'forward_to', 'forward_unit_name', 'forwarded_by', 'date_forwarded',
+    'return_unit_name', 'returned_by', 'date_returned',
     'canceled_by', 'date_canceled', 'cancel_reason',
     'status', 'used_by', 'used_at', 'received_by', 'received_at',
     'reviewed_by', 'reviewed_at', 'review_note', 'acic_id', 'created_by',
@@ -47,6 +47,7 @@ class Lddap extends Model
             'liquidated_damages' => 'decimal:2',
             'advance_payment' => 'decimal:2',
             'check_date' => 'date',
+            'payee_received_on' => 'date',
             'fwd_to_lbp_at' => 'date',
             'date_loaded' => 'date',
             'date_forwarded' => 'date',
@@ -105,12 +106,6 @@ class Lddap extends Model
         return $this->belongsTo(Acic::class);
     }
 
-    /** The office unit this LDDAP is drawn for. */
-    public function unit(): BelongsTo
-    {
-        return $this->belongsTo(Unit::class);
-    }
-
     /**
      * The registered payee. `payee_name` and `payee_account_no` are copied from it at
      * registration, so the record reads the same even if the payee is edited later.
@@ -164,19 +159,9 @@ class Lddap extends Model
         return $this->hasMany(LddapRoutingHistory::class)->orderBy('id');
     }
 
-    public function forwardUnit(): BelongsTo
-    {
-        return $this->belongsTo(Unit::class, 'forward_unit_id');
-    }
-
     public function forwardedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'forwarded_by');
-    }
-
-    public function returnUnit(): BelongsTo
-    {
-        return $this->belongsTo(Unit::class, 'return_unit_id');
     }
 
     public function returnedBy(): BelongsTo

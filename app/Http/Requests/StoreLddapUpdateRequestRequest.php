@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Enums\UserRole;
+use App\Support\DashedNumber;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLddapUpdateRequestRequest extends FormRequest
@@ -22,7 +23,7 @@ class StoreLddapUpdateRequestRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'lddap_no' => ['required', 'string', 'max:100'],
+            'lddap_no' => ['required', ...DashedNumber::rules()],
             'obj_no' => ['nullable', 'string', 'max:100'],
             'payee_name' => ['nullable', 'string', 'max:255'],
             'amount' => ['required', 'numeric', 'min:0.01', 'max:999999999999.99'],
@@ -36,6 +37,7 @@ class StoreLddapUpdateRequestRequest extends FormRequest
     public function messages(): array
     {
         return [
+            'lddap_no.regex' => DashedNumber::message('LDDAP Number'),
             'lddap_no.required' => 'Enter the LDDAP number.',
             'amount.required' => 'Enter the amount.',
             'reason.required' => 'Say what is wrong and why it must change.',

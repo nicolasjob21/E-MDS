@@ -3,35 +3,41 @@
 namespace App\Enums;
 
 /**
- * The routing of an LDDAP-ADA record, in order:
+ * An LDDAP-ADA record's status, in order:
  *
- *   Registered → For Out → Returned for ACIC → Approved | RTS | Canceled
- *                   ↑                              │
- *                   └──────── (edit) ──────────────┘
+ *   Add LDDAP → For Signature ──Assign LDDAP to ACIC──► Approved (on the ACIC) → the teller's half
+ *                   │  ↑
+ *                   │  └── Resubmit (corrected) ── RTS
+ *                   ├── RTS ──────────────────────►┘
+ *                   └── Cancel ──► Canceled
  *
- * Each step is taken by a named action — Forward, Receive, then Approve / RTS / Cancel — and
- * only the next valid step is ever offered. The full trail is kept in `lddap_routing_history`.
+ * Only the next valid step is ever offered. The full trail is kept in `lddap_routing_history`.
  */
 enum LddapStatus: string
 {
-    /** Created through "Add LDDAP". Can be forwarded. */
-    case Registered = 'registered';
-
-    /** Forwarded out for processing. Can be received back. */
-    case ForOut = 'for_out';
-
-    /** Received back; awaiting the admin's action — Approve, RTS or Cancel. */
-    case ReturnedForAcic = 'returned_for_acic';
+    /** Added, and waiting to be assigned to an ACIC — the only status before one. */
+    case ForSignature = 'for_signature';
 
     /**
-     * Returned to sender. The details can be corrected, and it is then forwarded again — For
-     * Out, Returned for ACIC, and the admin's action once more. A record may be RTS'd any
-     * number of times; every one is its own history entry.
+     * Returned to sender (by an admin, with its own form). The details are corrected, then
+     * **Resubmit** sends it back to For Signature. A record may be RTS'd any number of times;
+     * every one is its own history entry.
      */
     case Rts = 'rts';
 
-    /** Signed off. Available to "Assign LDDAP to ACIC". */
+    /** On an ACIC, not yet forwarded to the tellers. Set by "Assign LDDAP to ACIC". */
     case Approved = 'approved';
+
+    // ---- retired: only in older history rows -------------------------------------------
+
+    /** Retired — the old "added" status, now For Signature. */
+    case Registered = 'registered';
+
+    /** Retired — the old Forward step. Its data is kept, never shown. */
+    case ForOut = 'for_out';
+
+    /** Retired — the old Receive step. Its data is kept, never shown. */
+    case ReturnedForAcic = 'returned_for_acic';
 
     // ---- the teller's half, once the ACIC it sits on goes out ----------------------------
 
@@ -41,7 +47,16 @@ enum LddapStatus: string
     /** A teller has claimed its ACIC. */
     case AcceptedByTeller = 'accepted_by_teller';
 
-    /** The bank sent its ACIC back. It goes round again once the issue is fixed. */
+    /** Its ACIC was forwarded by the accepting teller to Land Bank. */
+    case ForwardedToLandBank = 'forwarded_to_land_bank';
+
+    /** Its ACIC was forwarded by the accepting teller to the payee. */
+    case ForwardedToPayee = 'forwarded_to_payee';
+
+    /** RTS'd by the teller: this check needs putting right before its ACIC goes out again. */
+    case Returned = 'returned';
+
+    /** Retired (the old Confirm and Complete flow): the bank sent its ACIC back. */
     case ReturnedByBank = 'returned_by_bank';
 
     /** Credited and confirmed by the bank. Final. */
@@ -56,13 +71,17 @@ enum LddapStatus: string
     public function label(): string
     {
         return match ($this) {
+            self::ForSignature => 'For Signature',
             self::Registered => 'Registered',
             self::ForOut => 'For Out',
             self::ReturnedForAcic => 'Returned for ACIC',
             self::Rts => 'RTS',
             self::Approved => 'Approved',
             self::ForwardedToTeller => 'Forwarded to Teller',
-            self::AcceptedByTeller => 'Accepted by Teller',
+            self::AcceptedByTeller => 'Accepted',
+            self::ForwardedToLandBank => 'Forwarded to LBP',
+            self::ForwardedToPayee => 'Forwarded to Payee',
+            self::Returned => 'Returned',
             self::ReturnedByBank => 'Returned by Bank',
             self::Completed => 'Completed',
             self::Canceled => 'Canceled',
@@ -75,16 +94,6 @@ enum LddapStatus: string
         return $this === self::Completed || $this === self::Canceled;
     }
 
-    /**
-     * Is this an outcome of the admin's review — the moment somebody signs the record off?
-     * Distinct from `isFinal()`: an approved record is signed off but still has its whole
-     * teller and bank life ahead of it.
-     */
-    public function isReviewOutcome(): bool
-    {
-        return $this === self::Approved || $this === self::Canceled;
-    }
-
     /** Is the record travelling with its ACIC, through the tellers and the bank? */
     public function isWithTeller(): bool
     {
@@ -93,10 +102,10 @@ enum LddapStatus: string
         ], true);
     }
 
-    /** Is the LDDAP signed off, i.e. eligible to be linked to an ACIC? */
-    public function isApproved(): bool
+    /** May it be put on an ACIC? Only a For Signature record. */
+    public function isAcicEligible(): bool
     {
-        return $this === self::Approved;
+        return $this === self::ForSignature;
     }
 
     /** May a correction still be proposed or applied? Not once it is closed. */
@@ -106,31 +115,25 @@ enum LddapStatus: string
     }
 
     /**
-     * May the record be opened in "Edit LDDAP Record" — the full form, saved directly? Only
-     * while it is in the registrant's hands: Registered, or RTS'd back to them. Once it is out
-     * for routing, awaiting action, approved or canceled, it is not.
+     * May the record be opened in "Edit LDDAP Record" — the full form, saved directly? While it
+     * is For Signature (not yet on an ACIC), or RTS'd back. Not once it is on an ACIC or canceled.
      */
     public function canEdit(): bool
     {
-        return $this === self::Registered || $this === self::Rts;
+        return $this === self::ForSignature || $this === self::Rts;
     }
 
     // ---- the one next step each status allows -------------------------------------------
 
-    /** Forward is the step out of Registered — and out of RTS, once the record is corrected. */
-    public function canForward(): bool
-    {
-        return $this === self::Registered || $this === self::Rts;
-    }
-
-    public function canReceive(): bool
-    {
-        return $this === self::ForOut;
-    }
-
-    /** Approve, RTS and Cancel are all taken from here, and only from here. */
+    /** RTS and Cancel are taken on a For Signature record, and only there. */
     public function awaitsAction(): bool
     {
-        return $this === self::ReturnedForAcic;
+        return $this === self::ForSignature;
+    }
+
+    /** Resubmit sends a corrected RTS record back to For Signature. */
+    public function canResubmit(): bool
+    {
+        return $this === self::Rts;
     }
 }

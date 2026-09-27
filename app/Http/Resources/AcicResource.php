@@ -2,6 +2,8 @@
 
 namespace App\Http\Resources;
 
+use App\Enums\AcicTellerStatus;
+use App\Enums\UserRole;
 use App\Models\Acic;
 use App\Support\AmountInWords;
 use Illuminate\Http\Request;
@@ -50,6 +52,11 @@ class AcicResource extends JsonResource
             // What the ACIC carries, and where it stands with the tellers and the bank.
             'type' => $this->type?->value,
             'type_label' => $this->type?->label(),
+            // What the tables show: the teller's status once it is with the tellers.
+            'display_status' => $this->displayStatus(),
+            'display_status_label' => $this->displayStatusLabel(),
+            // Any teller may accept a Pending ACIC; the first to do so takes it.
+            'can_accept' => $request->user()?->role === UserRole::Teller && $this->teller_status === AcicTellerStatus::Pending,
             'teller_status' => $this->teller_status?->value,
             'teller_status_label' => $this->teller_status?->label(),
             'forwarded_to_land_bank_at' => $this->forwarded_to_land_bank_at,
@@ -61,7 +68,9 @@ class AcicResource extends JsonResource
             'bank_confirmation_no' => $this->bank_confirmation_no,
             'confirmed_by' => $this->confirmedBy?->only(['id', 'name']),
             'completion_note' => $this->completion_note,
-            'total_records' => ($this->cheque_count ?? 0) + ($this->lddap_count ?? 0),
+            // withCount() names them cheques_count / lddaps_count; the loaded records serve otherwise.
+            'total_records' => (int) ($this->cheques_count ?? ($this->relationLoaded('cheques') ? $this->cheques->count() : 0))
+                + (int) ($this->lddaps_count ?? ($this->relationLoaded('lddaps') ? $this->lddaps->count() : 0)),
 
             // Branch B — the ACIC as a whole goes to the tellers.
             'forwarded_to_teller_at' => $this->forwarded_to_teller_at,
@@ -76,6 +85,31 @@ class AcicResource extends JsonResource
             'deposit_note' => $this->deposit_note,
             'returned_to_admin_at' => $this->returned_to_admin_at,
             'return_reason' => $this->return_reason,
+
+            // The accepting teller's Forward (to Land Bank or the payee) and Action.
+            'teller_forwarded_to' => $this->teller_forwarded_to,
+            'teller_forwarded_by' => $this->whenLoaded('tellerForwardedBy', fn () => $this->tellerForwardedBy?->only(['id', 'name'])),
+            'teller_forwarded_at' => $this->teller_forwarded_at,
+            'teller_action_by' => $this->whenLoaded('tellerActionBy', fn () => $this->tellerActionBy?->only(['id', 'name'])),
+            'teller_action_at' => $this->teller_action_at,
+            'rts_reason' => $this->rts_reason,
+            // Only the teller who accepted it may Forward it or take the Action.
+            'can_teller_forward' => $this->isAccepter($request) && $this->teller_status?->canForward() === true,
+            // Where the Forward buttons may send it: LBP always; the payee for a cheque ACIC only.
+            // Forward to LBP — not once any cheque has gone to its payee (never split an ACIC).
+            'teller_forward_options' => $this->isAccepter($request) && $this->teller_status?->canForward() === true
+                && ! $this->hasChequesWithPayee()
+                ? ['land_bank']
+                : [],
+            // Forward to Payee — cheque ACICs, the accepting teller, while any cheque is left to go.
+            'can_forward_to_payee' => $this->isAccepter($request) && $this->teller_status?->canForward() === true
+                && $this->canGoToPayee() && $this->chequesLeftForPayee()->isNotEmpty(),
+            // "3/5 forwarded to payee".
+            'payee_progress' => $this->payeeProgress(),
+            'can_teller_act' => $this->isAccepter($request) && $this->teller_status?->isForwarded() === true,
+            'can_return_to_admin' => ($this->isAccepter($request) || $request->user()?->isAdmin() === true)
+                && $this->teller_status?->canReturnToAdmin() === true
+                && ! $this->hasChequesWithPayee(),
         ];
     }
 
@@ -124,5 +158,10 @@ class AcicResource extends JsonResource
                 $this->acic_number,
             ),
         ];
+    }
+
+    private function isAccepter(Request $request): bool
+    {
+        return $this->accepted_by !== null && $this->accepted_by === $request->user()?->id;
     }
 }

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { X, PencilLine, Clock, History, Check, Ban, Hash, AlertTriangle, Zap, CheckCircle2, Route, Undo2 } from 'lucide-react';
+import { X, PencilLine, Clock, History, Check, Ban, Hash, Zap, CheckCircle2, Route, Undo2 } from 'lucide-react';
 import { LddapUpdateRequestApi, LddapApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
 import type { Lddap, LddapEdit, LddapRoutingStep, LddapUpdateRequest, RequestStatus } from '../lib/types';
-import { formatDate, formatDateTime, formatMoney } from '../lib/format';
+import { formatDate, formatDateTime, formatMoney, formatDashedNumber, DASHED_NUMBER_PATTERN } from '../lib/format';
 import { Alert, LddapStatusBadge } from './ui';
 import LddapRecordDetails, { Row } from './LddapRecordDetails';
 import LddapRegisterModal from './LddapRegisterModal';
@@ -32,10 +32,10 @@ interface Props {
 export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChanged }: Props) {
     const { user } = useAuth();
     const isStaff = user?.role === 'staff';
-    const isAdmin = user?.role === 'admin';
+    const isAdmin = user?.role === 'admin' || user?.role === 'super_admin';
     const isTeller = user?.role === 'teller';
 
-    // While Registered or RTS the record is edited through the register form itself ("Edit
+    // While For Signature or RTS the record is edited through the register form itself ("Edit
     // LDDAP Record"). Once it is out for routing, a staff member can only propose a correction
     // for approval and an admin apply one with a reason; a canceled record is closed to both.
     const canOpenEdit = (isAdmin || isStaff) && !!lddap.can_edit;
@@ -164,9 +164,7 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
                             <Hash className="h-3.5 w-3.5 text-subtle" />
                             {lddap.check_no != null
                                 ? `Check ${lddap.check_no}`
-                                : lddap.status === 'approved'
-                                  ? 'Check number assigned when put on an ACIC'
-                                  : 'No check number yet — assigned with the ACIC after approval'}
+                                : 'No check number yet — assigned when put on an ACIC'}
                         </p>
                     </div>
                     <button
@@ -198,31 +196,7 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
                         <p className="mt-1.5 text-sm text-fg">{latestRts.note}</p>
                         <p className="mt-1.5 text-xs text-subtle">
                             {latestRts.user?.name ?? '—'} · {latestRts.unit_name ?? '—'} ·{' '}
-                            {formatDate(latestRts.acted_on)} — correct the details, then forward it again.
-                        </p>
-                    </div>
-                )}
-
-                {(lddap.status === 'for_out' || lddap.status === 'returned_for_acic') && (
-                    <div
-                        className={`mb-4 rounded-xs border p-3 ${
-                            lddap.status === 'returned_for_acic'
-                                ? 'border-accent-400/50 bg-accent-400/10'
-                                : 'border-brand-400/40 bg-brand-500/10'
-                        }`}
-                    >
-                        <div
-                            className={`flex items-center gap-2 text-xs font-semibold uppercase tracking-wider ${
-                                lddap.status === 'returned_for_acic' ? 'text-accent-400' : 'text-brandink'
-                            }`}
-                        >
-                            <AlertTriangle className="h-3.5 w-3.5" />
-                            {lddap.status_label}
-                        </div>
-                        <p className="mt-1.5 text-sm text-fg">
-                            {lddap.status === 'for_out'
-                                ? `Forwarded to ${lddap.forward_to ?? '—'}${lddap.forward_unit_name ? ` (${lddap.forward_unit_name})` : ''} by ${lddap.forwarded_by?.name ?? '—'} on ${formatDate(lddap.date_forwarded)}.`
-                                : `Received back${lddap.return_unit_name ? ` from ${lddap.return_unit_name}` : ''} by ${lddap.returned_by?.name ?? '—'} on ${formatDate(lddap.date_returned)} — awaiting the admin's action.`}
+                            {formatDate(latestRts.acted_on)} — correct the details, then resubmit it.
                         </p>
                     </div>
                 )}
@@ -363,7 +337,7 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
                     <section className="mt-6">
                         <h3 className="mb-3 flex items-center gap-2 font-display text-sm font-semibold uppercase tracking-widest text-subtle">
                             <Route className="h-4 w-4" />
-                            Routing trail
+                            Timeline
                         </h3>
                         <ol className="space-y-2">
                             {routing.map((step) => (
@@ -379,13 +353,9 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
                                             {step.user?.name ?? '—'} · {formatDate(step.acted_on ?? step.created_at)}
                                         </span>
                                     </div>
-                                    {(step.counterparty || step.unit_name) && (
-                                        <p className="mt-1.5 text-xs text-muted">
-                                            {step.action === 'forwarded' ? 'To' : 'From'}{' '}
-                                            {[step.counterparty, step.unit_name].filter(Boolean).join(' · ')}
-                                        </p>
-                                    )}
+                                    {step.unit_name && <p className="mt-1.5 text-xs text-muted">Unit: {step.unit_name}</p>}
                                     {step.note && <p className="mt-1.5 text-sm text-fg">{step.note}</p>}
+                                    {step.notes && <p className="mt-1 text-xs text-muted">Notes: {step.notes}</p>}
                                 </li>
                             ))}
                         </ol>
@@ -505,8 +475,11 @@ export default function LddapDetailModal({ lddap, mode = 'view', onClose, onChan
                                             id="req-lddap-no"
                                             className="field"
                                             value={lddapNo}
-                                            onChange={(e) => setLddapNo(e.target.value)}
-                                            maxLength={100}
+                                            onChange={(e) => setLddapNo(formatDashedNumber(e.target.value))}
+                                            placeholder="00-00-00000"
+                                            inputMode="numeric"
+                                            pattern={DASHED_NUMBER_PATTERN}
+                                            title="LDDAP Number must be in the format 00-00-00000."
                                             required
                                         />
                                     </div>

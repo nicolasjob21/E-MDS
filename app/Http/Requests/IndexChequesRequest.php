@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Enums\ChequeStatus;
+use App\Support\PcgUnits;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -21,8 +22,13 @@ class IndexChequesRequest extends FormRequest
         return [
             // "all" or any ChequeStatus value; anything else is ignored rather than rejected.
             'status' => ['nullable', 'string', 'max:32'],
-            // Matches against the cheque number or the ACIC no.
+            // Matches the cheque number, payee or account number — partial, any case.
             'search' => ['nullable', 'string', 'max:100'],
+            // One PCG unit, exactly as the shared list spells it.
+            'unit' => ['nullable', 'string', PcgUnits::rule()],
+            // The cheque date, both ends included; either may be left out.
+            'date_from' => ['nullable', 'date_format:Y-m-d'],
+            'date_to' => ['nullable', 'date_format:Y-m-d', 'after_or_equal:date_from'],
             // The tab is one of the two derived views, or any status in the flow.
             'tab' => ['nullable', 'string', Rule::in(self::tabs())],
             // "expiry" puts the cheques closest to going stale first.
@@ -57,6 +63,13 @@ class IndexChequesRequest extends FormRequest
     public function sortsByExpiry(): bool
     {
         return $this->input('sort') === 'expiry';
+    }
+
+    public function unit(): ?string
+    {
+        $unit = (string) $this->input('unit', '');
+
+        return $unit === '' ? null : $unit;
     }
 
     /** The trimmed search term, or null when nothing was searched for. */

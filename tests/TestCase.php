@@ -4,6 +4,9 @@ namespace Tests;
 
 use App\Enums\AcicNumberStatus;
 use App\Models\AcicNumber;
+use App\Models\Cheque;
+use App\Models\User;
+use App\Services\ChequeFlowService;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 
 abstract class TestCase extends BaseTestCase
@@ -31,5 +34,24 @@ abstract class TestCase extends BaseTestCase
         }
 
         AcicNumber::insert($rows);
+    }
+
+    /**
+     * Walk a freshly used cheque to For Signature — the one status "Assign Cheque to ACIC"
+     * takes: its preparer prints a draft, a Super Admin approves it, and the final print is
+     * confirmed. The Super Admin is made on first use (and reused), so a test counting users
+     * should create its own first.
+     */
+    protected function readyForAcic(Cheque $cheque, ?User $preparer = null): Cheque
+    {
+        $flow = app(ChequeFlowService::class);
+        $preparer ??= $cheque->usedBy ?? User::factory()->admin()->create();
+        $checker = User::query()->where('role', 'super_admin')->first()
+            ?? User::factory()->superAdmin()->create(['name' => 'Sue Super']);
+
+        $cheque = $flow->printDraft($preparer, $cheque);
+        $cheque = $flow->approveDraft($checker, $cheque);
+
+        return $flow->confirmFinalPrint($preparer, $cheque);
     }
 }

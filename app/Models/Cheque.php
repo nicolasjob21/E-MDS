@@ -11,16 +11,20 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 #[Fillable([
-    'cheque_number', 'payee_name', 'amount', 'cheque_date', 'acic_id', 'status', 'used_by', 'used_at',
+    'cheque_number', 'payee_name', 'account_no', 'unit_name', 'amount', 'cheque_date', 'acic_id', 'spoiled_from_acic_id', 'status', 'used_by', 'used_at',
     'received_by', 'received_at', 'reviewed_by', 'reviewed_at', 'review_note', 'created_by',
     // The disposition axis: where the cheque physically is, and its 90-day clock.
     'validity_until', 'stale_at', 'expiry_alert_sent_at', 'replaces_id', 'replaced_by_id',
     'forward_to_name', 'forward_unit_name', 'received_by_name_in', 'date_received_in',
-    'from_unit_name', 'exception_reason', 'rts_at',
+    'from_unit_name', 'exception_reason', 'spoiled_by', 'spoiled_at', 'rts_at',
     'received_by_name', 'date_received', 'released_by', 'released_at', 'release_note',
     'forwarded_to', 'forwarded_by', 'date_forwarded', 'forward_note',
     'approved_by_teller', 'teller_approved_at', 'bank_name', 'date_deposited', 'deposit_reference', 'deposit_note',
     'returned_by', 'returned_at', 'return_reason',
+    // The teller's Action: who received it (forwarded to the payee) and its RTS outcome.
+    'payee_received_by', 'payee_received_on', 'rts_status',
+    // Forward to Payee: the receiving person's unit (who and when reuse received_by_name / date_received).
+    'payee_unit_name',
 ])]
 class Cheque extends Model
 {
@@ -30,6 +34,7 @@ class Cheque extends Model
             'cheque_number' => 'integer',
             'amount' => 'decimal:2',
             'cheque_date' => 'date',
+            'payee_received_on' => 'date',
             'status' => ChequeStatus::class,
             'used_at' => 'datetime',
             'received_at' => 'datetime',
@@ -40,6 +45,7 @@ class Cheque extends Model
             'date_received' => 'date',
             'date_received_in' => 'date',
             'rts_at' => 'datetime',
+            'spoiled_at' => 'datetime',
             'returned_by_bank' => 'boolean',
             'released_at' => 'datetime',
             'date_forwarded' => 'datetime',
@@ -213,6 +219,12 @@ class Cheque extends Model
         return $this->belongsTo(User::class, 'released_by');
     }
 
+    /** The admin who marked it Spoiled. */
+    public function spoiledBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'spoiled_by');
+    }
+
     /** The teller the cheque was forwarded to for deposit. */
     public function forwardedTo(): BelongsTo
     {
@@ -236,6 +248,12 @@ class Cheque extends Model
     }
 
     /** The stale cheque this one was issued to replace. */
+    /** A spoiled cheque: the ACIC it was on when it was spoiled (it comes off at that moment). */
+    public function spoiledFromAcic(): BelongsTo
+    {
+        return $this->belongsTo(Acic::class, 'spoiled_from_acic_id');
+    }
+
     public function replaces(): BelongsTo
     {
         return $this->belongsTo(self::class, 'replaces_id');

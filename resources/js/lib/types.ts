@@ -1,4 +1,5 @@
-export type Role = 'admin' | 'staff' | 'teller';
+/** `super_admin` is the admin in charge: an admin who also checks cheque drafts. */
+export type Role = 'super_admin' | 'admin' | 'staff' | 'teller';
 
 export interface User {
     id: number;
@@ -26,6 +27,8 @@ export interface ChequePrintData {
     acic_number: number | null;
     /** A cheque carries no LDDAP number; the slot is here for the reference line. */
     lddap_no: string | null;
+    /** Printed as a draft (watermarked) until the admin in charge approves it. */
+    draft: boolean;
 }
 
 /**
@@ -39,7 +42,13 @@ export interface ChequePrintData {
  */
 export type ChequeStatus =
     | 'available'
+    /** Used, no draft printed yet — shown with no status. */
     | 'registered'
+    | 'for_checking'
+    | 'for_compliance'
+    | 'for_final_print'
+    | 'for_signature'
+    /** Retired statuses — only in older timeline rows. */
     | 'out_for_signature'
     | 'received'
     | 'for_acic'
@@ -47,10 +56,13 @@ export type ChequeStatus =
     | 'released_to_payee'
     | 'forwarded_to_teller'
     | 'accepted_by_teller'
+    | 'forwarded_to_land_bank'
+    | 'forwarded_to_payee'
+    | 'returned'
     | 'returned_by_bank'
     | 'completed'
     | 'cancelled'
-    | 'voided'
+    | 'spoiled'
     | 'stale'
     | 'replaced';
 
@@ -61,8 +73,22 @@ export interface Cheque {
     id: number;
     cheque_number: number;
     payee_name?: string | null;
+    account_no?: string | null;
+    unit_name?: string | null;
     amount?: string | null;
     cheque_date?: string | null;
+    /** The teller's Action: who received it (forwarded to the payee), and its RTS outcome. */
+    payee_received_by?: string | null;
+    payee_received_on?: string | null;
+    rts_status?: RtsOutcome | null;
+    /** Who received it, when and their unit — Forward to Payee (teller) or Release to Payee (admin). */
+    payee_receipt?: {
+        received_by: string | null;
+        date_received: string | null;
+        unit: string | null;
+        recorded_by?: { id: number; name: string } | null;
+        recorded_at?: string | null;
+    } | null;
     acic_id?: number | null;
     acic_number?: number | null;
     acic_status?: AcicStatus | null;
@@ -80,8 +106,6 @@ export interface Cheque {
     review_note?: string | null;
     is_reviewed?: boolean;
     is_final?: boolean;
-    awaits_compliance?: boolean;
-    has_pending_update?: boolean;
 
     status_label?: string;
     /**
@@ -100,13 +124,16 @@ export interface Cheque {
     stale_at?: string | null;
 
     // What this viewer may do next, decided server-side.
-    can_route?: boolean;
-    can_receive?: boolean;
+    /** Edit the details — no status yet, or For Compliance. */
+    can_edit?: boolean;
+    can_print_draft?: boolean;
+    /** Approve or Return the draft — the admin in charge (Super Admin) only. */
+    can_check_draft?: boolean;
+    can_final_print?: boolean;
     can_assign?: boolean;
     can_release?: boolean;
-    can_rts?: boolean;
     can_cancel?: boolean;
-    can_void?: boolean;
+    can_spoil?: boolean;
     /** The cheque face can be printed — it is on an ACIC. */
     can_print?: boolean;
     can_replace?: boolean;
@@ -125,8 +152,14 @@ export interface Cheque {
         date_received: string | null;
         from_unit_name: string | null;
     } | null;
-    /** The reason behind an RTS, a cancel or a void. */
+    /** The reason behind an RTS, a cancel or a spoil. */
     exception_reason?: string | null;
+    /** Who marked it Spoiled, and when. The replacement cheque is `replaced_by`. */
+    spoil?: {
+        spoiled_by?: { id: number; name: string; username: string } | null;
+        spoiled_at: string | null;
+        reason: string | null;
+    } | null;
 
     /** Branch A. */
     release?: {
@@ -148,13 +181,39 @@ export interface Cheque {
         return_reason: string | null;
     } | null;
 
+    /** The stale or spoiled cheque this one replaces, and the one that replaced this. */
     replaces?: { id: number; cheque_number: number } | null;
     replaced_by?: { id: number; cheque_number: number } | null;
+    /** A spoiled cheque: the ACIC it was on when it was spoiled (it came off then). */
+    spoiled_from_acic?: { id: number; acic_number: number } | null;
+    /**
+     * A replacement of a spoiled cheque that was on an ACIC: that ACIC, and whether "Use
+     * previous ACIC" is open (only while it is still with the admin; `reason` says why not).
+     */
+    previous_acic?: {
+        id: number;
+        acic_number: number;
+        spoiled_cheque_number: number;
+        allowed: boolean;
+        reason: string | null;
+    } | null;
 }
 
 /** Where a signed cheque physically is — the second axis, alongside `ChequeStatus`. */
 /** The cheque page's tabs: the two derived views, or any status in the flow. */
 export type ChequeTab = 'all' | 'valid' | 'expiring' | ChequeStatus;
+
+/** What the cheque list is asked for; blank values are not sent. */
+export interface ChequeListFilters {
+    page?: number;
+    perPage?: number;
+    search?: string;
+    tab?: ChequeTab;
+    sort?: 'number' | 'expiry';
+    unit?: string;
+    dateFrom?: string;
+    dateTo?: string;
+}
 
 /** What the validity banner and the deposit queue are drawn from. */
 export interface ChequeValiditySummary {
@@ -178,30 +237,37 @@ export interface ChequeValiditySummary {
 
 export type RequestStatus = 'pending' | 'approved' | 'rejected';
 
-export interface UpdateRequest {
-    id: number;
-    reason: string;
-    status: RequestStatus;
-    proposed_payee_name?: string | null;
-    proposed_amount?: string | null;
-    proposed_cheque_date?: string | null;
-    requested_by?: { id: number; name: string; username: string } | null;
-    reviewed_by?: { id: number; name: string; username: string } | null;
-    reviewed_at?: string | null;
-    review_note?: string | null;
-    created_at: string;
-    cheque?: Cheque | null;
-}
-
 export interface ChequeDetails {
     payee_name: string;
+    /** Optional; text, so leading zeros are kept. */
+    account_no?: string;
+    /** Optional; a PCG unit name from the shared list. */
+    unit_name?: string;
     amount: number;
     cheque_date: string;
 }
 
 /** The LDDAP's own lifecycle. It draws on an independent check series, not on the cheque register. */
-/** The routing, in order: Registered → For Out → Returned for ACIC → Approved | RTS | Canceled. */
-export type LddapStatus = 'registered' | 'for_out' | 'returned_for_acic' | 'rts' | 'approved' | 'canceled';
+/**
+ * Add → for_signature → (Assign LDDAP to ACIC) → approved (on the ACIC) → the teller's half;
+ * rts → (Resubmit) → for_signature; canceled. The retired registered / for_out /
+ * returned_for_acic only appear in old history rows.
+ */
+export type LddapStatus =
+    | 'for_signature'
+    | 'rts'
+    | 'approved'
+    | 'forwarded_to_teller'
+    | 'accepted_by_teller'
+    | 'forwarded_to_land_bank'
+    | 'forwarded_to_payee'
+    | 'returned'
+    | 'returned_by_bank'
+    | 'completed'
+    | 'canceled'
+    | 'registered'
+    | 'for_out'
+    | 'returned_for_acic';
 
 /** One step of a record's routing trail. */
 /** One step in a cheque's life, as the status history records it. */
@@ -229,7 +295,22 @@ export interface LddapEdit {
 
 export interface LddapRoutingStep {
     id: number;
-    action: 'registered' | 'forwarded' | 'received' | 'approved' | 'rts' | 'canceled';
+    action:
+        | 'registered'
+        | 'rts'
+        | 'resubmitted'
+        | 'canceled'
+        | 'assigned'
+        | 'unassigned'
+        // The ACIC's teller steps.
+        | 'forwarded_to_teller'
+        | 'accepted_by_teller'
+        | 'completed'
+        | 'returned_by_bank'
+        | 'returned_to_admin'
+        | 'forwarded_to_land_bank'
+        | 'forwarded_to_payee'
+        | 'returned';
     action_label: string;
     from_status: LddapStatus | null;
     to_status: LddapStatus;
@@ -243,6 +324,8 @@ export interface LddapRoutingStep {
     /** The step's date: forwarded / received / RTS'd on. */
     acted_on: string | null;
     note: string | null;
+    /** Resubmit only: the optional notes beside its comment. */
+    notes?: string | null;
     created_at: string;
 }
 
@@ -257,21 +340,28 @@ export interface Lddap {
 
     /** The references the disbursement is drawn against. */
     nca_no?: string | null;
-    orb_no?: string | null;
+    obr_no?: string | null;
     dv_no?: string | null;
     nature_of_payment?: string | null;
     /** The nature spelled out, in caps, as the forms carry it. */
     nature_of_payment_label?: string | null;
-    unit_id?: number | null;
+    /** A PCG unit name, as the shared list spells it. */
     unit_name?: string | null;
 
     /** The UACS object code — prints as OBJ CODE on the ACIC. */
     obj_no?: string | null;
     amount: string;
+    /** The teller's Action: who received it (forwarded to the payee), and its RTS outcome. */
+    payee_received_by?: string | null;
+    payee_received_on?: string | null;
+    rts_status?: RtsOutcome | null;
 
-    /** The payee and account as they stood when the record was registered. */
+    /** The payee and account as they stood when the record was registered — a copy, not a link. */
     payee_id?: number | null;
     payee_name?: string | null;
+    /** Which list the payee was chosen from; blank on records from before. */
+    payee_type?: PayeeType | null;
+    payee_type_label?: string | null;
     payee_account_id?: number | null;
     payee_account_no?: string | null;
     payee_bank?: string | null;
@@ -302,21 +392,14 @@ export interface Lddap {
     review_note?: string | null;
     is_final?: boolean;
     status_label?: string;
-    /** Which single next step the status allows. */
-    /** "Edit LDDAP Record" is offered: Registered or RTS only. */
+    /** "Edit LDDAP Record" is offered: For Signature or RTS only. */
     can_edit?: boolean;
-    can_forward?: boolean;
-    can_receive?: boolean;
+    /** For Signature: RTS and Cancel (admin) are offered. */
     awaits_action?: boolean;
-
-    /** The most recent forward and return. */
-    forward_to?: string | null;
-    forward_unit_name?: string | null;
-    forwarded_by?: { id: number; name: string; username: string } | null;
-    date_forwarded?: string | null;
-    return_unit_name?: string | null;
-    returned_by?: { id: number; name: string; username: string } | null;
-    date_returned?: string | null;
+    /** RTS: Resubmit is offered. */
+    can_resubmit?: boolean;
+    /** For Signature and on no ACIC: Assign LDDAP to ACIC is offered. */
+    is_acic_eligible?: boolean;
 
     /** The cancellation, when there is one. */
     canceled_by?: { id: number; name: string; username: string } | null;
@@ -370,16 +453,19 @@ export interface ProposedLddapUpdate {
 export interface LddapDraft {
     lddap_no: string;
     nca_no: string;
-    orb_no: string;
+    obr_no: string;
     dv_no: string;
     nature_of_payment: string;
     /** The UACS object code. */
     obj_no: string;
-    unit_id: string;
+    /** A PCG unit name from the shared list; "" until one is chosen. */
+    unit_name: string;
     check_date: string;
-    /** Chosen from the payee lookup; the pick carries its accounts for the account select. */
-    payee: Payee | null;
-    payee_account_id: number | null;
+    /**
+     * The payee: a fresh pick from the Creditors / PCG Personnel search (`id` set), or — when
+     * editing — the copy already saved on the record (`id` null), kept unless re-picked.
+     */
+    payee: PayeeOption | null;
     acic_ref: string;
 
     /** The payment breakdown; `amount` (net) is derived server-side from these. */
@@ -396,26 +482,22 @@ export interface LddapDraft {
     remarks: string;
 }
 
-/** An office unit an LDDAP is drawn for. */
-export interface Unit {
-    id: number;
+export type PayeeType = 'creditor' | 'pcg_personnel';
+
+/** One entry in the payee search: a Creditor or PCG Personnel record. */
+export interface PayeeOption {
+    type: PayeeType | null;
+    /** "Creditor" or "PCG Personnel". */
+    type_label: string | null;
+    /** The source record's id; null for a payee already saved on an LDDAP (a copy, no link). */
+    id: number | null;
     name: string;
+    account_no: string | null;
+    unit?: string | null;
 }
 
-/** One of a payee's bank accounts, labelled "account number – bank" for a select. */
-export interface PayeeAccount {
-    id: number;
-    account_no: string;
-    bank: string;
-    label: string;
-}
-
-/** A registered payee with the accounts a payment can go to. */
-export interface Payee {
-    id: number;
-    name: string;
-    accounts: PayeeAccount[];
-}
+/** The LDDAP table's Payee Type filter: which list the payee came from. */
+export type PayeeTypeFilter = 'all' | 'creditor' | 'pcg_personnel';
 
 /** The LDDAP table's filter bar, as sent to `GET /lddaps` (and kept in the page's URL). */
 export interface LddapListFilters {
@@ -424,6 +506,8 @@ export interface LddapListFilters {
     status?: LddapStatus | 'all' | '';
     /** "all" (or empty) for every nature of payment. */
     nature?: string;
+    /** "all" (or empty) for every payee type. */
+    payeeType?: PayeeTypeFilter;
     page?: number;
     perPage?: number;
 }
@@ -431,7 +515,6 @@ export interface LddapListFilters {
 /** What the register dialog's selects offer. */
 export interface LddapOptions {
     natures: { value: string; label: string }[];
-    units: Unit[];
 }
 
 /** Counts for the LDDAP check series. */
@@ -460,13 +543,29 @@ export interface AcicSeries {
  *   pending → accepted_by_teller → completed
  *                                      └─▶ returned_by_bank → completed again
  */
-export type AcicTellerStatus = 'pending' | 'accepted_by_teller' | 'returned_by_bank' | 'completed';
+export type AcicTellerStatus =
+    | 'pending'
+    | 'accepted_by_teller'
+    | 'forwarded_to_land_bank'
+    | 'forwarded_to_payee'
+    | 'rts'
+    | 'returned_by_bank'
+    | 'completed';
 
-/** The teller dashboard's five lists. */
+/** Where the accepting teller forwards an ACIC. */
+export type TellerForwardTo = 'land_bank' | 'payee';
+
+/** What the teller says became of a check on an RTS. Stale is for cheques only. */
+export type RtsOutcome = 'completed' | 'returned' | 'cancelled' | 'stale';
+
+/** The teller dashboard's lists. */
 export interface TellerQueue {
     pending: Acic[];
     accepted: Acic[];
-    returned: Acic[];
+    /** Out with Land Bank or the payee, awaiting the Action. */
+    forwarded: Acic[];
+    /** RTS'd (older ACICs: returned by the bank) — forward again or hand back. */
+    rts: Acic[];
     completed: Acic[];
     bank_name: string;
 }
@@ -486,6 +585,25 @@ export interface AcicHistoryStep {
 }
 
 export type AcicStatus = 'open' | 'used' | 'approved' | 'forwarded' | 'completed';
+
+/**
+ * The status the ACIC tables show: its own while it is with the admin, then the teller's from
+ * the moment it is forwarded to the tellers (Pending until one accepts).
+ */
+/** The ACIC tiles on the dashboard, over the ACICs the viewer may see. */
+export type DashboardAcicTile = 'open' | 'used' | 'approved' | 'pending' | 'completed';
+
+export type AcicDisplayStatus =
+    | 'open'
+    | 'used'
+    | 'approved'
+    | 'forwarded'
+    | 'pending'
+    | 'accepted_by_teller'
+    | 'forwarded_to_land_bank'
+    | 'forwarded_to_payee'
+    | 'rts'
+    | 'completed';
 
 /** The header block, totals and signatories printed on the ACIC form. */
 export interface AcicForm {
@@ -538,6 +656,10 @@ export interface Acic {
     type?: 'cheque' | 'lddap' | null;
     type_label?: string | null;
     /** Where it stands with the tellers and the bank. Null until it is forwarded. */
+    display_status: AcicDisplayStatus;
+    display_status_label: string;
+    /** A teller may accept it: it is Pending. */
+    can_accept?: boolean;
     teller_status?: AcicTellerStatus | null;
     teller_status_label?: string | null;
     forwarded_to_land_bank_at?: string | null;
@@ -564,6 +686,24 @@ export interface Acic {
     deposit_note?: string | null;
     returned_to_admin_at?: string | null;
     return_reason?: string | null;
+
+    /** The accepting teller's Forward and Action. */
+    teller_forwarded_to?: TellerForwardTo | null;
+    teller_forwarded_by?: { id: number; name: string } | null;
+    teller_forwarded_at?: string | null;
+    teller_action_by?: { id: number; name: string } | null;
+    teller_action_at?: string | null;
+    rts_reason?: string | null;
+    /** Only the teller who accepted it may Forward it or take the Action. */
+    can_teller_forward?: boolean;
+    /** Where the accepting teller's Forward buttons may send it: LBP always; the payee for a cheque ACIC. */
+    teller_forward_options?: TellerForwardTo[];
+    /** Forward to Payee — a cheque ACIC, its accepting teller, while any cheque is left to go. */
+    can_forward_to_payee?: boolean;
+    /** "3/5 forwarded to payee" — of the cheques that can go (not stale, not settled). */
+    payee_progress?: { forwarded: number; total: number } | null;
+    can_teller_act?: boolean;
+    can_return_to_admin?: boolean;
 }
 
 /** How many cheques sit on each status, plus the total. Keyed by `ChequeStatus`. */
@@ -598,14 +738,14 @@ export interface SeriesGlance {
 /** `GET /dashboard`: attention items by role, then every register's counts. */
 export interface Dashboard {
     attention: AttentionItem[];
-    cheques: Summary;
+    cheques: { counts: Counts };
     lddaps: {
         counts: Record<'total' | LddapStatus, number>;
         awaiting_acic: number;
         on_acic: number;
     };
     acics: {
-        counts: Record<'total' | AcicStatus, number>;
+        counts: Record<'total' | DashboardAcicTile, number>;
     };
     series: {
         cheques: SeriesGlance;
@@ -616,7 +756,7 @@ export interface Dashboard {
     recent: Pick<ChequeLog, 'id' | 'username' | 'action' | 'cheque_number' | 'description' | 'created_at'>[];
 }
 
-export type NotificationKind = 'request' | 'approved' | 'rejected' | 'used' | 'expiring' | 'stale';
+export type NotificationKind = 'request' | 'approved' | 'rejected' | 'used' | 'expiring' | 'stale' | 'spoiled';
 
 export interface AppNotification {
     id: string;
@@ -657,4 +797,22 @@ export interface PageMeta {
 export interface Paginated<T> {
     data: T[];
     meta: PageMeta;
+}
+
+/** A creditor or PCG personnel entry. Date Created and Added By are stamped by the server. */
+export interface AccountHolder {
+    id: number;
+    name: string;
+    /** Text, never a number — leading zeros are part of it. */
+    account_no: string;
+    unit: string | null;
+    created_at: string;
+    added_by: { id: number; name: string } | null;
+}
+
+/** What the Add form sends. */
+export interface AccountHolderDraft {
+    name: string;
+    account_no: string;
+    unit: string;
 }

@@ -5,40 +5,47 @@ namespace App\Enums;
 /**
  * Where a cheque is in its life. One ordered flow, enforced server-side:
  *
- *   Registered → Out for Signature → (Mark as Received) → For ACIC → Approved ─┬─▶ Released to Payee
- *                                                                              └─▶ Forwarded to Teller
- *                                                                                        → Accepted by Teller
- *                                                                                        → Completed
+ *   (blank) --Print Draft--> For Checking --Approve--> For Final Print --Final Print--> For Signature
+ *                 ↑                  └──Return (comment)──> For Compliance ──Print Draft──┘ (repeatable)
+ *   For Signature --Assign Cheque to ACIC--> Approved ─┬─▶ Released to Payee
+ *                                                      └─▶ Forwarded to Teller → Accepted by Teller → Completed
  *
- * `Available` sits outside the flow: it is a number the bank printed and an admin registered as
- * part of a book, waiting to be claimed. Registering a cheque claims the **lowest available**
- * number, which is the register's whole point, and the number is never reused.
+ * `Available` sits outside the flow: a number the bank printed and an admin registered as part of
+ * a book. Using a cheque claims the **lowest available** number and starts the flow with **no
+ * status shown** (stored as `registered`). Its details can be edited only then, and while it is
+ * For Compliance.
  *
- * Three ways out of the flow, each needing a reason: **RTS** (back to Registered), **Cancel**
- * (before a cheque is on an ACIC) and **Void** (once it is). `Stale` and `Replaced` come from
- * the 90-day validity clock, which runs against every status a cheque can be sitting in.
+ * Ways out, each needing a reason: **Cancel** (before an ACIC) and **Spoil** (once on one — the
+ * payment moves to a replacement cheque on the next available number). `Stale` and `Replaced`
+ * come from the 90-day validity clock, which runs against every status a cheque can sit in.
  */
 enum ChequeStatus: string
 {
     /** Registered as part of a book; not yet claimed. Outside the flow. */
     case Available = 'available';
 
-    /** Claimed from the book, with its payee, amount and date. The flow starts here. */
+    /** Claimed from the book, with its details; no draft printed yet. Shown with no status. */
     case Registered = 'registered';
 
-    /** Out with a signatory. */
+    /** A draft has been printed and is with the admin in charge (a Super Admin) for checking. */
+    case ForChecking = 'for_checking';
+
+    /** The draft was returned with a comment: the preparer corrects it and prints a new draft. */
+    case ForCompliance = 'for_compliance';
+
+    /** The draft was approved; the cheque may be printed for real. */
+    case ForFinalPrint = 'for_final_print';
+
+    /** Printed and confirmed; eligible for "Assign Cheque to ACIC". */
+    case ForSignature = 'for_signature';
+
+    /** Legacy — the old flow's routing step. Kept so older timeline rows still read. */
     case OutForSignature = 'out_for_signature';
 
-    /**
-     * Signed and back in the office.
-     *
-     * A **pass-through**: "Mark as Received" records the receipt and moves the cheque straight
-     * on to For ACIC in the same step, as the flow requires. The value exists so the status
-     * history can name the moment, and so older records that stopped here still read correctly.
-     */
+    /** Legacy — the old flow's receipt step. Kept so older timeline rows still read. */
     case Received = 'received';
 
-    /** Signed, back, and eligible for "Assign Cheque to ACIC". */
+    /** Legacy — the old flow's "awaiting an ACIC", now For Signature. Kept for older timeline rows. */
     case ForAcic = 'for_acic';
 
     /**
@@ -59,14 +66,26 @@ enum ChequeStatus: string
     /** The bank sent its ACIC back. It goes round again once the issue is fixed. */
     case ReturnedByBank = 'returned_by_bank';
 
+    /** Its ACIC was forwarded by the accepting teller to Land Bank. */
+    case ForwardedToLandBank = 'forwarded_to_land_bank';
+
+    /** Its ACIC was forwarded by the accepting teller to the payee. */
+    case ForwardedToPayee = 'forwarded_to_payee';
+
+    /** RTS'd by the teller: this check needs putting right before its ACIC goes out again. */
+    case Returned = 'returned';
+
     /** Credited and confirmed by the bank. Final. */
     case Completed = 'completed';
 
     /** Cancelled before it reached an ACIC. Final. */
     case Cancelled = 'cancelled';
 
-    /** Voided once on an ACIC. The number stays used and is never reassigned. Final. */
-    case Voided = 'voided';
+    /**
+     * Spoiled once on an ACIC: the number is used up and the payment moves to a replacement
+     * cheque (`replaced_by_id`). The number is never reassigned. Final. (Formerly "Voided".)
+     */
+    case Spoiled = 'spoiled';
 
     /** Past its 90-day validity. Replaceable, but otherwise final. */
     case Stale = 'stale';
@@ -74,25 +93,39 @@ enum ChequeStatus: string
     /** A stale cheque a replacement was issued for. Final. */
     case Replaced = 'replaced';
 
+    /** The status as the UI names it. A cheque with no draft yet shows none. */
     public function label(): string
     {
         return match ($this) {
             self::Available => 'Available',
-            self::Registered => 'Registered',
+            self::Registered => '',
+            self::ForChecking => 'For Checking',
+            self::ForCompliance => 'For Compliance',
+            self::ForFinalPrint => 'For Final Print',
+            self::ForSignature => 'For Signature',
             self::OutForSignature => 'Out for Signature',
             self::Received => 'Received',
             self::ForAcic => 'For ACIC',
             self::Approved => 'Approved',
             self::ReleasedToPayee => 'Released to Payee',
             self::ForwardedToTeller => 'Forwarded to Teller',
-            self::AcceptedByTeller => 'Accepted by Teller',
+            self::AcceptedByTeller => 'Accepted',
             self::ReturnedByBank => 'Returned by Bank',
+            self::ForwardedToLandBank => 'Forwarded to LBP',
+            self::ForwardedToPayee => 'Forwarded to Payee',
+            self::Returned => 'Returned',
             self::Completed => 'Completed',
             self::Cancelled => 'Cancelled',
-            self::Voided => 'Voided',
+            self::Spoiled => 'Spoiled',
             self::Stale => 'Stale',
             self::Replaced => 'Replaced',
         };
+    }
+
+    /** For a sentence: "Cheque #5 is {described}" — the blank status still needs words there. */
+    public function describe(): string
+    {
+        return $this === self::Registered ? 'awaiting its first draft' : $this->label();
     }
 
     /**
@@ -106,23 +139,24 @@ enum ChequeStatus: string
     {
         return match ($this) {
             self::Available => [self::Registered],
-            self::Registered => [self::OutForSignature, self::Cancelled, self::Stale],
-            // Received is the step out of here; it resolves to For ACIC in the same breath.
-            self::OutForSignature => [self::Received, self::Registered, self::Cancelled, self::Stale],
-            // Received is a pass-through; it resolves to For ACIC in the same step.
-            self::Received => [self::ForAcic, self::Registered, self::Cancelled, self::Stale],
-            self::ForAcic => [self::Approved, self::Registered, self::Cancelled, self::Stale],
-            // ForAcic is the way back when the cheque is re-assigned off the ACIC.
-            self::Approved => [self::ReleasedToPayee, self::ForwardedToTeller, self::Voided, self::Stale, self::ForAcic],
+            self::Registered => [self::ForChecking, self::Cancelled, self::Stale],
+            self::ForChecking => [self::ForFinalPrint, self::ForCompliance, self::Cancelled, self::Stale],
+            // Corrected, then a new draft goes back for checking — as often as it takes.
+            self::ForCompliance => [self::ForChecking, self::Cancelled, self::Stale],
+            self::ForFinalPrint => [self::ForSignature, self::Cancelled, self::Stale],
+            self::ForSignature => [self::Approved, self::Cancelled, self::Stale],
+            // For Signature is the way back when the cheque is re-assigned off the ACIC.
+            self::Approved => [self::ReleasedToPayee, self::ForwardedToTeller, self::Spoiled, self::Stale, self::ForSignature],
             // The teller steps, and Return to Admin from either of them.
             self::ForwardedToTeller => [self::AcceptedByTeller, self::Approved, self::Stale],
-            // Confirm and Complete closes it straight from here; lodging with the bank is
-            // part of that step, not a resting place of its own.
-            self::AcceptedByTeller => [self::Completed, self::Approved, self::Stale],
-            // The bank may send back an ACIC that was already closed; putting it right
-            // completes it again.
-            self::Completed => [self::ReturnedByBank],
-            self::ReturnedByBank => [self::Completed, self::Approved, self::Stale],
+            // The accepting teller forwards it — to Land Bank or to the payee.
+            self::AcceptedByTeller => [self::ForwardedToLandBank, self::ForwardedToPayee, self::Approved, self::Stale],
+            // The teller's Action: Completed, or RTS — which gives each check its own outcome.
+            self::ForwardedToLandBank, self::ForwardedToPayee => [self::Completed, self::Returned, self::Cancelled, self::Stale],
+            // Put right, and out again; or back to the admin.
+            self::Returned => [self::ForwardedToLandBank, self::ForwardedToPayee, self::Approved, self::Stale],
+            // Older rows from the retired Confirm and Complete flow.
+            self::ReturnedByBank => [self::ForwardedToLandBank, self::ForwardedToPayee, self::Completed, self::Approved, self::Stale],
             // A released cheque still ages: it can go stale uncashed.
             self::ReleasedToPayee => [self::Stale],
             self::Stale => [self::Replaced],
@@ -147,10 +181,34 @@ enum ChequeStatus: string
         return $this->nextStates() === [] || $this === self::Stale;
     }
 
-    /** May it be put on an ACIC? Only For ACIC cheques are offered. */
+    /** May it be put on an ACIC? Only For Signature cheques are offered. */
     public function isAcicEligible(): bool
     {
-        return $this === self::ForAcic;
+        return $this === self::ForSignature;
+    }
+
+    /** Its details (payee, account no., unit, amount, date) may be edited only now. */
+    public function isEditable(): bool
+    {
+        return $this === self::Registered || $this === self::ForCompliance;
+    }
+
+    /** "Print Draft" submits the cheque for checking: first time, or after a Return. */
+    public function canPrintDraft(): bool
+    {
+        return $this === self::Registered || $this === self::ForCompliance;
+    }
+
+    /** The draft printout may be viewed while the cheque is being drafted and checked. */
+    public function showsDraft(): bool
+    {
+        return in_array($this, [self::Registered, self::ForChecking, self::ForCompliance], true);
+    }
+
+    /** The clean, final cheque face may be printed from here on. */
+    public function showsFinal(): bool
+    {
+        return $this === self::ForFinalPrint || $this === self::ForSignature || $this->isOnAcic();
     }
 
     /** Is the cheque on an ACIC, in any of the states that implies? */
@@ -158,24 +216,19 @@ enum ChequeStatus: string
     {
         return in_array($this, [
             self::Approved, self::ForwardedToTeller, self::AcceptedByTeller,
+            self::ForwardedToLandBank, self::ForwardedToPayee, self::Returned,
             self::ReturnedByBank, self::Completed, self::ReleasedToPayee,
         ], true);
-    }
-
-    /** RTS sends a cheque back to Registered. Allowed only while it is still in the office. */
-    public function canRts(): bool
-    {
-        return in_array($this, [self::OutForSignature, self::Received, self::ForAcic], true);
     }
 
     /** Cancel is for a cheque that never reached an ACIC. */
     public function canCancel(): bool
     {
-        return in_array($this, [self::Registered, self::OutForSignature, self::Received, self::ForAcic], true);
+        return in_array($this, [self::Registered, self::ForChecking, self::ForCompliance, self::ForFinalPrint, self::ForSignature], true);
     }
 
-    /** Void is for one that did — but not once a teller has it. */
-    public function canVoid(): bool
+    /** Spoil is for one that did — but not once a teller has it. */
+    public function canSpoil(): bool
     {
         return $this === self::Approved;
     }
@@ -189,8 +242,9 @@ enum ChequeStatus: string
     public static function perishable(): array
     {
         return [
-            self::Registered, self::OutForSignature, self::Received, self::ForAcic,
+            self::Registered, self::ForChecking, self::ForCompliance, self::ForFinalPrint, self::ForSignature,
             self::Approved, self::ForwardedToTeller, self::AcceptedByTeller,
+            self::ForwardedToLandBank, self::ForwardedToPayee, self::Returned,
             self::ReturnedByBank, self::ReleasedToPayee,
         ];
     }
@@ -204,12 +258,17 @@ enum ChequeStatus: string
     public function stage(): string
     {
         return match ($this) {
-            self::Registered => 'registered, never routed',
-            self::OutForSignature => 'out for signature, never returned',
-            self::Received, self::ForAcic => 'awaiting an ACIC',
+            self::Registered => 'no draft printed yet',
+            self::ForChecking => 'draft awaiting checking',
+            self::ForCompliance => 'draft returned for compliance',
+            self::ForFinalPrint => 'approved, not yet printed',
+            self::ForSignature => 'printed, awaiting signature and an ACIC',
             self::Approved => 'approved on an ACIC, neither released nor forwarded',
             self::ForwardedToTeller => 'with the tellers, unclaimed',
-            self::AcceptedByTeller => 'with a teller, not yet lodged with the bank',
+            self::AcceptedByTeller => 'with a teller, not yet forwarded',
+            self::ForwardedToLandBank => 'forwarded to Land Bank, awaiting completion',
+            self::ForwardedToPayee => 'forwarded to the payee, awaiting completion',
+            self::Returned => 'returned (RTS) by the teller',
             self::ReturnedByBank => 'sent back by the bank',
             self::ReleasedToPayee => 'released, not encashed',
             default => $this->label(),
@@ -220,11 +279,12 @@ enum ChequeStatus: string
     public function tag(): ?string
     {
         return match ($this) {
-            self::Registered, self::OutForSignature => 'Unsigned',
+            self::Registered, self::ForChecking, self::ForCompliance, self::ForFinalPrint, self::ForSignature => 'Unsigned',
             self::ReleasedToPayee => 'With payee',
-            self::ForwardedToTeller, self::AcceptedByTeller => 'With teller',
-            self::ReturnedByBank => 'With bank',
-            self::Received, self::ForAcic, self::Approved => 'In office',
+            self::ForwardedToTeller, self::AcceptedByTeller, self::Returned => 'With teller',
+            self::ForwardedToPayee => 'With payee',
+            self::ForwardedToLandBank, self::ReturnedByBank => 'With bank',
+            self::Approved => 'In office',
             default => null,
         };
     }

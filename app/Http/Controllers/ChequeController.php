@@ -5,18 +5,25 @@ namespace App\Http\Controllers;
 use App\Enums\ChequeStatus;
 use App\Enums\UserRole;
 use App\Http\Requests\AddChequeRangeRequest;
+use App\Http\Requests\CheckDraftRequest;
 use App\Http\Requests\ChequeExceptionRequest;
+use App\Http\Requests\ChequePrepareRequest;
 use App\Http\Requests\IndexChequesRequest;
-use App\Http\Requests\ReceiveChequeRequest;
 use App\Http\Requests\ReleaseChequeRequest;
-use App\Http\Requests\RouteChequeRequest;
+use App\Http\Requests\ReplaceChequeRequest;
+use App\Http\Requests\SpoilChequeRequest;
+use App\Http\Requests\UpdateChequeDetailsRequest;
 use App\Http\Requests\UseChequeRequest;
+use App\Http\Requests\UsePreviousAcicRequest;
+use App\Http\Resources\AcicResource;
 use App\Http\Resources\ChequeResource;
 use App\Models\Cheque;
 use App\Models\User;
 use App\Services\AcicService;
 use App\Services\ChequeFlowService;
 use App\Services\ChequeService;
+use App\Services\ChequeSpoilService;
+use App\Services\ChequeStaleService;
 use App\Support\AmountInWords;
 use App\Support\Validity;
 use Illuminate\Http\JsonResponse;
@@ -40,8 +47,7 @@ class ChequeController extends Controller
         $status = (string) $request->query('status', 'all');
 
         $query = Cheque::query()
-            ->with(['usedBy', 'receivedBy', 'reviewedBy', 'acic', 'forwardedTo', 'releasedBy', 'replacedBy', 'replaces'])
-            ->withCount(['updateRequests as pending_update_count' => fn ($q) => $q->where('status', 'pending')]);
+            ->with(['usedBy', 'receivedBy', 'reviewedBy', 'acic', 'forwardedTo', 'releasedBy', 'replacedBy', 'replaces.spoiledFromAcic', 'spoiledBy', 'spoiledFromAcic']);
 
         if (ChequeStatus::tryFrom($status) !== null) {
             $query->where('status', $status);
@@ -73,8 +79,21 @@ class ChequeController extends Controller
 
             $query->where(function ($q) use ($term) {
                 $q->whereRaw("CAST(cheque_number AS TEXT) LIKE ? ESCAPE '\\'", [$term])
-                    ->orWhereHas('acic', fn ($a) => $a->whereRaw("CAST(acic_number AS TEXT) LIKE ? ESCAPE '\\'", [$term]));
+                    ->orWhereRaw("LOWER(payee_name) LIKE ? ESCAPE '\\'", [$term])
+                    ->orWhereRaw("LOWER(account_no) LIKE ? ESCAPE '\\'", [$term]);
             });
+        }
+
+        if (($unit = $request->unit()) !== null) {
+            $query->where('unit_name', $unit);
+        }
+
+        // The cheque date, both ends included.
+        if ($request->filled('date_from')) {
+            $query->whereDate('cheque_date', '>=', $request->string('date_from')->toString());
+        }
+        if ($request->filled('date_to')) {
+            $query->whereDate('cheque_date', '<=', $request->string('date_to')->toString());
         }
 
         return ChequeResource::collection(
@@ -98,7 +117,7 @@ class ChequeController extends Controller
             'data' => [
                 'expiring_soon' => [
                     'total' => $soon->count(),
-                    'assigned' => $count(ChequeStatus::Registered, ChequeStatus::OutForSignature),
+                    'assigned' => $count(ChequeStatus::Registered, ChequeStatus::ForChecking, ChequeStatus::ForCompliance, ChequeStatus::ForFinalPrint, ChequeStatus::ForSignature),
                     'released' => $count(ChequeStatus::ReleasedToPayee),
                     'for_deposit' => $count(ChequeStatus::ForwardedToTeller, ChequeStatus::AcceptedByTeller),
                 ],
@@ -117,19 +136,39 @@ class ChequeController extends Controller
         ]);
     }
 
-    /** Step 2 — route a registered cheque out for signature. */
-    public function routeForSignature(RouteChequeRequest $request, Cheque $cheque): JsonResponse
+    /** Print Draft — submit the cheque to the admin in charge for checking. */
+    public function printDraft(ChequePrepareRequest $request, Cheque $cheque): JsonResponse
     {
-        return $this->asResource($this->flow->routeForSignature(
-            $request->user(), $cheque, $request->validated(), $request->expectedStatus(),
+        return $this->asResource($this->flow->printDraft($request->user(), $cheque, $request->expectedStatus()));
+    }
+
+    /** Super Admin: the draft is correct — For Final Print. */
+    public function approveDraft(CheckDraftRequest $request, Cheque $cheque): JsonResponse
+    {
+        return $this->asResource($this->flow->approveDraft(
+            $request->user(), $cheque, $request->validated('comment'), $request->expectedStatus(),
         ));
     }
 
-    /** Step 3 — the signed cheque is back; it carries straight on to For ACIC. */
-    public function markAsReceived(ReceiveChequeRequest $request, Cheque $cheque): JsonResponse
+    /** Super Admin: the draft is not correct — For Compliance, with what to change. */
+    public function returnDraft(CheckDraftRequest $request, Cheque $cheque): JsonResponse
     {
-        return $this->asResource($this->flow->markAsReceived(
-            $request->user(), $cheque, $request->validated(), $request->expectedStatus(),
+        return $this->asResource($this->flow->returnDraft(
+            $request->user(), $cheque, (string) $request->validated('comment'), $request->expectedStatus(),
+        ));
+    }
+
+    /** The final print came out right — For Signature. */
+    public function confirmFinalPrint(ChequePrepareRequest $request, Cheque $cheque): JsonResponse
+    {
+        return $this->asResource($this->flow->confirmFinalPrint($request->user(), $cheque, $request->expectedStatus()));
+    }
+
+    /** Edit the details — before the first draft, or while For Compliance. */
+    public function update(UpdateChequeDetailsRequest $request, Cheque $cheque): JsonResponse
+    {
+        return $this->asResource($this->flow->updateDetails(
+            $request->user(), $cheque, $request->safe()->except('expected_status'), $request->expectedStatus(),
         ));
     }
 
@@ -141,14 +180,6 @@ class ChequeController extends Controller
         ));
     }
 
-    /** RTS — back to Registered, with a reason. */
-    public function rts(ChequeExceptionRequest $request, Cheque $cheque): JsonResponse
-    {
-        return $this->asResource($this->flow->rts(
-            $request->user(), $cheque, $request->validated('reason'), $request->expectedStatus(),
-        ));
-    }
-
     /** Cancel — final, before the cheque reaches an ACIC. */
     public function cancel(ChequeExceptionRequest $request, Cheque $cheque): JsonResponse
     {
@@ -157,12 +188,30 @@ class ChequeController extends Controller
         ));
     }
 
-    /** Void — final, on an ACIC only. The number stays used. */
-    public function void(ChequeExceptionRequest $request, Cheque $cheque): JsonResponse
+    /**
+     * Spoil — final, on an ACIC only. The number stays used, and the payment moves to a
+     * replacement on the next available number, which the response carries as `replaced_by`.
+     */
+    public function spoil(SpoilChequeRequest $request, Cheque $cheque): JsonResponse
     {
-        return $this->asResource($this->flow->void(
-            $request->user(), $cheque, $request->validated('reason'), $request->expectedStatus(),
+        return $this->asResource(app(ChequeSpoilService::class)->spoil(
+            $request->user(),
+            $cheque,
+            $request->validated('reason'),
+            $request->expectedStatus(),
+            $request->filled('replacement_number') ? $request->integer('replacement_number') : null,
         ));
+    }
+
+    /**
+     * Admin/staff: "Use previous ACIC" — the replacement of a spoiled cheque takes its place on
+     * the ACIC it came off, while that ACIC is still with the admin.
+     */
+    public function usePreviousAcic(UsePreviousAcicRequest $request, Cheque $cheque): JsonResponse
+    {
+        $acic = app(ChequeSpoilService::class)->usePreviousAcic($request->user(), $cheque, $request->expectedStatus());
+
+        return response()->json(['data' => new AcicResource($acic)]);
     }
 
     /** Admin: issue a replacement for a stale cheque, on the next available number. */
@@ -174,13 +223,34 @@ class ChequeController extends Controller
         );
     }
 
-    /** Every step the cheque has taken, oldest first. */
+    /**
+     * Every step the cheque has taken, oldest first — starting with the moment it was used.
+     *
+     * Using a cheque is recorded on the cheque itself (`used_by`, `used_at`), not as a history
+     * row, so that first entry is built from those: it is there for every used cheque, however
+     * old, and can never disagree with the cheque.
+     */
     public function statusHistory(Cheque $cheque): JsonResponse
     {
         $rows = $cheque->statusHistory()->with(['user:id,name', 'acic:id,acic_number'])->orderBy('id')->get();
+        $cheque->loadMissing(['usedBy:id,name', 'replaces:id,cheque_number']);
+
+        $used = $cheque->used_at === null ? [] : [[
+            'id' => 0,
+            'from_status' => ChequeStatus::Available->value,
+            'from_status_label' => ChequeStatus::Available->label(),
+            'to_status' => ChequeStatus::Registered->value,
+            'to_status_label' => ChequeStatus::Registered->label(),
+            'action' => 'used',
+            'user' => $cheque->usedBy?->only(['id', 'name']),
+            'acic_number' => null,
+            'details' => null,
+            'note' => $cheque->replaces ? "Replaces cheque #{$cheque->replaces->cheque_number}." : null,
+            'created_at' => $cheque->used_at->toIso8601String(),
+        ]];
 
         return response()->json([
-            'data' => $rows->map(fn ($h) => [
+            'data' => collect($used)->concat($rows->map(fn ($h) => [
                 'id' => $h->id,
                 'from_status' => $h->from_status?->value,
                 'from_status_label' => $h->from_status?->label(),
@@ -192,7 +262,7 @@ class ChequeController extends Controller
                 'details' => $h->details,
                 'note' => $h->note,
                 'created_at' => $h->created_at?->toIso8601String(),
-            ])->values(),
+            ]))->values(),
         ]);
     }
 
@@ -241,6 +311,8 @@ class ChequeController extends Controller
             $request->integer('cheque_number'),
             [
                 'payee_name' => $request->input('payee_name'),
+                'account_no' => $request->filled('account_no') ? trim($request->string('account_no')) : null,
+                'unit_name' => $request->input('unit_name') ?: null,
                 'amount' => $request->input('amount'),
                 'cheque_date' => $request->date('cheque_date'),
             ],
@@ -251,14 +323,18 @@ class ChequeController extends Controller
 
     /**
      * What the cheque view prints: the cheque's own fields, the amount spelled the cheque way,
-     * the account it is drawn on, and its references. Only an **approved** cheque has a view —
-     * nothing is printed before sign-off.
+     * the account it is drawn on, and its references.
+     *
+     * Before the draft is approved it prints as a **draft** (`draft: true`, watermarked, no ACIC);
+     * from For Final Print on it prints clean. A cancelled, spoiled or stale cheque has no view.
      */
     public function print(Cheque $cheque): JsonResponse
     {
-        if (! $cheque->status->isOnAcic()) {
+        $status = $cheque->status;
+
+        if (! $status->showsDraft() && ! $status->showsFinal()) {
             throw ValidationException::withMessages([
-                'cheque' => "Cheque #{$cheque->cheque_number} is {$cheque->status->label()} — only an approved cheque can be viewed and printed.",
+                'cheque' => "Cheque #{$cheque->cheque_number} is {$status->describe()} — it has no printable view.",
             ]);
         }
 
@@ -279,6 +355,8 @@ class ChequeController extends Controller
                 'acic_number' => $cheque->acic?->acic_number,
                 // A cheque carries no LDDAP number; the slot is here for the reference line.
                 'lddap_no' => null,
+                // Printed as a draft until the admin in charge approves it.
+                'draft' => $status->showsDraft(),
             ],
         ]);
     }

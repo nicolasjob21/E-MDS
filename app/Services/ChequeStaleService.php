@@ -111,6 +111,8 @@ class ChequeStaleService
 
             $replacement = $this->cheques->useNext($admin, $next->cheque_number, [
                 'payee_name' => $stale->payee_name,
+                'account_no' => $stale->account_no,
+                'unit_name' => $stale->unit_name,
                 'amount' => $stale->amount,
                 'cheque_date' => $date->toDateString(),
             ]);

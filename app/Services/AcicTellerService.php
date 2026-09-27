@@ -133,114 +133,337 @@ class AcicTellerService
         });
     }
 
-    // ------------------------------------------------- 3. lodged with the bank, and closed
+    // ------------------------------------------- 3. forwarded to Land Bank or to the payee
+
+    /** Where the accepting teller may forward an ACIC. */
+    public const FORWARD_TO = [
+        'land_bank' => AcicTellerStatus::ForwardedToLandBank,
+        'payee' => AcicTellerStatus::ForwardedToPayee,
+    ];
 
     /**
-     * **Confirm and Complete.** Lodging the ACIC with Land Bank and closing it are one step:
-     * the teller records when it went over the counter, and the ACIC and every record on it
-     * become Completed.
-     *
-     * Taken the first time from Accepted by Teller, and again after the bank has sent it back —
-     * each pass adding its own history row, never overwriting the last.
-     *
-     * @param  array{forwarded_at?: string|null, note?: string|null}  $details
+     * **Forward** — the accepting teller takes the ACIC to Land Bank or to the payee. From
+     * Accepted, or again after an RTS. Records who and when; every record still in play moves
+     * with it (after an RTS, only those it Returned).
      *
      * @throws ValidationException
      */
-    public function confirmAndComplete(User $teller, Acic $acic, array $details, ?string $expected = null): Acic
+    public function forward(User $teller, Acic $acic, string $to, ?string $expected = null): Acic
     {
-        return DB::transaction(function () use ($teller, $acic, $details, $expected) {
+        return DB::transaction(function () use ($teller, $acic, $to, $expected) {
             $acic = $this->lock($acic);
             $from = $acic->teller_status;
-            $this->assertAccepter($teller, $acic);
-            $this->assertMove($acic, AcicTellerStatus::Completed, $expected);
+            $this->assertOnlyAccepter($teller, $acic);
 
-            $at = $this->moment($details['forwarded_at'] ?? null);
-            $this->assertNotFuture($at, 'forwarded_at');
-            $this->assertNotBefore($at, $acic->accepted_at, 'forwarded_at', 'the date and time the ACIC was accepted');
-
-            // Completing after a return has to come after that return, not before it.
-            $this->assertNotBefore($at, $acic->returned_by_bank_at, 'forwarded_at', 'the date and time the bank returned it');
-
-            $acic->update([
-                'teller_status' => AcicTellerStatus::Completed,
-                'forwarded_to_land_bank_at' => $at,
-                'completion_note' => $this->text($details['note'] ?? null),
-                'completed_by' => $teller->id,
-                'completed_at' => Carbon::now(),
-                'status' => AcicStatus::Completed,
-                // The bank's last return is settled by this pass.
-                'returned_by_bank_at' => null,
-                'bank_return_reason' => null,
+            $status = self::FORWARD_TO[$to] ?? throw ValidationException::withMessages([
+                'to' => 'Choose Forward to LBP or Forward to Payee.',
             ]);
 
-            // Whatever the bank sent back has been put right, or it would not be going again.
-            $acic->cheques()->update(['returned_by_bank' => false, 'bank_return_note' => null]);
-            $acic->lddaps()->update(['returned_by_bank' => false, 'bank_return_note' => null]);
+            // Never twice: a second click, or a second tab, is refused under the lock.
+            if ($from?->isForwarded() === true) {
+                throw ValidationException::withMessages([
+                    'acic' => "ACIC #{$acic->acic_number} has already been forwarded ".($from === AcicTellerStatus::ForwardedToLandBank ? 'to LBP' : 'to the payee').'.',
+                ]);
+            }
 
-            $this->moveRecords($teller, $acic, $acic->records(), ChequeStatus::Completed, LddapStatus::Completed, 'completed');
-            $this->trail($acic, $from, AcicTellerStatus::Completed,
-                $from === AcicTellerStatus::ReturnedByBank ? 're_completed' : 'completed',
-                $teller, ['forwarded_at' => $at->toDateTimeString()] + $details);
+            $this->assertMove($acic, $status, $expected);
+
+            // An LDDAP ACIC goes to LBP only; the payee route is for cheques.
+            if ($to === 'payee' && ! $acic->canGoToPayee()) {
+                throw ValidationException::withMessages([
+                    'to' => "ACIC #{$acic->acic_number} carries LDDAP records, which are forwarded to LBP only.",
+                ]);
+            }
+
+            // Cheques go to their payees one or several at a time, with who received them.
+            if ($to === 'payee') {
+                throw ValidationException::withMessages([
+                    'to' => 'Use Forward to Payee to hand cheques over — one, several or all, with who received them.',
+                ]);
+            }
+
+            // One ACIC is never split between LBP and payees.
+            if ($acic->hasChequesWithPayee()) {
+                throw ValidationException::withMessages([
+                    'to' => "Some cheques on ACIC #{$acic->acic_number} have already been forwarded to their payees, so it cannot go to LBP.",
+                ]);
+            }
+
+            $records = $this->activeRecords($acic);
+
+            if ($records->isEmpty()) {
+                throw ValidationException::withMessages([
+                    'acic' => "ACIC #{$acic->acic_number} has no checks left to forward.",
+                ]);
+            }
+
+            $now = Carbon::now();
+            $acic->update([
+                'teller_status' => $status,
+                'teller_forwarded_to' => $to,
+                'teller_forwarded_by' => $teller->id,
+                'teller_forwarded_at' => $now,
+                // Kept for the "To Land Bank" column the tables already show.
+                'forwarded_to_land_bank_at' => $to === 'land_bank' ? $now : $acic->forwarded_to_land_bank_at,
+                // A fresh trip: the last action is settled.
+                'teller_action_by' => null, 'teller_action_at' => null,
+            ]);
+
+            $chequeTo = $to === 'land_bank' ? ChequeStatus::ForwardedToLandBank : ChequeStatus::ForwardedToPayee;
+            $lddapTo = $to === 'land_bank' ? LddapStatus::ForwardedToLandBank : LddapStatus::ForwardedToPayee;
+
+            foreach ($records as $record) {
+                $this->moveRecord($teller, $acic, $record, $chequeTo, $lddapTo, $status->value, null, ['rts_status' => null]);
+            }
+
+            $this->trail($acic, $from, $status, $status->value, $teller, ['to' => $to, 'records' => $records->count()]);
 
             $this->tell($acic->forwardedToTellerBy, 'approved',
-                "ACIC #{$acic->acic_number} completed",
-                "{$teller->name} forwarded ACIC #{$acic->acic_number} to ".self::BANK.
-                    " on {$at->setTimezone(Validity::TZ)->toDayDateTimeString()} and completed it.");
+                "ACIC #{$acic->acic_number} {$status->label()}",
+                "{$teller->name} forwarded ACIC #{$acic->acic_number} ".($to === 'land_bank' ? 'to '.self::BANK : 'to the payee').'.');
 
             return $acic->fresh(self::WITH);
         });
     }
 
-    // ------------------------------------------------------------- 4. the bank sends it back
+    // ------------------------------------------------ 3b. cheques forwarded to their payees
 
     /**
-     * The bank returned a completed ACIC. The records it actually affected are flagged; the
-     * rest are left alone, so what has to be fixed is on the record that needs fixing.
+     * **Forward to Payee** — the accepting teller hands one, several or all of a cheque ACIC's
+     * cheques to their payees, recording who received them, when, and their unit (the same for
+     * the whole batch). Each becomes Forwarded to Payee; stale ones are never offered. When every
+     * cheque still in play has gone out, the ACIC itself becomes Forwarded to Payee and gets
+     * the Action.
      *
-     * @param  array{returned_at?: string|null, reason: string, cheque_ids?: list<int>, lddap_ids?: list<int>}  $details
+     * @param  list<int>  $chequeIds
      *
      * @throws ValidationException
      */
-    public function returnedByBank(User $teller, Acic $acic, array $details, ?string $expected = null): Acic
+    public function forwardChequesToPayee(User $teller, Acic $acic, array $chequeIds, string $receivedBy, string $dateReceived, string $unit, ?string $expected = null): Acic
     {
-        return DB::transaction(function () use ($teller, $acic, $details, $expected) {
+        return DB::transaction(function () use ($teller, $acic, $chequeIds, $receivedBy, $dateReceived, $unit, $expected) {
             $acic = $this->lock($acic);
-            $this->assertAccepter($teller, $acic);
-            $this->assertMove($acic, AcicTellerStatus::ReturnedByBank, $expected);
+            $from = $acic->teller_status;
+            $this->assertOnlyAccepter($teller, $acic);
 
-            $reason = trim((string) ($details['reason'] ?? ''));
-
-            if ($reason === '') {
-                throw ValidationException::withMessages(['reason' => 'Say why the bank returned this ACIC.']);
+            if ($expected !== null && $expected !== $from?->value) {
+                throw ValidationException::withMessages(['acic' => self::CONFLICT]);
             }
 
-            $at = $this->moment($details['returned_at'] ?? null);
-            $this->assertNotFuture($at, 'returned_at');
-            $this->assertNotBefore($at, $acic->forwarded_to_land_bank_at, 'returned_at', 'the date and time it was forwarded to the bank');
+            if (! $acic->canGoToPayee()) {
+                throw ValidationException::withMessages([
+                    'acic' => "ACIC #{$acic->acic_number} carries LDDAP records, which are forwarded to LBP only.",
+                ]);
+            }
 
-            // Default to every record; a subset may be named instead.
-            $affected = $this->affected($acic, $details);
+            if ($from === null || ! $from->canForward()) {
+                throw ValidationException::withMessages([
+                    'acic' => "ACIC #{$acic->acic_number} is ".($from?->label() ?? 'not with a teller').' — its cheques cannot be forwarded to their payees now.',
+                ]);
+            }
+
+            $today = Validity::today()->toDateString();
+            $accepted = $acic->accepted_at?->setTimezone(Validity::TZ)->toDateString();
+
+            if ($dateReceived > $today) {
+                throw ValidationException::withMessages(['date_received' => 'The date received cannot be in the future.']);
+            }
+
+            if ($accepted !== null && $dateReceived < $accepted) {
+                throw ValidationException::withMessages(['date_received' => "The date received cannot be before the ACIC was accepted ({$accepted})."]);
+            }
+
+            $chequeIds = array_values(array_unique(array_map('intval', $chequeIds)));
+            $cheques = $acic->cheques()->whereIn('id', $chequeIds)->lockForUpdate()->get();
+
+            if ($cheques->count() !== count($chequeIds)) {
+                throw ValidationException::withMessages(['cheque_ids' => "Only cheques on ACIC #{$acic->acic_number} can be forwarded."]);
+            }
+
+            $stale = $cheques->filter(fn (Cheque $c) => $c->effectiveStatus() === ChequeStatus::Stale);
+            if ($stale->isNotEmpty()) {
+                throw ValidationException::withMessages([
+                    'cheque_ids' => 'Stale cheques cannot be forwarded: #'.$stale->pluck('cheque_number')->sort()->implode(', #').'.',
+                ]);
+            }
+
+            $notReady = $cheques->reject(fn (Cheque $c) => in_array($c->status, self::IN_PLAY_CHEQUE, true));
+            if ($notReady->isNotEmpty()) {
+                throw ValidationException::withMessages([
+                    'cheque_ids' => 'Already forwarded or settled: #'.$notReady->pluck('cheque_number')->sort()->implode(', #').'.',
+                ]);
+            }
+
+            $now = Carbon::now();
+            $note = "Received by {$receivedBy} ({$unit}) on {$dateReceived}.";
+
+            foreach ($cheques as $cheque) {
+                $this->moveRecord($teller, $acic, $cheque, ChequeStatus::ForwardedToPayee, LddapStatus::ForwardedToPayee,
+                    'forwarded_to_payee', $note, [
+                        'received_by_name' => $receivedBy,
+                        'date_received' => $dateReceived,
+                        'payee_unit_name' => $unit,
+                        'released_by' => $teller->id,
+                        'released_at' => $now,
+                        'rts_status' => null,
+                    ]);
+            }
+
+            $numbers = $cheques->pluck('cheque_number')->sort()->values()->all();
+            $this->trail($acic, $from, $from, 'cheques_forwarded_to_payee', $teller, [
+                'cheques' => $numbers, 'received_by' => $receivedBy, 'date_received' => $dateReceived, 'unit' => $unit,
+            ], 'Cheque(s) #'.implode(', #', $numbers)." — {$note}");
+
+            // Every cheque still in play is out: the ACIC itself is now Forwarded to Payee.
+            if ($acic->chequesLeftForPayee()->isEmpty()) {
+                $acic->update([
+                    'teller_status' => AcicTellerStatus::ForwardedToPayee,
+                    'teller_forwarded_to' => 'payee',
+                    'teller_forwarded_by' => $teller->id,
+                    'teller_forwarded_at' => $now,
+                    'teller_action_by' => null, 'teller_action_at' => null,
+                ]);
+                $this->trail($acic, $from, AcicTellerStatus::ForwardedToPayee, 'forwarded_to_payee', $teller, ['records' => $acic->cheques()->count()]);
+
+                $this->tell($acic->forwardedToTellerBy, 'approved',
+                    "ACIC #{$acic->acic_number} forwarded to payees",
+                    "{$teller->name} forwarded every cheque on ACIC #{$acic->acic_number} to its payee.");
+            }
+
+            return $acic->fresh(self::WITH);
+        });
+    }
+
+    /** A cheque still with the teller: accepted, or Returned by an RTS (older: returned by the bank). */
+    public const IN_PLAY_CHEQUE = [ChequeStatus::AcceptedByTeller, ChequeStatus::Returned, ChequeStatus::ReturnedByBank];
+
+    // --------------------------------------------------------- 4. the Action: Completed
+
+    /**
+     * **Action → Completed.** Closes the ACIC and every check still out. Forwarded to the payee,
+     * each check needs who received it and when (`receipts`, keyed "cheque:ID" / "lddap:ID").
+     *
+     * @param  array<string, array{received_by: string, received_on: string}>  $receipts
+     *
+     * @throws ValidationException
+     */
+    public function complete(User $teller, Acic $acic, ?string $expected = null): Acic
+    {
+        return DB::transaction(function () use ($teller, $acic, $expected) {
+            $acic = $this->lock($acic);
+            $from = $acic->teller_status;
+            $this->assertOnlyAccepter($teller, $acic);
+            $this->assertMove($acic, AcicTellerStatus::Completed, $expected);
+
+            $records = $this->forwardedRecords($acic);
+            $details = ['records' => $records->count()];
 
             $acic->update([
-                'teller_status' => AcicTellerStatus::ReturnedByBank,
-                'returned_by_bank_at' => $at,
-                'bank_return_reason' => $reason,
-                // It is open again, whatever its own axis said.
-                'status' => AcicStatus::Approved,
+                'teller_status' => AcicTellerStatus::Completed,
+                'status' => AcicStatus::Completed,
+                'teller_action_by' => $teller->id,
+                'teller_action_at' => Carbon::now(),
+                'completed_by' => $teller->id,
+                'completed_at' => Carbon::now(),
             ]);
 
-            foreach ($affected as $record) {
-                $record->forceFill(['returned_by_bank' => true, 'bank_return_note' => $reason])->save();
+            foreach ($records as $record) {
+                $this->moveRecord($teller, $acic, $record, ChequeStatus::Completed, LddapStatus::Completed, 'completed');
             }
 
-            $this->moveRecords($teller, $acic, $affected, ChequeStatus::ReturnedByBank, LddapStatus::ReturnedByBank, 'returned_by_bank', $reason);
-            $this->trail($acic, AcicTellerStatus::Completed, AcicTellerStatus::ReturnedByBank, 'returned_by_bank', $teller,
-                ['affected' => $affected->count()] + $details, $reason);
+            $this->trail($acic, $from, AcicTellerStatus::Completed, 'completed', $teller, $details);
+
+            $this->tell($acic->forwardedToTellerBy, 'approved',
+                "ACIC #{$acic->acic_number} completed",
+                "{$teller->name} completed ACIC #{$acic->acic_number}.");
+
+            return $acic->fresh(self::WITH);
+        });
+    }
+
+    // -------------------------------------------------------------- 5. the Action: RTS
+
+    /** What the teller may say became of each check on an RTS. Stale is for cheques only. */
+    public const RTS_OUTCOMES = ['completed', 'returned', 'cancelled', 'stale'];
+
+    /**
+     * **Action → RTS.** Returned to sender, with a required reason and a status for every check
+     * that was out (`outcomes`, keyed "cheque:ID" / "lddap:ID"): Completed, Returned, Cancelled,
+     * or — cheques only — Stale. Returned checks go out again with the next Forward.
+     *
+     * @param  array<string, string>  $outcomes
+     *
+     * @throws ValidationException
+     */
+    public function rts(User $teller, Acic $acic, string $reason, array $outcomes, ?string $expected = null): Acic
+    {
+        return DB::transaction(function () use ($teller, $acic, $reason, $outcomes, $expected) {
+            $acic = $this->lock($acic);
+            $from = $acic->teller_status;
+            $this->assertOnlyAccepter($teller, $acic);
+            $this->assertMove($acic, AcicTellerStatus::Rts, $expected);
+
+            $reason = trim($reason);
+
+            if ($reason === '') {
+                throw ValidationException::withMessages(['reason' => 'Give the reason for the RTS.']);
+            }
+
+            $records = $this->forwardedRecords($acic);
+            $chosen = [];
+
+            foreach ($records as $record) {
+                $key = $this->key($record);
+                $outcome = $outcomes[$key] ?? null;
+                $label = $this->label($record);
+
+                if (! in_array($outcome, self::RTS_OUTCOMES, true)) {
+                    throw ValidationException::withMessages(["outcomes.{$key}" => "Choose a status for {$label}."]);
+                }
+
+                if ($outcome === 'stale' && ! $record instanceof Cheque) {
+                    throw ValidationException::withMessages(["outcomes.{$key}" => "{$label} is an LDDAP and cannot be marked Stale."]);
+                }
+
+                $chosen[$key] = $outcome;
+            }
+
+            $acic->update([
+                'teller_status' => AcicTellerStatus::Rts,
+                'rts_reason' => $reason,
+                'teller_action_by' => $teller->id,
+                'teller_action_at' => Carbon::now(),
+            ]);
+
+            foreach ($records as $record) {
+                $outcome = $chosen[$this->key($record)];
+                [$chequeTo, $lddapTo] = match ($outcome) {
+                    'completed' => [ChequeStatus::Completed, LddapStatus::Completed],
+                    'returned' => [ChequeStatus::Returned, LddapStatus::Returned],
+                    'cancelled' => [ChequeStatus::Cancelled, LddapStatus::Canceled],
+                    'stale' => [ChequeStatus::Stale, LddapStatus::Returned],   // cheques only, checked above
+                };
+
+                $fields = ['rts_status' => $outcome];
+
+                if ($outcome === 'cancelled') {
+                    $fields['exception_reason'] = $reason;
+                }
+
+                if ($outcome === 'stale') {
+                    $fields['stale_at'] = Carbon::now();
+                }
+
+                $this->moveRecord($teller, $acic, $record, $chequeTo, $lddapTo,
+                    $outcome === 'cancelled' && $record instanceof Lddap ? 'canceled' : ($outcome === 'completed' ? 'completed' : ($outcome === 'stale' ? 'staled' : 'returned')),
+                    "RTS — {$reason}", $fields);
+            }
+
+            $this->trail($acic, $from, AcicTellerStatus::Rts, 'rts', $teller, ['reason' => $reason, 'outcomes' => $chosen], $reason);
 
             $this->tell($acic->forwardedToTellerBy, 'rejected',
-                "ACIC #{$acic->acic_number} returned by the bank",
-                "{$teller->name} recorded ".self::BANK." returning ACIC #{$acic->acic_number} ({$affected->count()} record(s)): {$reason}");
+                "ACIC #{$acic->acic_number} RTS",
+                "{$teller->name} recorded an RTS on ACIC #{$acic->acic_number}: {$reason}");
 
             return $acic->fresh(self::WITH);
         });
@@ -265,6 +488,12 @@ class AcicTellerService
                 throw ValidationException::withMessages(['acic' => self::CONFLICT]);
             }
 
+            if ($acic->hasChequesWithPayee()) {
+                throw ValidationException::withMessages([
+                    'acic' => "Some cheques on ACIC #{$acic->acic_number} have already been forwarded to their payees, so it cannot be returned to the admin.",
+                ]);
+            }
+
             if ($from === null || ! $from->canReturnToAdmin()) {
                 throw ValidationException::withMessages([
                     'acic' => "ACIC #{$acic->acic_number} is ".($from?->label() ?? 'not with a teller').
@@ -279,7 +508,8 @@ class AcicTellerService
             }
 
             $forwardedBy = $acic->forwardedToTellerBy;
-            $records = $acic->records();
+            // Only the checks still in play go back; any an RTS completed or cancelled stay put.
+            $records = $this->activeRecords($acic);
 
             $acic->update([
                 'teller_status' => null,
@@ -305,7 +535,7 @@ class AcicTellerService
     // ------------------------------------------------------------------------- the machinery
 
     /** Everything the teller UI reads through. */
-    public const WITH = ['forwardedToTellerBy', 'acceptedBy', 'confirmedBy', 'cheques', 'lddaps'];
+    public const WITH = ['forwardedToTellerBy', 'acceptedBy', 'confirmedBy', 'tellerForwardedBy', 'tellerActionBy', 'cheques', 'lddaps.lddapCheck'];
 
     private function lock(Acic $acic): Acic
     {
@@ -358,23 +588,81 @@ class AcicTellerService
     }
 
     /**
-     * Which records a bank return affected — all of them unless a subset is named.
+     * The checks still in play with the teller: accepted, or Returned by an RTS (older ACICs:
+     * returned by the bank). Those an RTS completed, cancelled or staled are done.
      *
-     * @param  array<string, mixed>  $details
      * @return Collection<int, Cheque|Lddap>
      */
-    private function affected(Acic $acic, array $details): Collection
+    private function activeRecords(Acic $acic): Collection
     {
-        $chequeIds = array_map('intval', $details['cheque_ids'] ?? []);
-        $lddapIds = array_map('intval', $details['lddap_ids'] ?? []);
+        return $acic->records()->filter(fn ($r) => $r instanceof Cheque
+            ? in_array($r->status, [ChequeStatus::AcceptedByTeller, ChequeStatus::Returned, ChequeStatus::ReturnedByBank], true)
+            : in_array($r->status, [LddapStatus::AcceptedByTeller, LddapStatus::Returned, LddapStatus::ReturnedByBank], true))->values();
+    }
 
-        if ($chequeIds === [] && $lddapIds === []) {
-            return $acic->records();
+    /**
+     * The checks out with Land Bank or the payee — what the Action settles.
+     *
+     * @return Collection<int, Cheque|Lddap>
+     */
+    private function forwardedRecords(Acic $acic): Collection
+    {
+        return $acic->records()->filter(fn ($r) => $r instanceof Cheque
+            ? in_array($r->status, [ChequeStatus::ForwardedToLandBank, ChequeStatus::ForwardedToPayee], true)
+            : in_array($r->status, [LddapStatus::ForwardedToLandBank, LddapStatus::ForwardedToPayee], true))->values();
+    }
+
+    /** "cheque:12" / "lddap:7" — how the Action's per-check fields are keyed. */
+    private function key(Cheque|Lddap $record): string
+    {
+        return ($record instanceof Cheque ? 'cheque:' : 'lddap:').$record->id;
+    }
+
+    /** "cheque #10001" / "LDDAP 26-09-00001 (check #2001)" — for messages. */
+    private function label(Cheque|Lddap $record): string
+    {
+        return $record instanceof Cheque
+            ? "cheque #{$record->cheque_number}"
+            : "LDDAP {$record->lddap_no}".($record->lddapCheck?->check_no ? " (check #{$record->lddapCheck->check_no})" : '');
+    }
+
+    /** Only the teller who accepted it — no admin override. @throws ValidationException */
+    private function assertOnlyAccepter(User $user, Acic $acic): void
+    {
+        if ($acic->accepted_by === $user->id) {
+            return;
         }
 
-        return $acic->records()->filter(fn ($r) => $r instanceof Cheque
-            ? in_array($r->id, $chequeIds, true)
-            : in_array($r->id, $lddapIds, true))->values();
+        $name = $acic->acceptedBy?->name ?? 'the teller who accepted it';
+
+        throw ValidationException::withMessages([
+            'acic' => "ACIC #{$acic->acic_number} was accepted by {$name}, so only they can forward it or take action on it.",
+        ]);
+    }
+
+    /**
+     * Move one record with its ACIC through its own flow, with any fields of its own.
+     *
+     * @param  array<string, mixed>  $fields
+     */
+    private function moveRecord(User $user, Acic $acic, Cheque|Lddap $record, ChequeStatus $chequeTo, LddapStatus $lddapTo, string $action, ?string $note = null, array $fields = []): void
+    {
+        if ($record instanceof Cheque) {
+            $this->cheques->move($user, $record, $chequeTo, $action, null, fn () => $fields, $note, $acic);
+
+            return;
+        }
+
+        $from = $record->status;
+        $record->forceFill(['status' => $lddapTo] + array_diff_key($fields, ['exception_reason' => true, 'stale_at' => true]))->save();
+        $record->routingHistory()->create([
+            'action' => LddapRoutingAction::from($action),
+            'from_status' => $from,
+            'to_status' => $lddapTo,
+            'user_id' => $user->id,
+            'acted_on' => Validity::today()->toDateString(),
+            'note' => "ACIC #{$acic->acic_number}".($note !== null ? " — {$note}" : '.'),
+        ]);
     }
 
     /**
@@ -396,13 +684,12 @@ class AcicTellerService
             $from = $record->status;
             $record->forceFill(['status' => $lddapTo])->save();
             $record->routingHistory()->create([
-                'action' => LddapRoutingAction::Forwarded,
+                'action' => LddapRoutingAction::from($action),
                 'from_status' => $from,
                 'to_status' => $lddapTo,
                 'user_id' => $user->id,
-                'counterparty' => self::BANK,
                 'acted_on' => Validity::today()->toDateString(),
-                'note' => $note ?? "ACIC #{$acic->acic_number}: {$action}",
+                'note' => "ACIC #{$acic->acic_number}".($note !== null ? " — {$note}" : '.'),
             ]);
         }
     }

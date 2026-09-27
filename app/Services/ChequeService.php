@@ -54,7 +54,7 @@ class ChequeService
      * concurrent requests can never claim the same number, and we reject the request unless
      * the number the client asked for is genuinely the next one in line (no skipping).
      *
-     * @param  array{payee_name?: string|null, amount?: mixed, cheque_date?: mixed}  $details
+     * @param  array{payee_name?: string|null, account_no?: string|null, unit_name?: string|null, amount?: mixed, cheque_date?: mixed}  $details
      *
      * @throws ValidationException
      */
@@ -86,6 +86,8 @@ class ChequeService
                 'used_by' => $user->id,
                 'used_at' => Carbon::now(),
                 'payee_name' => $details['payee_name'] ?? null,
+                'account_no' => ($details['account_no'] ?? null) ?: null,
+                'unit_name' => ($details['unit_name'] ?? null) ?: null,
                 'amount' => $details['amount'] ?? null,
                 'cheque_date' => $details['cheque_date'] ?? null,
             ]);

@@ -3,6 +3,7 @@ import { CheckCircle2, AlertTriangle } from 'lucide-react';
 import { ChequeApi, toApiError } from '../lib/api';
 import type { Cheque } from '../lib/types';
 import { Alert } from './ui';
+import UnitSelect from './UnitSelect';
 
 interface Props {
     next: Cheque | null;
@@ -25,12 +26,16 @@ export default function NextChequePanel({ next, onUsed, compact = false }: Props
     const [error, setError] = useState('');
 
     const [payeeName, setPayeeName] = useState('');
+    const [accountNo, setAccountNo] = useState('');
+    const [unitName, setUnitName] = useState('');
     const [amount, setAmount] = useState('');
     const [chequeDate, setChequeDate] = useState(today());
 
     function reset() {
         setConfirming(false);
         setPayeeName('');
+        setAccountNo('');
+        setUnitName('');
         setAmount('');
         setChequeDate(today());
         setError('');
@@ -44,6 +49,8 @@ export default function NextChequePanel({ next, onUsed, compact = false }: Props
         try {
             const used = await ChequeApi.consumeNext(next.cheque_number, {
                 payee_name: payeeName.trim(),
+                account_no: accountNo.trim() || undefined,
+                unit_name: unitName || undefined,
                 amount: Number(amount),
                 cheque_date: chequeDate,
             });
@@ -108,6 +115,25 @@ export default function NextChequePanel({ next, onUsed, compact = false }: Props
                                 autoFocus
                                 required
                             />
+                        </div>
+                        <div>
+                            <label htmlFor="next-account" className="label">
+                                Account No. <span className="normal-case tracking-normal text-subtle">(optional)</span>
+                            </label>
+                            <input
+                                id="next-account"
+                                className="field font-mono"
+                                value={accountNo}
+                                onChange={(e) => setAccountNo(e.target.value)}
+                                maxLength={255}
+                                autoComplete="off"
+                            />
+                        </div>
+                        <div className="min-w-0">
+                            <label htmlFor="next-unit" className="label">
+                                Unit <span className="normal-case tracking-normal text-subtle">(optional)</span>
+                            </label>
+                            <UnitSelect id="next-unit" value={unitName} onChange={setUnitName} />
                         </div>
                         <div>
                             <label htmlFor="amount" className="label">

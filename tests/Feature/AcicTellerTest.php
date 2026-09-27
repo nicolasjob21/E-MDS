@@ -10,9 +10,8 @@ use App\Enums\NatureOfPayment;
 use App\Enums\UserRole;
 use App\Models\Acic;
 use App\Models\Cheque;
+use App\Models\Creditor;
 use App\Models\Lddap;
-use App\Models\Payee;
-use App\Models\Unit;
 use App\Models\User;
 use App\Notifications\ActivityNotification;
 use App\Services\AcicService;
@@ -76,8 +75,7 @@ class AcicTellerTest extends TestCase
             $c = $service->useNext($admin, $service->nextAvailable()->cheque_number, [
                 'payee_name' => "Payee {$i}", 'amount' => 1000 * $i, 'cheque_date' => '2026-09-20',
             ]);
-            $c = $flow->routeForSignature($admin, $c, ['forward_to_name' => 'Treasurer', 'date_forwarded' => '2026-09-21']);
-            $ids[] = $flow->markAsReceived($admin, $c, ['date_received' => '2026-09-22'])->id;
+            $ids[] = $this->readyForAcic($c, $admin)->id;
         }
 
         $acic = app(AcicService::class)->create($admin);
@@ -94,22 +92,20 @@ class AcicTellerTest extends TestCase
         $lddaps = app(LddapService::class);
         $lddaps->addRange($admin, 1, 50);
 
-        $unit = Unit::firstOrCreate(['name' => 'ACCOUNTING']);
-        $payee = Payee::firstOrCreate(['name' => 'ACME SUPPLIES INC.']);
-        $payee->accounts()->firstOrCreate(['account_no' => '2028-9010-11'], ['bank' => 'LBP']);
+        $unit = 'CG-8 Comptrollership';
+        $payee = Creditor::firstOrCreate(['name' => 'ACME SUPPLIES INC.'], ['account_no' => '0028901011']);
 
         $ids = [];
 
         foreach (range(1, $count) as $i) {
             $l = $lddaps->register($staff, [
-                'lddap_no' => sprintf('LDDAP-%04d', $i), 'nca_no' => "NCA-{$i}", 'orb_no' => "ORB-{$i}",
-                'dv_no' => "DV-{$i}", 'nature_of_payment' => NatureOfPayment::CommercialClaims->value,
-                'unit_id' => $unit->id, 'check_date' => '2026-09-21', 'payee_id' => $payee->id,
+                'lddap_no' => sprintf('26-09-%05d', $i), 'nca_no' => sprintf('%07d', $i), 'obr_no' => "OBR-{$i}",
+                'dv_no' => sprintf('10-00-%05d', $i), 'nature_of_payment' => NatureOfPayment::CommercialClaims->value,
+                'unit_name' => $unit, 'check_date' => '2026-09-21', 'payee_type' => 'creditor', 'payee_ref' => $payee->id,
                 'gross_amount' => 1000 * $i,
             ]);
-            $l = $lddaps->forward($staff, $l, ['forward_to' => 'Accounting', 'unit_id' => $unit->id, 'date_forwarded' => '2026-09-22']);
-            $l = $lddaps->receive($staff, $l, ['unit_id' => $unit->id, 'date_received' => '2026-09-23']);
-            $ids[] = $lddaps->approve($admin, $l)->id;
+            // Added straight to For Signature — ready for an ACIC.
+            $ids[] = $l->id;
         }
 
         $acic = app(AcicService::class)->create($admin);
@@ -131,9 +127,8 @@ class AcicTellerTest extends TestCase
         $c = $service->useNext($admin, $service->nextAvailable()->cheque_number, [
             'payee_name' => 'Spare', 'amount' => 500, 'cheque_date' => '2026-09-20',
         ]);
-        $c = $flow->routeForSignature($admin, $c, ['forward_to_name' => 'Treasurer', 'date_forwarded' => '2026-09-21']);
 
-        return $flow->markAsReceived($admin, $c, ['date_received' => '2026-09-22']);
+        return $this->readyForAcic($c, $admin);
     }
 
     /** Carry an ACIC as far as a teller holding it. */
@@ -159,13 +154,28 @@ class AcicTellerTest extends TestCase
         return now()->setTimezone(Validity::TZ)->subHours($hoursAgo)->format('Y-m-d H:i:s');
     }
 
-    /** Carried all the way to Completed, ready for the bank to send back. */
-    private function completed(Acic $acic, User $admin, ?User $teller = null): User
+    /** Carried as far as forwarded to Land Bank (or the payee) by the accepting teller. */
+    private function forwarded(Acic $acic, User $admin, ?User $teller = null, string $to = 'land_bank'): User
     {
         $teller = $this->accepted($acic, $admin, $teller);
-        app(AcicTellerService::class)->confirmAndComplete($teller, $acic->fresh(), ['forwarded_at' => $this->manila(2)]);
+        app(AcicTellerService::class)->forward($teller, $acic->fresh(), $to);
 
         return $teller;
+    }
+
+    /** Carried all the way to Completed, through Land Bank. */
+    private function completed(Acic $acic, User $admin, ?User $teller = null): User
+    {
+        $teller = $this->forwarded($acic, $admin, $teller);
+        app(AcicTellerService::class)->complete($teller, $acic->fresh());
+
+        return $teller;
+    }
+
+    /** "cheque:ID" / "lddap:ID" for every record on the ACIC, mapped to one value. */
+    private function perRecord(Acic $acic, mixed $value): array
+    {
+        return $acic->fresh()->records()->mapWithKeys(fn ($r) => [($r instanceof Cheque ? 'cheque:' : 'lddap:').$r->id => $value])->all();
     }
 
     /** The statuses of every record on the ACIC, of whichever kind. */
@@ -249,155 +259,295 @@ class AcicTellerTest extends TestCase
         $this->accepted($acic, $admin, $mine);
 
         Sanctum::actingAs($other);
-        foreach ([
-            ['confirm-complete', ['forwarded_at' => $this->manila()]],
-            ['returned-by-bank', ['reason' => 'Signature missing.']],
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'land_bank'])
+            ->assertStatus(422)->assertJsonValidationErrors(['acic' => 'only they can forward it or take action on it']);
+        $this->postJson("/api/v1/acics/{$acic->id}/return-to-admin", ['reason' => 'Not mine.'])
+            ->assertStatus(422)->assertJsonValidationErrors(['acic' => 'only they can act on it']);
 
-            ['return-to-admin', ['reason' => 'Not mine.']],
-        ] as [$path, $payload]) {
-            $this->postJson("/api/v1/acics/{$acic->id}/{$path}", $payload)
-                ->assertStatus(422)
-                ->assertJsonValidationErrors(['acic' => 'only they can act on it']);
-        }
+        // Not even an admin forwards or acts for the teller.
+        Sanctum::actingAs($admin);
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'land_bank'])
+            ->assertStatus(422)->assertJsonValidationErrors(['acic' => 'only they can forward it or take action on it']);
+
+        app(AcicTellerService::class)->forward($mine, $acic->fresh(), 'land_bank');
+        Sanctum::actingAs($other);
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-complete", [])
+            ->assertStatus(422)->assertJsonValidationErrors(['acic' => 'only they can forward it or take action on it']);
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-rts", ['reason' => 'No.', 'outcomes' => $this->perRecord($acic, 'returned')])
+            ->assertStatus(422)->assertJsonValidationErrors(['acic' => 'only they can forward it or take action on it']);
     }
 
-    // --------------------------------------------- 3. lodged with the bank, and closed
+    // --------------------------------------- 3. forwarded to Land Bank or to the payee
 
-    public function test_confirm_and_complete_lodges_it_and_closes_it_in_one_step(): void
+    public function test_the_accepting_teller_forwards_it_to_land_bank_or_the_payee(): void
     {
         Notification::fake();
         [$acic, $admin] = $this->chequeAcic(2);
         $teller = $this->accepted($acic, $admin);
-        $at = $this->manila(1);
 
         Sanctum::actingAs($teller);
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", [])->assertStatus(422)->assertJsonValidationErrors('to');
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'the_moon'])->assertStatus(422)->assertJsonValidationErrors('to');
 
-        $this->postJson("/api/v1/acics/{$acic->id}/confirm-complete", [])
-            ->assertStatus(422)->assertJsonValidationErrors('forwarded_at');
-
-        $this->postJson("/api/v1/acics/{$acic->id}/confirm-complete", [
-            'forwarded_at' => $at,
-            'note' => 'Hand-carried, teller 3.',
-        ])
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'land_bank'])
             ->assertOk()
-            ->assertJsonPath('data.teller_status', 'completed');
+            ->assertJsonPath('data.teller_status', 'forwarded_to_land_bank')
+            ->assertJsonPath('data.teller_status_label', 'Forwarded to LBP')
+            ->assertJsonPath('data.teller_forwarded_to', 'land_bank')
+            ->assertJsonPath('data.teller_forwarded_by.name', $teller->name)
+            ->assertJsonPath('data.can_teller_forward', false)
+            ->assertJsonPath('data.can_teller_act', true);
 
         $acic->refresh();
-        $this->assertSame($at, $acic->forwarded_to_land_bank_at->setTimezone(Validity::TZ)->format('Y-m-d H:i:s'));
-        $this->assertSame('Hand-carried, teller 3.', $acic->completion_note);
-        $this->assertSame($teller->id, $acic->completed_by);
-        // Every record on it goes with it.
-        $this->assertSame([ChequeStatus::Completed->value], $this->recordStatuses($acic));
+        $this->assertNotNull($acic->teller_forwarded_at);
+        $this->assertSame([ChequeStatus::ForwardedToLandBank->value], $this->recordStatuses($acic));
         Notification::assertSentTo($admin, ActivityNotification::class);
+
+        // Out once, it can't be forwarded again until the Action — whatever the page believed.
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'land_bank'])
+            ->assertStatus(422)->assertJsonValidationErrors(['acic' => "ACIC #{$acic->acic_number} has already been forwarded to LBP."]);
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'payee'])->assertStatus(422);
+
+        // Forwarded to Bank is the server's time at confirmation, not anything the client sent.
+        $this->assertTrue($acic->fresh()->forwarded_to_land_bank_at->between(now()->subMinute(), now()));
+        $this->assertSame(1, $acic->history()->where('action', 'forwarded_to_land_bank')->count());
     }
 
-    public function test_the_land_bank_date_cannot_be_in_the_future_or_before_it_was_accepted(): void
+    public function test_the_forward_buttons_offered_follow_the_kind_of_acic(): void
     {
-        [$acic, $admin] = $this->chequeAcic();
-        $teller = $this->accepted($acic, $admin);
+        [$cheques, $admin] = $this->chequeAcic(1);
+        [$lddaps] = $this->lddapAcic(1, $admin);
+        $teller = $this->accepted($cheques, $admin);
+        app(AcicTellerService::class)->forwardToTeller($admin, $lddaps);
+        app(AcicTellerService::class)->accept($teller, $lddaps->fresh());
 
         Sanctum::actingAs($teller);
-        $this->travelTo(now()->addHours(5));
+        $queue = collect($this->getJson('/api/v1/acics/teller-queue')->json('data.accepted'))->keyBy('acic_number');
+        $this->assertSame(['land_bank'], $queue[$cheques->acic_number]['teller_forward_options']);
+        $this->assertTrue($queue[$cheques->acic_number]['can_forward_to_payee']);
+        $this->assertFalse($queue[$lddaps->acic_number]['can_forward_to_payee']);
+        $this->assertSame(['forwarded' => 0, 'total' => 1], $queue[$cheques->acic_number]['payee_progress']);
+        $this->assertSame(['land_bank'], $queue[$lddaps->acic_number]['teller_forward_options']);
+        $this->assertSame('Accepted', $queue[$cheques->acic_number]['teller_status_label']);
 
-        $this->postJson("/api/v1/acics/{$acic->id}/confirm-complete", ['forwarded_at' => $this->manila(-24)])
-            ->assertStatus(422)->assertJsonValidationErrors(['forwarded_at' => 'cannot be in the future']);
+        // The ACIC page offers the same buttons, from its own list.
+        $rows = collect($this->getJson('/api/v1/acics')->json('data'))->keyBy('acic_number');
+        $this->assertSame(['land_bank'], $rows[$cheques->acic_number]['teller_forward_options']);
+        $this->assertTrue($rows[$cheques->acic_number]['can_forward_to_payee']);
+        $this->assertSame(['land_bank'], $rows[$lddaps->acic_number]['teller_forward_options']);
+        $this->assertFalse($rows[$cheques->acic_number]['can_teller_act']);
 
-        $this->postJson("/api/v1/acics/{$acic->id}/confirm-complete", ['forwarded_at' => $this->manila(24 * 365)])
-            ->assertStatus(422)
-            ->assertJsonValidationErrors(['forwarded_at' => 'earlier than the date and time the ACIC was accepted']);
-
-        $this->assertSame(AcicTellerStatus::AcceptedByTeller, $acic->fresh()->teller_status);
+        // Another teller is offered nothing.
+        Sanctum::actingAs($this->teller('Other'));
+        $this->assertSame([], $this->getJson("/api/v1/acics/{$cheques->id}")->json('data.teller_forward_options'));
     }
 
-    // --------------------------------------------------- 4. the bank sends it back
+    public function test_the_history_is_readable_only_where_the_acic_is(): void
+    {
+        [$acic, $admin] = $this->chequeAcic(1);
+        Sanctum::actingAs($this->teller());
+        // Still with the admin: a teller can't see it, nor its history.
+        $this->getJson("/api/v1/acics/{$acic->id}/history")->assertNotFound();
 
-    public function test_a_bank_return_needs_notes_and_flags_the_records(): void
+        app(AcicTellerService::class)->forwardToTeller($admin, $acic);
+        $this->getJson("/api/v1/acics/{$acic->id}/history")
+            ->assertOk()->assertJsonPath('data.0.action', 'forwarded_to_teller')->assertJsonPath('data.0.user.name', $admin->name);
+    }
+
+    public function test_completed_through_land_bank_closes_it_and_every_check(): void
+    {
+        [$acic, $admin] = $this->chequeAcic(2);
+        $teller = $this->forwarded($acic, $admin);
+
+        Sanctum::actingAs($teller);
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-complete", [])
+            ->assertOk()
+            ->assertJsonPath('data.teller_status', 'completed')
+            ->assertJsonPath('data.status', 'completed')
+            ->assertJsonPath('data.teller_action_by.name', $teller->name);
+
+        $acic->refresh();
+        $this->assertNotNull($acic->teller_action_at);
+        $this->assertSame([ChequeStatus::Completed->value], $this->recordStatuses($acic));
+        // Completed is final.
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'land_bank'])->assertStatus(422);
+        $this->postJson("/api/v1/acics/{$acic->id}/return-to-admin", ['reason' => 'Too late.'])->assertStatus(422);
+    }
+
+    /** The batch form: who received the cheques, when, and their unit. */
+    private function receipt(array $chequeIds, array $overrides = []): array
+    {
+        return $overrides + [
+            'cheque_ids' => $chequeIds,
+            'received_by' => 'Juan Dela Cruz',
+            'date_received' => Validity::today()->toDateString(),
+            'unit' => 'CG-8 Comptrollership',
+        ];
+    }
+
+    public function test_cheques_go_to_their_payees_one_several_or_all(): void
     {
         Notification::fake();
-        [$acic, $admin] = $this->chequeAcic(2);
-        $teller = $this->completed($acic, $admin);
-
-        Sanctum::actingAs($teller);
-
-        $this->postJson("/api/v1/acics/{$acic->id}/returned-by-bank", [])
-            ->assertStatus(422)->assertJsonValidationErrors('reason');
-
-        $this->postJson("/api/v1/acics/{$acic->id}/returned-by-bank", ['reason' => 'Endorsement missing.'])
-            ->assertOk()
-            ->assertJsonPath('data.teller_status', 'returned_by_bank');
-
-        $acic->refresh();
-        $this->assertSame('Endorsement missing.', $acic->bank_return_reason);
-        // Defaulting to all records: both carry the flag and the note.
-        $this->assertSame(2, $acic->cheques()->where('returned_by_bank', true)->count());
-        $this->assertSame([ChequeStatus::ReturnedByBank->value], $this->recordStatuses($acic));
-        Notification::assertSentTo($admin, ActivityNotification::class);
-    }
-
-    public function test_only_the_records_the_bank_named_are_flagged(): void
-    {
-        [$acic, $admin] = $this->chequeAcic(2);
-        $teller = $this->completed($acic, $admin);
-        $one = $acic->cheques()->orderBy('cheque_number')->first();
-
-        Sanctum::actingAs($teller);
-        $this->postJson("/api/v1/acics/{$acic->id}/returned-by-bank", [
-            'reason' => 'Wrong amount on one.',
-            'cheque_ids' => [$one->id],
-        ])->assertOk();
-
-        $this->assertTrue($one->fresh()->returned_by_bank);
-        $this->assertSame(1, $acic->cheques()->where('returned_by_bank', true)->count());
-    }
-
-    /** Completing again after a return clears what the bank objected to. */
-    public function test_completing_again_clears_the_bank_return_flags(): void
-    {
-        [$acic, $admin] = $this->chequeAcic(2);
-        $teller = $this->completed($acic, $admin);
-        $svc = app(AcicTellerService::class);
-
-        $svc->returnedByBank($teller, $acic->fresh(), ['returned_at' => $this->manila(1), 'reason' => 'Endorsement missing.']);
-        $this->assertSame(2, $acic->cheques()->where('returned_by_bank', true)->count());
-
-        Sanctum::actingAs($teller);
-        $this->postJson("/api/v1/acics/{$acic->id}/confirm-complete", ['forwarded_at' => $this->manila()])
-            ->assertOk()
-            ->assertJsonPath('data.teller_status', 'completed');
-
-        $acic->refresh();
-        $this->assertSame(0, $acic->cheques()->where('returned_by_bank', true)->count(), 'the flags are cleared');
-        $this->assertNull($acic->bank_return_reason);
-        $this->assertSame([ChequeStatus::Completed->value], $this->recordStatuses($acic));
-    }
-
-    /** Every trip to the bank is kept; a later one never overwrites an earlier. */
-    public function test_every_forward_and_return_cycle_is_kept(): void
-    {
-        [$acic, $admin] = $this->chequeAcic();
+        [$acic, $admin] = $this->chequeAcic(3);
         $teller = $this->accepted($acic, $admin);
-        $svc = app(AcicTellerService::class);
+        [$a, $b, $c] = $acic->cheques()->orderBy('cheque_number')->get()->all();
+        $today = Validity::today()->toDateString();
 
-        $svc->confirmAndComplete($teller, $acic->fresh(), ['forwarded_at' => $this->manila(2), 'note' => 'First lodging.']);
-        $svc->returnedByBank($teller, $acic->fresh(), ['returned_at' => $this->manila(1), 'reason' => 'Endorsement missing.']);
-        $svc->confirmAndComplete($teller, $acic->fresh(), ['forwarded_at' => $this->manila(), 'note' => 'Second lodging.']);
+        Sanctum::actingAs($teller);
+        // One first: the ACIC stays Accepted and shows its progress.
+        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-payee", $this->receipt([$a->id]))
+            ->assertOk()
+            ->assertJsonPath('data.teller_status', 'accepted_by_teller')
+            ->assertJsonPath('data.payee_progress', ['forwarded' => 1, 'total' => 3])
+            ->assertJsonPath('data.can_forward_to_payee', true)
+            // Now it can neither go to LBP nor back to the admin.
+            ->assertJsonPath('data.teller_forward_options', [])
+            ->assertJsonPath('data.can_return_to_admin', false);
 
-        $acic->refresh();
-        $this->assertSame(AcicTellerStatus::Completed, $acic->teller_status);
-        $this->assertSame('Second lodging.', $acic->completion_note);
+        $a->refresh();
+        $this->assertSame(ChequeStatus::ForwardedToPayee, $a->status);
+        $this->assertSame('Juan Dela Cruz', $a->received_by_name);
+        $this->assertSame($today, $a->date_received->toDateString());
+        $this->assertSame('CG-8 Comptrollership', $a->payee_unit_name);
+        $this->assertSame($teller->id, $a->released_by);
+        $this->assertNotNull($a->released_at);
 
-        // Both trips and the return between them are on the record, in order.
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'land_bank'])
+            ->assertStatus(422)->assertJsonValidationErrors(['to' => 'already been forwarded to their payees']);
+        $this->postJson("/api/v1/acics/{$acic->id}/return-to-admin", ['reason' => 'Changed my mind.'])
+            ->assertStatus(422)->assertJsonValidationErrors(['acic' => 'cannot be returned to the admin']);
+        // Once forwarded, a cheque can't go again.
+        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-payee", $this->receipt([$a->id]))
+            ->assertStatus(422)->assertJsonValidationErrors('cheque_ids');
+
+        // The rest together: every cheque is out, so the ACIC is Forwarded to Payee — and gets the Action.
+        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-payee", $this->receipt([$b->id, $c->id], ['received_by' => 'Maria Santos']))
+            ->assertOk()
+            ->assertJsonPath('data.teller_status', 'forwarded_to_payee')
+            ->assertJsonPath('data.payee_progress', ['forwarded' => 3, 'total' => 3])
+            ->assertJsonPath('data.can_forward_to_payee', false)
+            ->assertJsonPath('data.can_teller_act', true);
+        $this->assertSame('Maria Santos', $c->fresh()->received_by_name);
+        Notification::assertSentTo($admin, ActivityNotification::class);
+
+        // Each cheque's timeline and the ACIC's history say who received it.
+        $timeline = $this->getJson("/api/v1/cheques/{$b->id}/status-history")->json('data');
+        $this->assertSame("Received by Maria Santos (CG-8 Comptrollership) on {$today}.", end($timeline)['note']);
+        $this->getJson('/api/v1/cheques?search='.$b->cheque_number)
+            ->assertJsonPath('data.0.payee_receipt.received_by', 'Maria Santos')
+            ->assertJsonPath('data.0.payee_receipt.unit', 'CG-8 Comptrollership');
         $this->assertSame(
-            ['forwarded_to_teller', 'accepted', 'completed', 'returned_by_bank', 're_completed'],
-            $acic->history()->orderBy('id')->pluck('action')->all(),
+            ['forwarded_to_teller', 'accepted', 'cheques_forwarded_to_payee', 'cheques_forwarded_to_payee', 'forwarded_to_payee'],
+            array_column($this->getJson("/api/v1/acics/{$acic->id}/history")->json('data'), 'action'),
         );
 
+        // Completed asks for nothing more.
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-complete", [])->assertOk()->assertJsonPath('data.teller_status', 'completed');
+        $this->assertSame([ChequeStatus::Completed->value], $this->recordStatuses($acic));
+    }
+
+    public function test_forward_to_payee_has_its_rules(): void
+    {
+        [$acic, $admin] = $this->chequeAcic(2);
+        [$lddapAcic] = $this->lddapAcic(1, $admin);
+        $teller = $this->accepted($acic, $admin);
+        app(AcicTellerService::class)->forwardToTeller($admin, $lddapAcic);
+        app(AcicTellerService::class)->accept($teller, $lddapAcic->fresh());
+        [$fresh, $stale] = $acic->cheques()->orderBy('cheque_number')->get()->all();
+        // One cheque ran out of time: shown, but never forwardable.
+        $stale->forceFill(['validity_until' => Validity::today()->subDay()->toDateString()])->saveQuietly();
+
         Sanctum::actingAs($teller);
+        // The whole-ACIC "to payee" is gone; LDDAP ACICs never go to a payee.
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'payee'])->assertStatus(422);
+        $lddapId = $lddapAcic->lddaps()->value('id');
+        $this->postJson("/api/v1/acics/{$lddapAcic->id}/forward-to-payee", $this->receipt([$lddapId]))
+            ->assertStatus(422)->assertJsonValidationErrors(['acic' => 'forwarded to LBP only']);
+
+        // Every field is required; no future date; the unit comes from the list.
+        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-payee", [])
+            ->assertStatus(422)->assertJsonValidationErrors(['cheque_ids', 'received_by', 'date_received', 'unit']);
+        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-payee", $this->receipt([$fresh->id], ['date_received' => Validity::today()->addDay()->toDateString()]))
+            ->assertStatus(422)->assertJsonValidationErrors('date_received');
+        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-payee", $this->receipt([$fresh->id], ['unit' => 'Nowhere']))
+            ->assertStatus(422)->assertJsonValidationErrors('unit');
+
+        // A stale cheque is refused, and doesn't count toward the ACIC going out.
+        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-payee", $this->receipt([$stale->id]))
+            ->assertStatus(422)->assertJsonValidationErrors(['cheque_ids' => 'Stale cheques cannot be forwarded']);
+        $this->getJson("/api/v1/acics/{$acic->id}")->assertJsonPath('data.payee_progress', ['forwarded' => 0, 'total' => 1]);
+
+        // Only the teller who accepted it.
+        Sanctum::actingAs($this->teller('Other'));
+        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-payee", $this->receipt([$fresh->id]))
+            ->assertStatus(422)->assertJsonValidationErrors(['acic' => 'only they can forward it']);
+
+        // The only fresh cheque out → the ACIC is Forwarded to Payee; the stale one stays behind.
+        Sanctum::actingAs($teller);
+        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-payee", $this->receipt([$fresh->id]))
+            ->assertOk()->assertJsonPath('data.teller_status', 'forwarded_to_payee');
+        $this->assertSame(ChequeStatus::AcceptedByTeller, $stale->fresh()->status);
+    }
+
+    // ----------------------------------------------------------------- 4. the Action: RTS
+
+    public function test_rts_needs_a_reason_and_a_status_for_each_check(): void
+    {
+        Notification::fake();
+        [$acic, $admin] = $this->chequeAcic(3);
+        $teller = $this->forwarded($acic, $admin);
+        [$a, $b, $c] = $acic->cheques()->orderBy('cheque_number')->get()->all();
+
+        Sanctum::actingAs($teller);
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-rts", ['outcomes' => $this->perRecord($acic, 'returned')])
+            ->assertStatus(422)->assertJsonValidationErrors('reason');
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-rts", ['reason' => 'Signature missing.', 'outcomes' => ["cheque:{$a->id}" => 'returned']])
+            ->assertStatus(422)->assertJsonValidationErrors("outcomes.cheque:{$b->id}");
+
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-rts", [
+            'reason' => 'Signature missing on one; one past its date.',
+            'outcomes' => ["cheque:{$a->id}" => 'completed', "cheque:{$b->id}" => 'returned', "cheque:{$c->id}" => 'stale'],
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.teller_status', 'rts')
+            ->assertJsonPath('data.rts_reason', 'Signature missing on one; one past its date.')
+            ->assertJsonPath('data.can_teller_forward', true);
+
+        $this->assertSame(ChequeStatus::Completed, $a->fresh()->status);
+        $this->assertSame(ChequeStatus::Returned, $b->fresh()->status);
+        $this->assertSame(ChequeStatus::Stale, $c->fresh()->status);
+        $this->assertSame('returned', $b->fresh()->rts_status);
+        Notification::assertSentTo($admin, ActivityNotification::class);
+
+        // Forwarded again, only the Returned one goes out.
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'land_bank'])->assertOk();
+        $this->assertSame(ChequeStatus::ForwardedToLandBank, $b->fresh()->status);
+        $this->assertSame(ChequeStatus::Completed, $a->fresh()->status);
+        $this->assertNull($b->fresh()->rts_status);
+
+        // Every step is in the ACIC's history, the RTS with its reason and each check's status.
         $history = $this->getJson("/api/v1/acics/{$acic->id}/history")->assertOk()->json('data');
-        $this->assertCount(5, $history);
-        $this->assertSame('Endorsement missing.', $history[3]['note']);
-        // The first lodging's own date survives the second.
-        $this->assertNotSame($history[2]['details']['forwarded_at'], $history[4]['details']['forwarded_at']);
+        $this->assertSame(
+            ['forwarded_to_teller', 'accepted', 'forwarded_to_land_bank', 'rts', 'forwarded_to_land_bank'],
+            array_column($history, 'action'),
+        );
+        $this->assertSame('returned', $history[3]['details']['outcomes']["cheque:{$b->id}"]);
+    }
+
+    public function test_after_an_rts_the_teller_may_hand_it_back_to_the_admin(): void
+    {
+        [$acic, $admin] = $this->chequeAcic(2);
+        $teller = $this->forwarded($acic, $admin);
+        [$a, $b] = $acic->cheques()->orderBy('cheque_number')->get()->all();
+        app(AcicTellerService::class)->rts($teller, $acic->fresh(), 'Wrong payee.', ["cheque:{$a->id}" => 'cancelled', "cheque:{$b->id}" => 'returned']);
+
+        Sanctum::actingAs($teller);
+        $this->postJson("/api/v1/acics/{$acic->id}/return-to-admin", ['reason' => 'Needs a new ACIC.'])->assertOk();
+
+        // The Returned check goes back to the admin; the cancelled one stays cancelled.
+        $this->assertSame(ChequeStatus::Approved, $b->fresh()->status);
+        $this->assertSame(ChequeStatus::Cancelled, $a->fresh()->status);
+        $this->assertSame('Wrong payee.', $a->fresh()->exception_reason);
     }
 
     // ------------------------------------------------------------- 6. back to the admin
@@ -440,8 +590,8 @@ class AcicTellerTest extends TestCase
         Sanctum::actingAs($teller);
 
         // The page still believes the ACIC is merely accepted.
-        $this->postJson("/api/v1/acics/{$acic->id}/returned-by-bank", [
-            'reason' => 'Endorsement missing.',
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", [
+            'to' => 'land_bank',
             'expected_status' => 'accepted_by_teller',
         ])
             ->assertStatus(422)
@@ -469,19 +619,22 @@ class AcicTellerTest extends TestCase
         $this->assertSame([LddapStatus::AcceptedByTeller->value], $this->recordStatuses($acic));
         $this->travelTo(now()->addHours(6));
 
-        $this->postJson("/api/v1/acics/{$acic->id}/confirm-complete", ['forwarded_at' => $this->manila(2)])->assertOk();
-        $this->assertSame([LddapStatus::Completed->value], $this->recordStatuses($acic));
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'land_bank'])->assertOk();
+        $this->assertSame([LddapStatus::ForwardedToLandBank->value], $this->recordStatuses($acic));
 
-        $this->postJson("/api/v1/acics/{$acic->id}/returned-by-bank", [
-            'returned_at' => $this->manila(1), 'reason' => 'Account closed.',
-        ])->assertOk();
-        $this->assertSame([LddapStatus::ReturnedByBank->value], $this->recordStatuses($acic));
-        $this->assertSame(2, $acic->lddaps()->where('returned_by_bank', true)->count());
+        // An LDDAP can't be marked Stale.
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-rts", ['reason' => 'Account closed.', 'outcomes' => $this->perRecord($acic, 'stale')])
+            ->assertStatus(422);
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-rts", ['reason' => 'Account closed.', 'outcomes' => $this->perRecord($acic, 'returned')])
+            ->assertOk();
+        $this->assertSame([LddapStatus::Returned->value], $this->recordStatuses($acic));
 
-        // Put right and completed again; the flags clear with it.
-        $this->postJson("/api/v1/acics/{$acic->id}/confirm-complete", ['forwarded_at' => $this->manila()])->assertOk();
+        // Put right and out again — to LBP only: an LDDAP ACIC never goes to the payee.
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'payee'])
+            ->assertStatus(422)->assertJsonValidationErrors(['to' => 'forwarded to LBP only']);
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-forward", ['to' => 'land_bank'])->assertOk();
+        $this->postJson("/api/v1/acics/{$acic->id}/teller-complete", [])->assertOk();
         $this->assertSame([LddapStatus::Completed->value], $this->recordStatuses($acic));
-        $this->assertSame(0, $acic->lddaps()->where('returned_by_bank', true)->count());
 
         // Each record carries the whole trip in its own trail.
         $steps = Lddap::query()->where('acic_id', $acic->id)->first()
@@ -490,6 +643,31 @@ class AcicTellerTest extends TestCase
             LddapStatus::Completed->value,
             array_map(fn ($s) => $s instanceof LddapStatus ? $s->value : $s, $steps),
         );
+    }
+
+    public function test_the_lddap_timeline_shows_the_teller_steps(): void
+    {
+        [$acic, $admin] = $this->lddapAcic(1);
+        $teller = $this->teller();
+        $lddap = $acic->lddaps()->sole();
+
+        Sanctum::actingAs($admin);
+        $this->postJson("/api/v1/acics/{$acic->id}/forward-to-teller", [])->assertOk();
+        Sanctum::actingAs($teller);
+        $this->postJson("/api/v1/acics/{$acic->id}/accept")->assertOk();
+        $this->postJson("/api/v1/acics/{$acic->id}/return-to-admin", ['reason' => 'Wrong bank branch.'])->assertOk();
+
+        $timeline = collect($this->getJson("/api/v1/lddaps/{$lddap->id}/routing-history")->assertOk()->json('data'));
+
+        $this->assertSame(
+            ['registered', 'assigned', 'forwarded_to_teller', 'accepted_by_teller', 'returned_to_admin'],
+            $timeline->pluck('action')->all(),
+        );
+        $forwarded = $timeline->firstWhere('action', 'forwarded_to_teller');
+        $this->assertSame('Forwarded to Teller', $forwarded['action_label']);
+        $this->assertSame("ACIC #{$acic->acic_number}.", $forwarded['note']);
+        $this->assertSame($admin->name, $forwarded['user']['name']);
+        $this->assertSame("ACIC #{$acic->acic_number} — Wrong bank branch.", $timeline->last()['note']);
     }
 
     public function test_an_acic_carries_one_kind_of_record_only(): void
@@ -516,22 +694,23 @@ class AcicTellerTest extends TestCase
         [$pending] = $this->chequeAcic(1, $admin);
         [$accepted] = $this->chequeAcic(1, $admin);
         [$done] = $this->chequeAcic(1, $admin);
+        [$out] = $this->chequeAcic(1, $admin);
         [$returned] = $this->chequeAcic(1, $admin);
 
         app(AcicTellerService::class)->forwardToTeller($admin, $pending);
         $this->accepted($accepted, $admin, $mine);
         $this->completed($done, $admin, $mine);
-        $this->completed($returned, $admin, $mine);
-        app(AcicTellerService::class)->returnedByBank($mine, $returned->fresh(), [
-            'returned_at' => $this->manila(1), 'reason' => 'Endorsement missing.',
-        ]);
+        $this->forwarded($out, $admin, $mine);
+        $this->forwarded($returned, $admin, $mine);
+        app(AcicTellerService::class)->rts($mine, $returned->fresh(), 'Endorsement missing.', $this->perRecord($returned, 'returned'));
 
         Sanctum::actingAs($mine);
         $queue = $this->getJson('/api/v1/acics/teller-queue')->assertOk()->json('data');
 
         $this->assertSame([$pending->acic_number], array_column($queue['pending'], 'acic_number'));
         $this->assertSame([$accepted->acic_number], array_column($queue['accepted'], 'acic_number'));
-        $this->assertSame([$returned->acic_number], array_column($queue['returned'], 'acic_number'));
+        $this->assertSame([$out->acic_number], array_column($queue['forwarded'], 'acic_number'));
+        $this->assertSame([$returned->acic_number], array_column($queue['rts'], 'acic_number'));
         $this->assertSame([$done->acic_number], array_column($queue['completed'], 'acic_number'));
         $this->assertSame('Land Bank of the Philippines', $queue['bank_name']);
 
@@ -539,6 +718,7 @@ class AcicTellerTest extends TestCase
         $row = $queue['completed'][0];
         $this->assertSame('cheque', $row['type']);
         $this->assertSame(1, $row['cheque_count']);
+        $this->assertSame(1, $row['total_records']);
         $this->assertSame('Ada Admin', $row['forwarded_to_teller_by']['name']);
         $this->assertNotNull($row['forwarded_to_teller_at']);
         $this->assertNotNull($row['forwarded_to_land_bank_at']);
@@ -563,5 +743,55 @@ class AcicTellerTest extends TestCase
             [$cheques->acic_number],
             array_column($this->getJson('/api/v1/acics/teller-queue?type=cheque')->json('data.pending'), 'acic_number'),
         );
+    }
+
+    // ------------------------------------------------------------ the tables' filters
+
+    public function test_the_acic_table_searches_every_number_on_the_acic_and_filters_by_status(): void
+    {
+        [$cheques, $admin] = $this->chequeAcic(1);          // ACIC #1: cheque #100, approved on assignment
+        [$lddaps] = $this->lddapAcic(1, $admin);             // ACIC #2: LDDAP 26-09-00001, DV 10-00-00001, Used
+        $checkNo = $lddaps->lddaps()->sole()->lddapCheck->check_no;
+        $find = fn (string $query) => array_column($this->getJson("/api/v1/acics?{$query}")->assertOk()->json('data'), 'acic_number');
+
+        Sanctum::actingAs($this->staff());
+
+        $this->assertSame([$cheques->acic_number], $find('search=100'));                   // cheque number, partly
+        $this->assertSame([$lddaps->acic_number], $find('search=26-09-0000'));             // LDDAP number, partly
+        $this->assertSame([$lddaps->acic_number], $find('search=10-00-00001'));            // DV number
+        $this->assertContains($lddaps->acic_number, $find("search={$checkNo}"));           // LDDAP check number
+        $this->assertSame([$lddaps->acic_number, $cheques->acic_number], $find('search=')); // blank: everything
+        $this->assertSame([], $find('search=nothing-like-it'));
+
+        // Status on its own, and with the search.
+        $this->assertSame([$cheques->acic_number], $find('status=approved'));
+        $this->assertSame([$lddaps->acic_number], $find('status=used'));
+        $this->assertSame([], $find('status=used&search=100'));
+        $this->getJson('/api/v1/acics?status=bogus')->assertStatus(422)->assertJsonValidationErrors('status');
+    }
+
+    public function test_the_tellers_table_filters_only_narrow_what_the_teller_already_sees(): void
+    {
+        [$cheques, $admin] = $this->chequeAcic(1);
+        [$lddaps] = $this->lddapAcic(1, $admin);
+        $mine = $this->teller('Mine');
+        $other = $this->teller('Other');
+        $this->accepted($cheques, $admin, $mine);
+        app(AcicTellerService::class)->forwardToTeller($admin, $lddaps);
+        $queue = fn (string $query) => collect($this->getJson("/api/v1/acics/teller-queue?{$query}")->assertOk()->json('data'))
+            ->only(['pending', 'accepted', 'forwarded', 'rts', 'completed'])
+            ->map(fn ($rows) => array_column($rows, 'acic_number'))->filter()->all();
+
+        Sanctum::actingAs($mine);
+        $this->assertSame(['accepted' => [$cheques->acic_number]], $queue('search=100'));
+        $this->assertSame(['pending' => [$lddaps->acic_number]], $queue('search=10-00-00001'));
+        $this->assertSame(['pending' => [$lddaps->acic_number]], $queue('status=pending'));
+        $this->assertSame([], $queue('status=pending&search=100'));
+
+        // Another teller searching for my ACIC finds nothing: it is not theirs to see.
+        Sanctum::actingAs($other);
+        $this->assertSame([], $queue('search=100'));
+
+        $this->getJson('/api/v1/acics/teller-queue?status=bogus')->assertStatus(422)->assertJsonValidationErrors('status');
     }
 }

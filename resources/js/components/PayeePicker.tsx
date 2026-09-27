@@ -1,12 +1,12 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Search, X, Check } from 'lucide-react';
 import { PayeeApi } from '../lib/api';
-import type { Payee } from '../lib/types';
+import type { PayeeOption } from '../lib/types';
 
 interface Props {
     /** The chosen payee, or null while the user is still looking. */
-    value: Payee | null;
-    onChange: (payee: Payee | null) => void;
+    value: PayeeOption | null;
+    onChange: (payee: PayeeOption | null) => void;
     /** Accessible name for the search box. */
     label: string;
     id?: string;
@@ -15,10 +15,10 @@ interface Props {
 }
 
 /**
- * A payee lookup: type a name or account number and the registered payees that match appear
- * in a results table — Payee · Account Number · Select — with a Select button on each row.
- * Once picked, the payee's name is shown in the field's place with a clear button to look
- * again; the account itself is chosen in the form's account select.
+ * A payee lookup over the **Creditors and PCG Personnel** lists together: type a name or account
+ * number and the matches appear in one results table — Payee · Account No. · Type · Select.
+ * Once picked, the payee's name is shown in the field's place with a clear button to look again;
+ * the form fills in the type, account number and unit from the pick.
  *
  * Searches are debounced and the latest result wins, so a slow earlier response can never
  * overwrite a newer one.
@@ -28,7 +28,7 @@ export default function PayeePicker({ value, onChange, label, id, error, disable
     const inputId = id ?? generated;
 
     const [term, setTerm] = useState('');
-    const [results, setResults] = useState<Payee[]>([]);
+    const [results, setResults] = useState<PayeeOption[]>([]);
     const [open, setOpen] = useState(false);
     const [loading, setLoading] = useState(false);
     const latest = useRef(0);
@@ -61,17 +61,10 @@ export default function PayeePicker({ value, onChange, label, id, error, disable
         return () => document.removeEventListener('mousedown', onDown);
     }, []);
 
-    function pick(payee: Payee) {
+    function pick(payee: PayeeOption) {
         onChange(payee);
         setOpen(false);
         setTerm('');
-    }
-
-    /** The accounts a results row shows: the first, plus how many more there are. */
-    function accountSummary(payee: Payee): string {
-        if (payee.accounts.length === 0) return '—';
-        const first = payee.accounts[0].label;
-        return payee.accounts.length > 1 ? `${first}  +${payee.accounts.length - 1} more` : first;
     }
 
     // Chosen: show the pick, not the search box.
@@ -127,22 +120,26 @@ export default function PayeePicker({ value, onChange, label, id, error, disable
                         <p className="px-3 py-2 text-xs text-subtle">Searching…</p>
                     ) : results.length === 0 ? (
                         <p className="px-3 py-2 text-xs text-subtle">
-                            {term.trim() ? 'No registered payee matches.' : 'No payees registered yet.'}
+                            {term.trim()
+                                ? 'No creditor or PCG personnel matches.'
+                                : 'No creditors or PCG personnel yet — add them on their pages first.'}
                         </p>
                     ) : (
                         <table className="w-full text-left text-sm">
                             <thead className="sticky top-0 bg-well">
                                 <tr className="border-b border-line text-xs uppercase tracking-wider text-subtle">
                                     <th className="px-3 py-2 font-semibold">Payee</th>
-                                    <th className="px-3 py-2 font-semibold">Account Number</th>
+                                    <th className="px-3 py-2 font-semibold">Account No.</th>
+                                    <th className="px-3 py-2 font-semibold">Type</th>
                                     <th className="px-3 py-2 text-right font-semibold">Select</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {results.map((p) => (
-                                    <tr key={p.id} className="border-b border-line/60 last:border-0 hover:bg-well">
+                                    <tr key={`${p.type}-${p.id}`} className="border-b border-line/60 last:border-0 hover:bg-well">
                                         <td className="px-3 py-2 text-fg">{p.name}</td>
-                                        <td className="px-3 py-2 font-mono text-xs text-muted">{accountSummary(p)}</td>
+                                        <td className="px-3 py-2 font-mono text-xs text-muted">{p.account_no ?? '—'}</td>
+                                        <td className="px-3 py-2 text-xs whitespace-nowrap text-muted">{p.type_label}</td>
                                         <td className="px-3 py-2 text-right">
                                             <button
                                                 type="button"

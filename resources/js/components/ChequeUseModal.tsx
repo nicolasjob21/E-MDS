@@ -3,6 +3,7 @@ import { X, CheckCircle2, Lock } from 'lucide-react';
 import { ChequeApi, toApiError } from '../lib/api';
 import type { Cheque } from '../lib/types';
 import { Alert } from './ui';
+import UnitSelect from './UnitSelect';
 
 interface Props {
     /** The cheque being acted on — always the lowest available number. */
@@ -25,6 +26,8 @@ function today(): string {
  */
 export default function ChequeUseModal({ cheque, onClose, onUsed }: Props) {
     const [payeeName, setPayeeName] = useState('');
+    const [accountNo, setAccountNo] = useState('');
+    const [unitName, setUnitName] = useState('');
     const [amount, setAmount] = useState('');
     const [chequeDate, setChequeDate] = useState(today());
     const [busy, setBusy] = useState(false);
@@ -45,6 +48,8 @@ export default function ChequeUseModal({ cheque, onClose, onUsed }: Props) {
         try {
             const used = await ChequeApi.consumeNext(cheque.cheque_number, {
                 payee_name: payeeName.trim(),
+                account_no: accountNo.trim() || undefined,
+                unit_name: unitName || undefined,
                 amount: Number(amount),
                 cheque_date: chequeDate,
             });
@@ -102,6 +107,25 @@ export default function ChequeUseModal({ cheque, onClose, onUsed }: Props) {
                                 autoFocus
                                 required
                             />
+                        </div>
+                        <div>
+                            <label htmlFor="use-account" className="label">
+                                Account No. <span className="normal-case tracking-normal text-subtle">(optional)</span>
+                            </label>
+                            <input
+                                id="use-account"
+                                className="field font-mono"
+                                value={accountNo}
+                                onChange={(e) => setAccountNo(e.target.value)}
+                                maxLength={255}
+                                autoComplete="off"
+                            />
+                        </div>
+                        <div className="min-w-0">
+                            <label htmlFor="use-unit" className="label">
+                                Unit <span className="normal-case tracking-normal text-subtle">(optional)</span>
+                            </label>
+                            <UnitSelect id="use-unit" value={unitName} onChange={setUnitName} />
                         </div>
                         <div>
                             <label htmlFor="use-amount" className="label">

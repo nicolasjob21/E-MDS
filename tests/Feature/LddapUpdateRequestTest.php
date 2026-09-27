@@ -8,7 +8,6 @@ use App\Enums\UserRole;
 use App\Models\ChequeLog;
 use App\Models\Lddap;
 use App\Models\LddapUpdateRequest;
-use App\Models\Unit;
 use App\Models\User;
 use App\Services\AcicService;
 use App\Services\LddapService;
@@ -52,26 +51,21 @@ class LddapUpdateRequestTest extends TestCase
         $service = app(LddapService::class);
         $service->addRange($this->admin(), 1, 10);
         $staff = $this->staff();
-        $unit = Unit::firstOrCreate(['name' => 'ACCOUNTING']);
+        $unit = 'CG-8 Comptrollership';
         $first = null;
 
         foreach (range(1, $count) as $i) {
             $lddap = $service->register($staff, [
-                'lddap_no' => 'LDDAP-000'.$i,
+                'lddap_no' => '26-09-0000'.$i,
                 'obj_no' => 'OBJ-'.$i,
                 'payee_name' => 'Payee '.$i,
                 'amount' => 100 * $i,
             ]);
-            $lddap = $service->forward($staff, $lddap, [
-                'forward_to' => 'Accounting', 'unit_id' => $unit->id, 'date_forwarded' => '2026-09-22',
-            ]);
-            $lddap = $service->receive($staff, $lddap, ['unit_id' => $unit->id, 'date_received' => '2026-09-23']);
             $first ??= $lddap;
         }
 
         if ($numbered) {
             $admin = $this->admin();
-            $first = $service->approve($admin, $first);
             $acic = app(AcicService::class)->create($admin);
             $service->assignToAcic($staff, $acic, [$first->id]);
             $first = $first->fresh(['lddapCheck', 'usedBy']);
@@ -84,7 +78,7 @@ class LddapUpdateRequestTest extends TestCase
     private function correction(array $overrides = []): array
     {
         return array_merge([
-            'lddap_no' => 'LDDAP-0001',
+            'lddap_no' => '26-09-00001',
             'obj_no' => 'OBJ-999',
             'payee_name' => 'Corrected Payee',
             'amount' => 250.75,
@@ -153,12 +147,12 @@ class LddapUpdateRequestTest extends TestCase
     public function test_a_correction_cannot_take_another_records_lddap_number(): void
     {
         $this->seedLddap(2);
-        $first = Lddap::where('lddap_no', 'LDDAP-0001')->firstOrFail();
+        $first = Lddap::where('lddap_no', '26-09-00001')->firstOrFail();
 
         Sanctum::actingAs($this->staff());
 
         $this->postJson("/api/v1/lddaps/{$first->id}/update-requests", $this->correction([
-            'lddap_no' => 'LDDAP-0002',
+            'lddap_no' => '26-09-00002',
         ]))
             ->assertStatus(422)
             ->assertJsonValidationErrors('lddap_no');
@@ -196,11 +190,14 @@ class LddapUpdateRequestTest extends TestCase
         $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", $this->correction())->assertCreated();
 
         Sanctum::actingAs($this->admin());
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/approve")
+        $this->postJson("/api/v1/lddaps/{$lddap->id}/rts", [
+            'received_on' => '2026-09-23', 'received_by' => 'M. Santos', 'unit_name' => 'CG-8 Comptrollership',
+            'rts_date' => '2026-09-24', 'note' => 'Wrong OBJ code.',
+        ])
             ->assertStatus(422)
             ->assertJsonValidationErrors('lddap');
 
-        $this->assertSame(LddapStatus::ReturnedForAcic, $lddap->fresh()->status);
+        $this->assertSame(LddapStatus::ForSignature, $lddap->fresh()->status);
     }
 
     public function test_the_hold_lifts_once_the_request_is_resolved(): void
@@ -299,23 +296,23 @@ class LddapUpdateRequestTest extends TestCase
     public function test_approval_is_refused_if_the_number_was_taken_meanwhile(): void
     {
         $this->seedLddap(2);
-        $first = Lddap::where('lddap_no', 'LDDAP-0001')->firstOrFail();
-        $second = Lddap::where('lddap_no', 'LDDAP-0002')->firstOrFail();
+        $first = Lddap::where('lddap_no', '26-09-00001')->firstOrFail();
+        $second = Lddap::where('lddap_no', '26-09-00002')->firstOrFail();
 
         Sanctum::actingAs($this->staff());
         $id = $this->postJson("/api/v1/lddaps/{$first->id}/update-requests", $this->correction([
-            'lddap_no' => 'LDDAP-FREE',
+            'lddap_no' => '26-09-99999',
         ]))->assertCreated()->json('data.id');
 
         // Another record takes the proposed number before the admin gets to it.
-        $second->update(['lddap_no' => 'LDDAP-FREE']);
+        $second->update(['lddap_no' => '26-09-99999']);
 
         Sanctum::actingAs($this->admin());
         $this->postJson("/api/v1/lddap-update-requests/{$id}/approve")
             ->assertStatus(422)
             ->assertJsonValidationErrors('lddap_no');
 
-        $this->assertSame('LDDAP-0001', $first->fresh()->lddap_no);
+        $this->assertSame('26-09-00001', $first->fresh()->lddap_no);
         $this->assertSame(RequestStatus::Pending, LddapUpdateRequest::find($id)->status);
     }
 
@@ -345,7 +342,7 @@ class LddapUpdateRequestTest extends TestCase
         $this->getJson('/api/v1/lddap-update-requests')
             ->assertOk()
             ->assertJsonCount(1, 'data')
-            ->assertJsonPath('data.0.lddap.lddap_no', 'LDDAP-0001');
+            ->assertJsonPath('data.0.lddap.lddap_no', '26-09-00001');
 
         $this->postJson("/api/v1/lddap-update-requests/{$id}/approve")->assertOk();
 
@@ -368,7 +365,7 @@ class LddapUpdateRequestTest extends TestCase
         Sanctum::actingAs($this->admin());
 
         $this->patchJson("/api/v1/lddaps/{$lddap->id}", [
-            'lddap_no' => 'LDDAP-0001',
+            'lddap_no' => '26-09-00001',
             'obj_no' => 'OBJ-CORRECTED',
             'payee_name' => 'Corrected Payee',
             'amount' => 999.99,
@@ -390,7 +387,7 @@ class LddapUpdateRequestTest extends TestCase
         Sanctum::actingAs($this->admin());
 
         $this->patchJson("/api/v1/lddaps/{$lddap->id}", [
-            'lddap_no' => 'LDDAP-0001',
+            'lddap_no' => '26-09-00001',
             'obj_no' => 'OBJ-X',
             'payee_name' => 'Someone',
             'amount' => 50,
@@ -407,7 +404,7 @@ class LddapUpdateRequestTest extends TestCase
         Sanctum::actingAs($this->admin());
 
         $this->patchJson("/api/v1/lddaps/{$lddap->id}", [
-            'lddap_no' => 'LDDAP-0001',
+            'lddap_no' => '26-09-00001',
             'obj_no' => 'OBJ-X',
             'payee_name' => 'Someone',
             'amount' => 50,
@@ -431,7 +428,7 @@ class LddapUpdateRequestTest extends TestCase
 
         Sanctum::actingAs($this->admin());
         $this->patchJson("/api/v1/lddaps/{$lddap->id}", [
-            'lddap_no' => 'LDDAP-0001',
+            'lddap_no' => '26-09-00001',
             'amount' => 42,
             'reason' => 'Editing around the pending request.',
         ])
@@ -442,11 +439,11 @@ class LddapUpdateRequestTest extends TestCase
     public function test_a_direct_correction_cannot_take_another_records_number(): void
     {
         $this->seedLddap(2);
-        $first = Lddap::where('lddap_no', 'LDDAP-0001')->firstOrFail();
+        $first = Lddap::where('lddap_no', '26-09-00001')->firstOrFail();
         Sanctum::actingAs($this->admin());
 
         $this->patchJson("/api/v1/lddaps/{$first->id}", [
-            'lddap_no' => 'LDDAP-0002',
+            'lddap_no' => '26-09-00002',
             'amount' => 42,
             'reason' => 'Trying to reuse a number that is taken.',
         ])
@@ -458,7 +455,7 @@ class LddapUpdateRequestTest extends TestCase
     {
         $lddap = $this->seedLddap();
         $payload = [
-            'lddap_no' => 'LDDAP-0001',
+            'lddap_no' => '26-09-00001',
             'amount' => 42,
             'reason' => 'Should not be permitted.',
         ];
@@ -491,19 +488,19 @@ class LddapUpdateRequestTest extends TestCase
 
         $lddap->refresh();
         $this->assertSame('OBJ-999', $lddap->obj_no);
-        $this->assertSame(LddapStatus::ReturnedForAcic, $lddap->status);
+        $this->assertSame(LddapStatus::ForSignature, $lddap->status);
         $this->assertNull($lddap->reviewed_at);
     }
 
-    public function test_an_rtsd_record_is_corrected_and_forwarded_again(): void
+    public function test_an_rtsd_record_is_corrected_and_resubmitted(): void
     {
         $lddap = $this->seedLddap();
         $service = app(LddapService::class);
-        $unit = Unit::firstOrCreate(['name' => 'ACCOUNTING']);
+        $unit = 'CG-8 Comptrollership';
 
         // Admin sends it back.
         $service->rts($this->admin(), $lddap, [
-            'received_on' => '2026-09-23', 'received_by' => 'M. Santos', 'unit_id' => $unit->id,
+            'received_on' => '2026-09-23', 'received_by' => 'M. Santos', 'unit_name' => $unit,
             'rts_date' => '2026-09-24', 'note' => 'Wrong OBJ code.',
         ]);
         $this->assertSame(LddapStatus::Rts, $lddap->fresh()->status);
@@ -516,13 +513,8 @@ class LddapUpdateRequestTest extends TestCase
         $this->postJson("/api/v1/lddap-update-requests/{$id}/approve")->assertOk();
         $this->assertSame(LddapStatus::Rts, $lddap->fresh()->status);
 
-        // Forwarded again, received again, approved.
-        $staff = $this->staff();
-        $lddap = $service->forward($staff, $lddap->fresh(), [
-            'forward_to' => 'Accounting', 'unit_id' => $unit->id, 'date_forwarded' => '2026-09-24',
-        ]);
-        $lddap = $service->receive($staff, $lddap, ['unit_id' => $unit->id, 'date_received' => '2026-09-25']);
-        $this->assertSame(LddapStatus::Approved, $service->approve($this->admin(), $lddap)->status);
+        // Resubmitted — back to For Signature, ready for an ACIC.
+        $this->assertSame(LddapStatus::ForSignature, $service->resubmit($this->staff(), $lddap->fresh(), 'Fixed the OBJ code.')->status);
     }
 
     /** A canceled record is closed to corrections, from staff and from an admin alike. */

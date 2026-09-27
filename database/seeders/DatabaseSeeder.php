@@ -5,11 +5,9 @@ namespace Database\Seeders;
 use App\Enums\UserRole;
 use App\Models\Cheque;
 use App\Models\Payee;
-use App\Models\Unit;
 use App\Models\User;
 use App\Services\AcicService;
 use App\Services\ChequeService;
-use App\Services\UpdateRequestService;
 use Illuminate\Database\Seeder;
 
 class DatabaseSeeder extends Seeder
@@ -22,7 +20,8 @@ class DatabaseSeeder extends Seeder
             [
                 'name' => 'System Administrator',
                 'password' => env('SEED_ADMIN_PASSWORD', 'password'),
-                'role' => UserRole::Admin,
+                // The seeded admin is the admin in charge: it checks cheque drafts.
+                'role' => UserRole::SuperAdmin,
                 'is_active' => true,
             ],
         );
@@ -49,12 +48,8 @@ class DatabaseSeeder extends Seeder
             ],
         );
 
-        // The reference lists an LDDAP is registered against. Sample entries only — replace
-        // them with the office's real units and payees.
-        foreach (['ACCOUNTING', 'BUDGET', 'CASH', 'ADMINISTRATION', 'LOGISTICS', 'OPERATIONS'] as $unit) {
-            Unit::firstOrCreate(['name' => $unit]);
-        }
-
+        // Payees an LDDAP is paid to. Sample entries only — replace them with the office's real
+        // payees. (Units are not seeded: they are the fixed PCG list in config/pcg-units.json.)
         // A payee may hold several accounts; the first sample does, so the account select and
         // the auto-pick of a lone account both have something to show.
         foreach ([
@@ -96,19 +91,6 @@ class DatabaseSeeder extends Seeder
                     $cheques->confirmReceipt($teller, $used);
                 }
             }
-
-            // A sample pending update request, so the admin approvals queue has data.
-            $target = Cheque::where('cheque_number', 6)->first();
-            app(UpdateRequestService::class)->create(
-                $staff,
-                $target,
-                [
-                    'payee_name' => $target->payee_name.' (corrected)',
-                    'amount' => $target->amount,
-                    'cheque_date' => $target->cheque_date->toDateString(),
-                ],
-                'The payee name was misspelled on this cheque — please correct it.',
-            );
         }
 
         $this->command?->info('Seeded admin, staff and teller accounts. Default password: password');

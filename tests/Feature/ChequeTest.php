@@ -91,6 +91,32 @@ class ChequeTest extends TestCase
         ]);
     }
 
+    public function test_using_a_cheque_records_its_account_number_and_unit(): void
+    {
+        $this->seedCheques(3, 100);
+        Sanctum::actingAs($this->staff());
+
+        $this->postJson('/api/v1/cheques/use', $this->usePayload(100) + [
+            'account_no' => '0012345678',
+            'unit_name' => 'CG-8 Comptrollership',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.account_no', '0012345678')
+            ->assertJsonPath('data.unit_name', 'CG-8 Comptrollership');
+
+        // Both optional.
+        $this->postJson('/api/v1/cheques/use', $this->usePayload(101))
+            ->assertOk()
+            ->assertJsonPath('data.account_no', null)
+            ->assertJsonPath('data.unit_name', null);
+
+        // A unit not on the list is refused, and the number stays unused.
+        $this->postJson('/api/v1/cheques/use', $this->usePayload(102) + ['unit_name' => 'Finance'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['unit_name']);
+        $this->assertSame(ChequeStatus::Available, Cheque::where('cheque_number', 102)->value('status'));
+    }
+
     public function test_cheque_numbers_cannot_be_skipped(): void
     {
         $this->seedCheques(5, 100); // next is 100

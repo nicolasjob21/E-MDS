@@ -3,17 +3,17 @@
 namespace App\Http\Controllers;
 
 use App\Enums\LddapRoutingAction;
+use App\Enums\LddapStatus;
 use App\Enums\NatureOfPayment;
 use App\Enums\RequestStatus;
-use App\Http\Requests\ActOnLddapRequest;
 use App\Http\Requests\AddLddapCheckRangeRequest;
 use App\Http\Requests\AssignLddapsByAcicNoRequest;
 use App\Http\Requests\AssignLddapsToAcicRequest;
 use App\Http\Requests\CancelLddapRequest;
 use App\Http\Requests\FilterLddapsRequest;
-use App\Http\Requests\ForwardLddapRequest;
 use App\Http\Requests\LddapDetailsRequest;
-use App\Http\Requests\ReceiveLddapRequest;
+use App\Http\Requests\LddapPayeeSearchRequest;
+use App\Http\Requests\ResubmitLddapRequest;
 use App\Http\Requests\RtsLddapRequest;
 use App\Http\Resources\AcicResource;
 use App\Http\Resources\LddapResource;
@@ -21,7 +21,6 @@ use App\Models\Acic;
 use App\Models\Lddap;
 use App\Models\LddapCheck;
 use App\Models\LddapEditHistory;
-use App\Models\Unit;
 use App\Services\LddapService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -31,23 +30,32 @@ class LddapController extends Controller
 {
     /** Everything the resource reads through. */
     private const WITH = [
-        'lddapCheck', 'usedBy', 'receivedBy', 'reviewedBy', 'acic.receivedBy', 'unit',
-        'forwardUnit', 'forwardedBy', 'returnUnit', 'returnedBy', 'canceledBy',
+        'lddapCheck', 'usedBy', 'receivedBy', 'reviewedBy', 'acic.receivedBy',
+        'forwardedBy', 'returnedBy', 'canceledBy',
     ];
 
     public function __construct(private readonly LddapService $lddaps) {}
 
     /**
-     * What the register dialog's selects offer: every nature of payment, and every unit on file.
+     * What the register dialog's selects offer: every nature of payment. (Units come from the
+     * shared PCG unit list the app imports.)
      */
     public function options(): JsonResponse
     {
         return response()->json([
             'data' => [
                 'natures' => NatureOfPayment::options(),
-                'units' => Unit::query()->orderBy('name')->get(['id', 'name']),
             ],
         ]);
+    }
+
+    /**
+     * The register form's payee search: every Creditor and PCG Personnel entry in one list, by
+     * name or account number, each with its account number, unit and which list it is from.
+     */
+    public function payeeOptions(LddapPayeeSearchRequest $request): JsonResponse
+    {
+        return response()->json(['data' => $this->lddaps->payeeOptions($request->validated('search'))]);
     }
 
     /**
@@ -65,6 +73,7 @@ class LddapController extends Controller
             ])
             ->when($request->status(), fn ($q, $status) => $q->where('status', $status))
             ->when($request->nature(), fn ($q, $nature) => $q->where('nature_of_payment', $nature))
+            ->when($request->payeeType(), fn ($q, $type) => $q->where('payee_type', $type))
             ->when($request->search(), fn ($q, $term) => $q->search($term));
 
         // Ordered by the check number it took — the register's natural order.
@@ -143,32 +152,17 @@ class LddapController extends Controller
         ]);
     }
 
-    /** Mark a registered LDDAP as back from routing, so its check number can be added. */
-    /** Forward: Registered → For Out. */
-    public function forward(ForwardLddapRequest $request, Lddap $lddap): JsonResponse
+    /** Resubmit a corrected RTS record: RTS → For Signature. Comment required, notes optional. */
+    public function resubmit(ResubmitLddapRequest $request, Lddap $lddap): JsonResponse
     {
-        $lddap = $this->lddaps->forward($request->user(), $lddap, $request->validated());
+        $lddap = $this->lddaps->resubmit(
+            $request->user(), $lddap, (string) $request->validated('comment'), $request->validated('notes'),
+        );
 
         return response()->json(['data' => new LddapResource($lddap->load(self::WITH))]);
     }
 
-    /** Receive: For Out → Returned for ACIC. */
-    public function receive(ReceiveLddapRequest $request, Lddap $lddap): JsonResponse
-    {
-        $lddap = $this->lddaps->receive($request->user(), $lddap, $request->validated());
-
-        return response()->json(['data' => new LddapResource($lddap->load(self::WITH))]);
-    }
-
-    /** Admin only: Returned for ACIC → Approved. */
-    public function approve(ActOnLddapRequest $request, Lddap $lddap): JsonResponse
-    {
-        $lddap = $this->lddaps->approve($request->user(), $lddap, $request->input('note'));
-
-        return response()->json(['data' => new LddapResource($lddap->load(self::WITH))]);
-    }
-
-    /** Admin only: Returned for ACIC → RTS, with who received it, the unit, the date and why. */
+    /** Admin only: For Signature → RTS, with who received it, the unit, the date and why. */
     public function rts(RtsLddapRequest $request, Lddap $lddap): JsonResponse
     {
         $lddap = $this->lddaps->rts($request->user(), $lddap, $request->validated());
@@ -176,7 +170,7 @@ class LddapController extends Controller
         return response()->json(['data' => new LddapResource($lddap->load(self::WITH))]);
     }
 
-    /** Admin only: Returned for ACIC → Canceled, with the date and the required reason. */
+    /** Admin only: For Signature → Canceled, with the date and the required reason. */
     public function cancel(CancelLddapRequest $request, Lddap $lddap): JsonResponse
     {
         $lddap = $this->lddaps->cancel($request->user(), $lddap, $request->validated());
@@ -187,23 +181,33 @@ class LddapController extends Controller
     /** The record's routing trail, oldest first. */
     public function routingHistory(Lddap $lddap): JsonResponse
     {
+        // The retired Forward (to For Out) / Receive / Approve steps stay in the table and are not
+        // shown. Older teller steps were also written as Forwarded: those are shown, named by
+        // the status they moved to.
+        $retired = fn ($h) => in_array($h->action, [LddapRoutingAction::Received, LddapRoutingAction::Approved], true)
+            || ($h->action === LddapRoutingAction::Forwarded && $h->to_status === LddapStatus::ForOut);
+        $legacyTeller = fn ($h) => $h->action === LddapRoutingAction::Forwarded;
+
         return response()->json([
-            'data' => $lddap->routingHistory()->with(['user', 'unit'])->get()->map(fn ($h) => [
-                'id' => $h->id,
-                'action' => $h->action->value,
-                'action_label' => $h->action->label(),
-                'from_status' => $h->from_status?->value,
-                'to_status' => $h->to_status->value,
-                'to_status_label' => $h->to_status->label(),
-                'user' => $h->user?->only(['id', 'name', 'username']),
-                'unit_name' => $h->unit?->name,
-                'counterparty' => $h->counterparty,
-                'received_by_name' => $h->received_by_name,
-                'received_on' => $h->received_on?->toDateString(),
-                'acted_on' => $h->acted_on?->toDateString(),
-                'note' => $h->note,
-                'created_at' => $h->created_at,
-            ]),
+            'data' => $lddap->routingHistory()->with(['user'])->get()
+                ->reject($retired)
+                ->values()->map(fn ($h) => [
+                    'id' => $h->id,
+                    'action' => $legacyTeller($h) ? $h->to_status->value : $h->action->value,
+                    'action_label' => $legacyTeller($h) ? $h->to_status->label() : $h->action->label(),
+                    'from_status' => $h->from_status?->value,
+                    'to_status' => $h->to_status->value,
+                    'to_status_label' => $h->to_status->label(),
+                    'user' => $h->user?->only(['id', 'name', 'username']),
+                    'unit_name' => $h->unit_name,
+                    'counterparty' => $h->counterparty,
+                    'received_by_name' => $h->received_by_name,
+                    'received_on' => $h->received_on?->toDateString(),
+                    'acted_on' => $h->acted_on?->toDateString(),
+                    'note' => $h->note,
+                    'notes' => $h->notes,
+                    'created_at' => $h->created_at,
+                ]),
         ]);
     }
 

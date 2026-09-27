@@ -76,8 +76,8 @@ class ChequePrintTest extends TestCase
     /** The view carries every field the cheque prints, formatted as the cheque shows them. */
     public function test_the_view_carries_the_cheques_data(): void
     {
-        // For ACIC first, so putting it on one is the step that approves it.
-        $cheque = $this->cheque(ChequeStatus::ForAcic);
+        // For Signature first, so putting it on an ACIC is the step that approves it.
+        $cheque = $this->cheque(ChequeStatus::ForSignature);
         $admin = $this->admin();
         $acic = app(AcicService::class)->create($admin);
         app(AcicService::class)->assignCheques($admin, $acic, [$cheque->id]);
@@ -96,25 +96,38 @@ class ChequePrintTest extends TestCase
             ->assertJsonPath('data.account_no', config('acic.account_no'))
             ->assertJsonPath('data.bank_name', config('acic.bank.name'))
             ->assertJsonPath('data.acic_number', $acic->acic_number)
-            ->assertJsonPath('data.lddap_no', null);
+            ->assertJsonPath('data.lddap_no', null)
+            ->assertJsonPath('data.draft', false);
     }
 
-    /** Only an approved cheque has a view; every other status is refused. */
-    public function test_the_view_exists_only_for_an_approved_cheque(): void
+    /**
+     * Until the admin in charge approves the draft, the view prints as a draft; from For Final
+     * Print on it prints clean. A cheque taken out of the flow has no view.
+     */
+    public function test_the_view_is_a_draft_until_approved_then_final(): void
     {
         Sanctum::actingAs($this->admin());
 
-        foreach ([ChequeStatus::Registered, ChequeStatus::OutForSignature, ChequeStatus::ForAcic, ChequeStatus::Cancelled] as $status) {
+        foreach ([
+            [ChequeStatus::Registered, true],
+            [ChequeStatus::ForChecking, true],
+            [ChequeStatus::ForCompliance, true],
+            [ChequeStatus::ForFinalPrint, false],
+            [ChequeStatus::ForSignature, false],
+            [ChequeStatus::Approved, false],
+        ] as [$status, $draft]) {
             $cheque = $this->cheque($status);
             $this->getJson("/api/v1/cheques/{$cheque->id}/print")
-                ->assertStatus(422)
-                ->assertJsonValidationErrors('cheque');
-            $cheque->delete();
+                ->assertOk()->assertJsonPath('data.draft', $draft);
             Cheque::query()->delete();
         }
 
-        $approved = $this->cheque(ChequeStatus::Approved);
-        $this->getJson("/api/v1/cheques/{$approved->id}/print")->assertOk();
+        foreach ([ChequeStatus::Cancelled, ChequeStatus::Spoiled, ChequeStatus::Stale] as $status) {
+            $cheque = $this->cheque($status);
+            $this->getJson("/api/v1/cheques/{$cheque->id}/print")
+                ->assertStatus(422)->assertJsonValidationErrors('cheque');
+            Cheque::query()->delete();
+        }
     }
 
     public function test_any_signed_in_user_may_view_an_approved_cheque(): void
@@ -128,7 +141,10 @@ class ChequePrintTest extends TestCase
         $this->getJson("/api/v1/cheques/{$cheque->id}/print")->assertOk();
     }
 
-    /** The row and the endpoint agree: the Print button appears exactly where print works. */
+    /**
+     * The row's Print button reprints a cheque that is on an ACIC. Before that, printing is the
+     * flow's own steps (Print Draft, Final Print), so the row offers no Print button.
+     */
     public function test_can_print_matches_where_the_endpoint_allows_it(): void
     {
         $cheque = $this->cheque();
@@ -136,23 +152,20 @@ class ChequePrintTest extends TestCase
 
         // An enum cannot be an array key, so the pairs are listed instead.
         foreach ([
-            [ChequeStatus::Registered, false],
-            [ChequeStatus::OutForSignature, false],
-            [ChequeStatus::ForAcic, false],
+            [ChequeStatus::ForSignature, false],
             [ChequeStatus::Approved, true],
             [ChequeStatus::ForwardedToTeller, true],
             [ChequeStatus::AcceptedByTeller, true],
             [ChequeStatus::Completed, true],
             [ChequeStatus::ReleasedToPayee, true],
-            [ChequeStatus::Cancelled, false],
         ] as [$status, $printable]) {
             $cheque->forceFill(['status' => $status])->save();
 
             $row = $this->getJson("/api/v1/cheques?search={$cheque->cheque_number}")->assertOk()->json('data.0');
             $this->assertSame($printable, $row['can_print'], $status->value);
 
-            $this->getJson("/api/v1/cheques/{$cheque->id}/print")
-                ->assertStatus($printable ? 200 : 422);
+            // The view itself is there either way (For Signature prints clean).
+            $this->getJson("/api/v1/cheques/{$cheque->id}/print")->assertOk();
         }
     }
 }

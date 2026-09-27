@@ -30,3 +30,13 @@ export function RequireAdmin({ children }: { children: ReactNode }) {
     if (!isAdmin) return <Navigate to="/dashboard" replace />;
     return <>{children}</>;
 }
+
+/** Requires an admin or staff user; tellers are bounced to the dashboard. */
+export function RequireAdminOrStaff({ children }: { children: ReactNode }) {
+    const { user, loading, isTeller } = useAuth();
+
+    if (loading) return <FullScreenLoader />;
+    if (!user) return <Navigate to="/login" replace />;
+    if (isTeller) return <Navigate to="/dashboard" replace />;
+    return <>{children}</>;
+}

@@ -1,0 +1,63 @@
+{
+    "_comment": "The PCG units, in display order, grouped under their headings. The ONE place this list is defined: PHP reads it through config/pcg_units.php (App\\Support\\PcgUnits) and the React app imports it (resources/js/lib/pcgUnits.ts). Unit names are saved exactly as written here.",
+    "groups": [
+        {
+            "label": "NATIONAL HEADQUARTERS",
+            "units": [
+                "Office of the Commandant",
+                "Office of the Deputy Commandant for Administration",
+                "Office of the Deputy Commandant for Operations",
+                "Office of the Chief of Coast Guard Staff",
+                "CG-1 Personnel",
+                "CG-2 Intelligence",
+                "CG-3 Operations",
+                "CG-4 Logistics",
+                "CG-5 Plans",
+                "CG-6 Communications / IT",
+                "CG-7 Civil Relations",
+                "CG-8 Comptrollership",
+                "CG-9 Engineering",
+                "CG-10 Acquisition",
+                "CG-11 Research & Development",
+                "CG-12 Human Resource / Other Designated Staff Function",
+                "Coast Guard Adjutant Office",
+                "Coast Guard Legal Affairs",
+                "Coast Guard Public Affairs Service",
+                "PCG Command Center",
+                "Coast Guard Receiving Station",
+                "Headquarters Service Support Group",
+                "Project Management Office",
+                "Office of the Command Master Chief Petty Officer"
+            ]
+        },
+        {
+            "label": "TECHNICAL SERVICES",
+            "units": [
+                "Coast Guard Medical Service",
+                "Coast Guard Dental Service",
+                "Coast Guard Nursing Service",
+                "Coast Guard Veterinary Service"
+            ]
+        },
+        {
+            "label": "FUNCTIONAL / OPERATIONAL COMMANDS",
+            "units": [
+                "Maritime Safety Services Command",
+                "Maritime Security and Law Enforcement Command",
+                "Marine Environmental Protection Command",
+                "Maritime Search and Rescue"
+            ]
+        },
+        {
+            "label": "OTHER MAJOR COMMANDS",
+            "units": [
+                "Coast Guard Fleet",
+                "Coast Guard Aviation Force",
+                "Coast Guard Special Operations Force",
+                "Coast Guard Education, Training and Doctrine Command",
+                "Coast Guard Logistics System Command",
+                "Coast Guard Weapons, Communications, Electronics and Information Systems Command"
+            ]
+        }
+    ]
+}

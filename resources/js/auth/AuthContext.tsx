@@ -13,7 +13,10 @@ import type { User } from '../lib/types';
 interface AuthContextValue {
     user: User | null;
     loading: boolean;
+    /** Admin powers: an Admin or a Super Admin. */
     isAdmin: boolean;
+    /** The admin in charge — checks cheque drafts. */
+    isSuperAdmin: boolean;
     isTeller: boolean;
     login: (username: string, password: string) => Promise<void>;
     logout: () => Promise<void>;
@@ -65,7 +68,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         () => ({
             user,
             loading,
-            isAdmin: user?.role === 'admin',
+            isAdmin: user?.role === 'admin' || user?.role === 'super_admin',
+            isSuperAdmin: user?.role === 'super_admin',
             isTeller: user?.role === 'teller',
             login,
             logout,

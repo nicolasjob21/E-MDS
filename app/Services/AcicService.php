@@ -7,10 +7,13 @@ use App\Enums\AcicStatus;
 use App\Enums\AcicType;
 use App\Enums\ChequeAction;
 use App\Enums\ChequeStatus;
+use App\Enums\LddapRoutingAction;
+use App\Enums\LddapStatus;
 use App\Models\Acic;
 use App\Models\AcicNumber;
 use App\Models\Cheque;
 use App\Models\Lddap;
+use App\Models\LddapRoutingHistory;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Carbon;
@@ -212,14 +215,69 @@ class AcicService
     }
 
     /**
-     * Cheques eligible to be put on an ACIC: approved, and not already on one.
+     * The ACIC a typed number means, for "Assign … to ACIC": an existing ACIC that still accepts
+     * records (locked), or — when the number is the next one in the series — a new ACIC opened
+     * on it. Any other number is refused; a number is never invented. Many records share one
+     * ACIC number this way. Call inside a transaction.
+     *
+     * `$approvedAccepts`: cheques may keep joining an ACIC their assignment already approved
+     * (forwarding is what closes it to them); LDDAPs may not.
+     *
+     * @throws ValidationException
+     */
+    public function resolveForAssignment(User $user, int $acicNo, bool $approvedAccepts = false, string $field = 'acic_no'): Acic
+    {
+        $acic = Acic::query()->where('acic_number', $acicNo)->lockForUpdate()->first();
+
+        if ($acic !== null) {
+            if (! $acic->status->acceptsRecords() && ! ($approvedAccepts && $acic->status === AcicStatus::Approved)) {
+                throw ValidationException::withMessages([
+                    $field => "ACIC #{$acicNo} is {$acic->status->label()} and no longer accepts records.",
+                ]);
+            }
+
+            return $acic;
+        }
+
+        $next = $this->nextNumber();
+
+        if ($next === null) {
+            throw ValidationException::withMessages([
+                $field => 'No ACIC numbers are available. An administrator has to register a range first.',
+            ]);
+        }
+
+        if ($acicNo !== $next) {
+            throw ValidationException::withMessages([
+                $field => "ACIC #{$acicNo} is not open. Enter an existing ACIC number, or the next one in the series (#{$next}).",
+            ]);
+        }
+
+        return $this->create($user);
+    }
+
+    /**
+     * "Assign Cheque to ACIC" by number: put the ticked For Signature cheques on the ACIC the
+     * number means (see resolveForAssignment()). Many cheques may share one ACIC number.
+     *
+     * @param  list<int>  $chequeIds
+     *
+     * @throws ValidationException
+     */
+    public function assignChequesToNumber(User $user, int $acicNo, array $chequeIds): Acic
+    {
+        return DB::transaction(fn () => $this->assignCheques($user, $this->resolveForAssignment($user, $acicNo, approvedAccepts: true), $chequeIds));
+    }
+
+    /**
+     * Cheques eligible to be put on an ACIC: For Signature, and not already on one.
      *
      * @return Collection<int, Cheque>
      */
     public function linkableCheques(): Collection
     {
         return Cheque::query()
-            ->where('status', ChequeStatus::ForAcic)
+            ->where('status', ChequeStatus::ForSignature)
             ->whereNull('acic_id')
             ->orderBy('cheque_number')
             ->with('usedBy')
@@ -257,6 +315,13 @@ class AcicService
                 ]);
             }
 
+            // An ACIC the teller holds keeps its Approved status, so check where it is too.
+            if (($why = $acic->notWithAdminBecause()) !== null) {
+                throw ValidationException::withMessages([
+                    'acic' => "ACIC #{$acic->acic_number} {$why} and can no longer take cheques.",
+                ]);
+            }
+
             $cheques = Cheque::query()
                 ->whereIn('id', $chequeIds)
                 ->lockForUpdate()
@@ -279,7 +344,7 @@ class AcicService
                 $numbers = $notEligible->pluck('cheque_number')->sort()->implode(', #');
 
                 throw ValidationException::withMessages([
-                    'cheque_ids' => "Only cheques that are For ACIC can be assigned. Not eligible: #{$numbers}.",
+                    'cheque_ids' => "Only cheques that are For Signature can be assigned. Not eligible: #{$numbers}.",
                 ]);
             }
 
@@ -299,7 +364,7 @@ class AcicService
             $this->stampType($acic, AcicType::Cheque);
             Cheque::query()->whereIn('id', $chequeIds)->update(['acic_id' => $acic->id]);
 
-            // Each cheque moves For ACIC → Approved in its own right, so the step lands in
+            // Each cheque moves For Signature → Approved in its own right, so the step lands in
             // every cheque's status history rather than only on the ACIC.
             foreach ($cheques as $cheque) {
                 if ($cheque->status === ChequeStatus::Approved) {
@@ -307,7 +372,7 @@ class AcicService
                 }
 
                 $this->flow->move($user, $cheque, ChequeStatus::Approved, 'assigned', null,
-                    fn () => ['acic_id' => $acic->id], null, $acic);
+                    fn () => ['acic_id' => $acic->id], $this->replacementNote($cheque, $acic), $acic);
             }
 
             $numbers = $cheques->pluck('cheque_number')->sort()->implode(', #');
@@ -329,6 +394,31 @@ class AcicService
 
             return $acic->fresh(['usedBy', 'receivedBy', 'createdBy', 'cheques']);
         });
+    }
+
+    /**
+     * The timeline note for a replacement of a spoiled cheque that was on an ACIC: whether it
+     * took the spoiled cheque's place on that ACIC, or went to a new one (and why, when the old
+     * one could no longer take it). Null for any other cheque.
+     */
+    private function replacementNote(Cheque $cheque, Acic $acic): ?string
+    {
+        $spoiled = $cheque->replaces()->with('spoiledFromAcic')->first();
+
+        if ($spoiled === null || $spoiled->status !== ChequeStatus::Spoiled || $spoiled->spoiledFromAcic === null) {
+            return null;
+        }
+
+        $previous = $spoiled->spoiledFromAcic;
+
+        if ($previous->id === $acic->id) {
+            return "Used previous ACIC #{$acic->acic_number} — in place of spoiled cheque #{$spoiled->cheque_number}.";
+        }
+
+        $why = $previous->notWithAdminBecause();
+
+        return "Assigned to a new ACIC #{$acic->acic_number} — spoiled cheque #{$spoiled->cheque_number} was on ACIC #{$previous->acic_number}"
+            .($why !== null ? ", which {$why}." : '.');
     }
 
     /**
@@ -420,6 +510,13 @@ class AcicService
                 ]);
             }
 
+            // It keeps its Approved status while the tellers have it, so check that too.
+            if (($why = $acic->notWithAdminBecause()) !== null) {
+                throw ValidationException::withMessages([
+                    'acic' => "ACIC #{$acic->acic_number} {$why} — its records can no longer be changed.",
+                ]);
+            }
+
             $isCheque = $type === 'cheque';
             $label = $isCheque ? 'Cheque' : 'LDDAP';
 
@@ -447,10 +544,10 @@ class AcicService
                 ]);
             }
 
-            $eligible = $isCheque ? $assign->status->isAcicEligible() : $assign->status->isApproved();
+            $eligible = $assign->status->isAcicEligible();
 
             if (! $eligible) {
-                $needs = $isCheque ? 'For ACIC' : 'approved';
+                $needs = 'For Signature';
 
                 throw ValidationException::withMessages([
                     'assign_id' => "Only a {$needs} {$label} can go on an ACIC.",
@@ -474,13 +571,24 @@ class AcicService
 
             $assign->update(['acic_id' => $acic->id]);
 
-            // A cheque coming off goes back into the pool of cheques waiting for an ACIC;
+            // A cheque coming off goes back to For Signature, waiting for an ACIC;
             // the one taking its place moves on to Approved. Both are recorded steps.
             if ($isCheque) {
-                $this->flow->move($user, $release, ChequeStatus::ForAcic, 'unassigned', null,
+                $this->flow->move($user, $release, ChequeStatus::ForSignature, 'unassigned', null,
                     fn () => ['acic_id' => null], 'Re-assigned off the ACIC.', $acic);
                 $this->flow->move($user, $assign, ChequeStatus::Approved, 'assigned', null,
                     fn () => ['acic_id' => $acic->id], null, $acic);
+            } else {
+                // Likewise an LDDAP: off → For Signature, on → Approved, each on its own trail.
+                $release->update(['status' => LddapStatus::ForSignature]);
+                $assign->update(['status' => LddapStatus::Approved]);
+                foreach ([[$release, LddapRoutingAction::Unassigned, LddapStatus::Approved, LddapStatus::ForSignature],
+                    [$assign, LddapRoutingAction::Assigned, LddapStatus::ForSignature, LddapStatus::Approved]] as [$record, $action, $from, $to]) {
+                    LddapRoutingHistory::create([
+                        'lddap_id' => $record->id, 'action' => $action, 'from_status' => $from, 'to_status' => $to,
+                        'user_id' => $user->id, 'acted_on' => now()->toDateString(), 'note' => "ACIC #{$acic->acic_number}",
+                    ]);
+                }
             }
 
             $from = $isCheque ? "#{$release->cheque_number}" : $release->lddap_no;
@@ -494,134 +602,6 @@ class AcicService
             );
 
             return $acic->fresh(self::WITH);
-        });
-    }
-
-    /**
-     * The teller marks a forwarded ACIC as completed once the transaction is finished.
-     *
-     * This is the point at which the cheques on the ACIC have actually been handled, so the
-     * teller's receipt stamp is applied to any of them that don't already carry one — that is
-     * what keeps the ACIC and its cheque records in step rather than the ACIC drifting ahead
-     * of the cheques it represents.
-     *
-     * @throws ValidationException
-     */
-    public function complete(User $teller, Acic $acic): Acic
-    {
-        return DB::transaction(function () use ($teller, $acic) {
-            $acic = Acic::query()->whereKey($acic->getKey())->lockForUpdate()->firstOrFail();
-
-            if ($acic->status->isFinal()) {
-                throw ValidationException::withMessages([
-                    'acic' => "ACIC #{$acic->acic_number} has already been completed.",
-                ]);
-            }
-
-            if (! $acic->status->awaitsTeller()) {
-                throw ValidationException::withMessages([
-                    'acic' => "ACIC #{$acic->acic_number} has not been forwarded yet, so there is nothing to complete.",
-                ]);
-            }
-
-            $now = Carbon::now();
-
-            $acic->update([
-                'status' => AcicStatus::Completed,
-                'completed_at' => $now,
-                'completed_by' => $teller->id,
-            ]);
-
-            // Keep the records in step: anything on this ACIC that was never confirmed as
-            // received is stamped now, by the teller completing it.
-            $stamped = Cheque::query()
-                ->where('acic_id', $acic->id)
-                ->whereNull('received_at')
-                ->update([
-                    'received_by' => $teller->id,
-                    'received_at' => $now,
-                ]);
-
-            $stamped += Lddap::query()
-                ->where('acic_id', $acic->id)
-                ->whereNull('received_at')
-                ->update([
-                    'received_by' => $teller->id,
-                    'received_at' => $now,
-                ]);
-
-            $this->logger->log(
-                $teller,
-                ChequeAction::CompletedAcic,
-                null,
-                "Completed ACIC number {$acic->acic_number} ({$acic->cheques()->count()} cheque(s), {$acic->lddaps()->count()} LDDAP(s))."
-                    .($stamped > 0 ? " Receipt recorded for {$stamped} cheque(s)." : ''),
-            );
-
-            return $acic->fresh(['usedBy', 'receivedBy', 'completedBy', 'createdBy', 'cheques']);
-        });
-    }
-
-    /**
-     * Forward an ACIC to a recipient, recording the forward date and who received it.
-     *
-     * The recipient is normally a system user (the teller). When the ACIC is handed to someone
-     * who has no account, `$receivedName` carries the typed-in name of whoever accepted it
-     * instead. Exactly one of the two must be given.
-     *
-     * @throws ValidationException
-     */
-    public function forward(User $user, Acic $acic, ?User $receivedBy, ?string $receivedName = null): Acic
-    {
-        $receivedName = $receivedName !== null ? trim($receivedName) : null;
-
-        if ($receivedBy === null && ($receivedName === null || $receivedName === '')) {
-            throw ValidationException::withMessages([
-                'received_by' => 'Record who received this ACIC.',
-            ]);
-        }
-
-        return DB::transaction(function () use ($user, $acic, $receivedBy, $receivedName) {
-            $acic = Acic::query()->whereKey($acic->getKey())->lockForUpdate()->firstOrFail();
-
-            if ($acic->status === AcicStatus::Forwarded) {
-                throw ValidationException::withMessages([
-                    'acic' => "ACIC #{$acic->acic_number} has already been forwarded.",
-                ]);
-            }
-
-            if ($acic->cheques()->doesntExist() && $acic->lddaps()->doesntExist()) {
-                throw ValidationException::withMessages([
-                    'acic' => "ACIC #{$acic->acic_number} has nothing on it yet. Put cheques or LDDAP records on it first, then forward.",
-                ]);
-            }
-
-            // Forwarding follows the sign-off: what leaves the office is what was approved.
-            if (! $acic->status->isApproved()) {
-                throw ValidationException::withMessages([
-                    'acic' => "ACIC #{$acic->acic_number} has not been approved yet. Approve it first, then forward.",
-                ]);
-            }
-
-            $acic->update([
-                'status' => AcicStatus::Forwarded,
-                'forwarded_at' => Carbon::now(),
-                // A user recipient and a typed-in name are mutually exclusive, so setting one
-                // always clears the other.
-                'received_by' => $receivedBy?->id,
-                'received_name' => $receivedBy !== null ? null : $receivedName,
-            ]);
-
-            $recipient = $receivedBy?->name ?? $receivedName;
-
-            $this->logger->log(
-                $user,
-                ChequeAction::ForwardedAcic,
-                null,
-                "Forwarded ACIC number {$acic->acic_number} to {$recipient}.",
-            );
-
-            return $acic->fresh(['usedBy', 'receivedBy', 'createdBy', 'cheques']);
         });
     }
 }

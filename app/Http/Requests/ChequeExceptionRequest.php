@@ -3,8 +3,9 @@
 namespace App\Http\Requests;
 
 /**
- * The three ways out of the flow — RTS, Cancel and Void. Which of them a cheque may take is
- * the status's call; all they need here is a reason, which is never optional.
+ * Two of the ways out of the flow — RTS and Cancel. Which of them a cheque may take is the
+ * status's call; all they need here is a reason, which is never optional. (Spoil, the third,
+ * has its own request: it also names the replacement number.)
  */
 class ChequeExceptionRequest extends ChequeStepRequest
 {

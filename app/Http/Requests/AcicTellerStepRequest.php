@@ -18,7 +18,7 @@ abstract class AcicTellerStepRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return in_array($this->user()?->role, [UserRole::Teller, UserRole::Admin], true);
+        return in_array($this->user()?->role, [UserRole::Teller, UserRole::Admin, UserRole::SuperAdmin], true);
     }
 
     /**

@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent 
 import { Link, useNavigate } from 'react-router-dom';
 import { ChevronDown, KeyRound, LogOut, UserRound } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
+import { roleLabel } from '../lib/format';
 
 /** "Jane A. Doe" → "JD": the avatar shown where the name doesn't fit. */
 function initials(name: string): string {
@@ -160,7 +161,7 @@ export default function UserMenu() {
                 </span>
                 <span className="hidden text-right sm:block">
                     <span className="block text-sm font-medium text-fg">{user.name}</span>
-                    <span className="block text-[10px] uppercase tracking-wider text-brandink">{user.role}</span>
+                    <span className="block text-[10px] uppercase tracking-wider text-brandink">{roleLabel(user.role)}</span>
                 </span>
                 <ChevronDown
                     aria-hidden="true"

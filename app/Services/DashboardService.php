@@ -3,14 +3,13 @@
 namespace App\Services;
 
 use App\Enums\AcicStatus;
+use App\Enums\AcicTellerStatus;
 use App\Enums\ChequeStatus;
 use App\Enums\LddapStatus;
 use App\Enums\RequestStatus;
-use App\Http\Resources\ChequeResource;
 use App\Models\Acic;
 use App\Models\Cheque;
 use App\Models\ChequeLog;
-use App\Models\ChequeUpdateRequest;
 use App\Models\Lddap;
 use App\Models\LddapUpdateRequest;
 use App\Models\User;
@@ -48,15 +47,14 @@ class DashboardService
             'attention' => $this->attention($user),
             'cheques' => [
                 'counts' => $chequeCounts,
-                'next' => $next ? new ChequeResource($next) : null,
             ],
             'lddaps' => [
                 'counts' => $this->lddapCounts(),
-                'awaiting_acic' => Lddap::query()->where('status', LddapStatus::Approved)->whereNull('acic_id')->count(),
+                'awaiting_acic' => Lddap::query()->where('status', LddapStatus::ForSignature)->whereNull('acic_id')->count(),
                 'on_acic' => Lddap::query()->whereNotNull('acic_id')->count(),
             ],
             'acics' => [
-                'counts' => $this->acicCounts(),
+                'counts' => $this->acicCounts($user),
             ],
             'series' => [
                 'cheques' => [
@@ -87,23 +85,24 @@ class DashboardService
     {
         $items = match (true) {
             $user->isAdmin() => [
-                $this->item('lddap_action', 'LDDAPs awaiting your action', 'Back from routing — Approve, RTS or Cancel', Lddap::query()->where('status', LddapStatus::ReturnedForAcic), '/lddaps?status=returned_for_acic', 'accent'),
-                $this->item('cheque_receive', 'Cheques back for receipt', 'Out for signature — mark them received when they return', Cheque::query()->where('status', ChequeStatus::OutForSignature), '/cheques?tab=out_for_signature', 'accent'),
-                $this->item('cheque_for_acic', 'Cheques awaiting an ACIC', 'Signed and back — put them on an ACIC', Cheque::query()->where('status', ChequeStatus::ForAcic)->whereNull('acic_id'), '/cheques?tab=for_acic', 'brand'),
-                $this->item('update_requests', 'Update requests pending', 'Corrections proposed by staff', null, '/admin/update-requests', 'brand', ChequeUpdateRequest::query()->where('status', RequestStatus::Pending)->count() + LddapUpdateRequest::query()->where('status', RequestStatus::Pending)->count()),
-                $this->item('acic_signoff', 'ACICs to sign off', 'Used, awaiting approval before they can be forwarded or printed', Acic::query()->where('status', AcicStatus::Used), '/acics?tab=all', 'brand'),
+                $this->item('lddap_for_signature', 'LDDAPs For Signature', 'Assign them to an ACIC — or RTS / Cancel', Lddap::query()->where('status', LddapStatus::ForSignature)->whereNull('acic_id'), '/lddaps?status=for_signature', 'accent'),
+                $this->item('cheque_checking', 'Drafts for checking', 'Approve each draft, or return it with a comment', Cheque::query()->where('status', ChequeStatus::ForChecking), '/cheques?tab=for_checking', 'accent'),
+                $this->item('cheque_compliance', 'Cheques For Compliance', 'Returned drafts — update them and print a new draft', Cheque::query()->where('status', ChequeStatus::ForCompliance), '/cheques?tab=for_compliance', 'warn'),
+                $this->item('cheque_final_print', 'Cheques For Final Print', 'Approved drafts — print them for real', Cheque::query()->where('status', ChequeStatus::ForFinalPrint), '/cheques?tab=for_final_print', 'brand'),
+                $this->item('cheque_for_signature', 'Cheques For Signature', 'Printed — assign them to an ACIC', Cheque::query()->where('status', ChequeStatus::ForSignature)->whereNull('acic_id'), '/cheques?tab=for_signature', 'brand'),
+                $this->item('update_requests', 'Update requests pending', 'LDDAP corrections proposed by staff', LddapUpdateRequest::query()->where('status', RequestStatus::Pending), '/admin/update-requests', 'brand'),
+                $this->item('acic_signoff', 'ACICs to sign off', 'Used, awaiting approval before they can be forwarded or printed', Acic::query()->where('status', AcicStatus::Used), '/acics?status=used', 'brand'),
             ],
             $user->isTeller() => [
-                $this->item('acics_to_accept', 'ACICs waiting to be accepted', 'Forwarded for deposit — the first teller to accept takes it', Cheque::query()->where('status', ChequeStatus::ForwardedToTeller), '/cheques?tab=forwarded_to_teller', 'accent'),
-                $this->item('acics_to_deposit', 'ACICs you are holding', 'Accepted, not yet deposited', Cheque::query()->where('status', ChequeStatus::AcceptedByTeller)->whereHas('acic', fn ($a) => $a->where('accepted_by', $user->id)), '/cheques?tab=accepted_by_teller', 'accent'),
+                $this->item('acics_to_accept', 'ACICs waiting to be accepted', 'Pending — cheque and LDDAP ACICs; the first teller to accept takes it', Acic::query()->where('teller_status', AcicTellerStatus::Pending), '/acics?status=pending', 'accent'),
+                $this->item('acics_to_deposit', 'ACICs you are holding', 'Accepted — forward them, or take the Action on those out', Acic::query()->where('accepted_by', $user->id)->whereIn('teller_status', [AcicTellerStatus::AcceptedByTeller, AcicTellerStatus::ForwardedToLandBank, AcicTellerStatus::ForwardedToPayee, AcicTellerStatus::Rts]), '/deposit-queue', 'accent'),
                 $this->item('lddaps_to_receive', 'LDDAPs to receive', 'Carrying a check number, not yet confirmed received', Lddap::query()->whereNotNull('lddap_check_id')->whereNull('received_at'), '/lddaps?status=approved', 'accent'),
-                $this->item('acics_forwarded', 'ACICs forwarded to you', 'Awaiting completion', Acic::query()->where('status', AcicStatus::Forwarded), '/acics?tab=forwarded', 'brand'),
             ],
             default => [
-                $this->item('my_rts', 'Returned to you (RTS)', 'Correct the details, then forward again', Lddap::query()->where('status', LddapStatus::Rts)->where('used_by', $user->id), '/lddaps?status=rts', 'warn'),
-                $this->item('cheques_rts', 'Cheques returned to sender', 'Sent back to be corrected, then routed again', Cheque::query()->where('status', ChequeStatus::Registered)->whereNotNull('rts_at')->where('used_by', $user->id), '/cheques?tab=registered', 'warn'),
-                $this->item('my_registered', 'Registered, not yet forwarded', 'Your LDDAPs still to go out for routing', Lddap::query()->where('status', LddapStatus::Registered)->where('used_by', $user->id), '/lddaps?status=registered', 'brand'),
-                $this->item('awaiting_acic', 'Approved LDDAPs awaiting an ACIC', 'Assign them to take their check numbers', Lddap::query()->where('status', LddapStatus::Approved)->whereNull('acic_id'), '/lddaps?status=approved', 'brand'),
+                $this->item('my_rts', 'Returned to you (RTS)', 'Correct the details, then resubmit', Lddap::query()->where('status', LddapStatus::Rts)->where('used_by', $user->id), '/lddaps?status=rts', 'warn'),
+                $this->item('cheques_compliance', 'Your cheques For Compliance', 'Returned drafts — update them and print a new draft', Cheque::query()->where('status', ChequeStatus::ForCompliance)->where('used_by', $user->id), '/cheques?tab=for_compliance', 'warn'),
+                $this->item('cheques_final_print', 'Your cheques For Final Print', 'Approved drafts — print them for real', Cheque::query()->where('status', ChequeStatus::ForFinalPrint)->where('used_by', $user->id), '/cheques?tab=for_final_print', 'brand'),
+                $this->item('awaiting_acic', 'LDDAPs For Signature', 'Assign them to an ACIC to take their check numbers', Lddap::query()->where('status', LddapStatus::ForSignature)->whereNull('acic_id'), '/lddaps?status=for_signature', 'brand'),
             ],
         };
 
@@ -138,16 +137,20 @@ class DashboardService
         return ['total' => array_sum($counts)] + $counts;
     }
 
-    /** @return array<string, int> every ACIC status, zero included */
-    private function acicCounts(): array
+    /**
+     * The ACIC tiles, by the status the ACIC table shows (the teller's, once it is with the
+     * tellers), over the ACICs the viewer may see.
+     *
+     * @return array<string, int>
+     */
+    private function acicCounts(User $user): array
     {
-        $rows = Acic::query()->selectRaw('status, count(*) as aggregate')->groupBy('status')->pluck('aggregate', 'status');
         $counts = [];
-        foreach (AcicStatus::cases() as $case) {
-            $counts[$case->value] = (int) ($rows[$case->value] ?? 0);
+        foreach (['open', 'used', 'approved', 'pending', 'completed'] as $status) {
+            $counts[$status] = Acic::query()->visibleTo($user)->inDisplayStatus($status)->count();
         }
 
-        return ['total' => array_sum($counts)] + $counts;
+        return ['total' => Acic::query()->visibleTo($user)->count()] + $counts;
     }
 
     /**

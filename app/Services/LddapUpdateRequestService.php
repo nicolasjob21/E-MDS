@@ -16,8 +16,9 @@ use Illuminate\Validation\ValidationException;
 /**
  * Staff-proposed corrections to an LDDAP's details, applied only once an admin approves.
  *
- * Mirrors {@see UpdateRequestService} for the cheque register. The check number is never among
- * the correctable fields — it is assigned by the LDDAP series, not entered by hand.
+ * The check number is never among the correctable fields — it is assigned by the LDDAP series,
+ * not entered by hand. (Cheques take no correction requests: their details are edited directly
+ * while they have no status or are For Compliance.)
  */
 class LddapUpdateRequestService
 {

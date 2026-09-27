@@ -107,7 +107,7 @@ class ChequeExpiryService
         $when = $days === 0 ? 'today' : "in {$days} ".($days === 1 ? 'day' : 'days');
 
         $because = match ($cheque->status) {
-            ChequeStatus::Registered, ChequeStatus::OutForSignature => "Pending signature — this cheque will become stale {$when} if not released or forwarded.",
+            ChequeStatus::Registered, ChequeStatus::ForChecking, ChequeStatus::ForCompliance, ChequeStatus::ForFinalPrint, ChequeStatus::ForSignature => "Pending signature — this cheque will become stale {$when} if not released or forwarded.",
             ChequeStatus::ReleasedToPayee => "Released to {$cheque->received_by_name} on ".
                 ($cheque->date_received?->toDateString() ?? '—').
                 " — this cheque will become stale {$when} if not encashed. Please follow up with the payee.",

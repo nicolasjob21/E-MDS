@@ -31,9 +31,16 @@ class User extends Authenticatable
         ];
     }
 
+    /** Admin powers — an Admin or a Super Admin. */
     public function isAdmin(): bool
     {
-        return $this->role === UserRole::Admin;
+        return $this->role?->isAdmin() === true;
+    }
+
+    /** The only role that may grant, change or remove the Super Admin role. */
+    public function isSuperAdmin(): bool
+    {
+        return $this->role === UserRole::SuperAdmin;
     }
 
     /**
@@ -44,7 +51,7 @@ class User extends Authenticatable
      */
     public function scopeActiveAdmins($query)
     {
-        return $query->where('role', UserRole::Admin)->where('is_active', true);
+        return $query->whereIn('role', [UserRole::Admin, UserRole::SuperAdmin])->where('is_active', true);
     }
 
     public function isTeller(): bool

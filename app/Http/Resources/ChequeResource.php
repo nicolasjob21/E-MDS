@@ -14,10 +14,16 @@ use Illuminate\Http\Resources\Json\JsonResource;
  */
 class ChequeResource extends JsonResource
 {
-    /** Every step but the teller's belongs to an admin. */
+    /** The ACIC steps and the ways out belong to an admin (or Super Admin). */
     private function admin(Request $request): bool
     {
-        return $request->user()?->role === UserRole::Admin;
+        return $request->user()?->isAdmin() === true;
+    }
+
+    /** Preparing a cheque — drafts, the final print, editing — is anyone who can use one. */
+    private function preparer(Request $request): bool
+    {
+        return $this->admin($request) || $request->user()?->role === UserRole::Staff;
     }
 
     /**
@@ -29,7 +35,22 @@ class ChequeResource extends JsonResource
             'id' => $this->id,
             'cheque_number' => $this->cheque_number,
             'payee_name' => $this->payee_name,
+            'account_no' => $this->account_no,
+            'unit_name' => $this->unit_name,
             'amount' => $this->amount,
+            // The teller's Action: who received it (forwarded to the payee), and its RTS outcome.
+            'payee_received_by' => $this->payee_received_by,
+            'payee_received_on' => $this->payee_received_on?->toDateString(),
+            'rts_status' => $this->rts_status,
+            // Forward to Payee (teller) and Release to Payee (admin) share these: who received it,
+            // when, their unit, and who recorded it when. The status says which it was.
+            'payee_receipt' => $this->when($this->received_by_name !== null || $this->date_received !== null, fn () => [
+                'received_by' => $this->received_by_name,
+                'date_received' => $this->date_received?->toDateString(),
+                'unit' => $this->payee_unit_name,
+                'recorded_by' => $this->whenLoaded('releasedBy', fn () => $this->releasedBy?->only(['id', 'name'])),
+                'recorded_at' => $this->released_at,
+            ]),
             'cheque_date' => $this->cheque_date?->toDateString(),
             // The ACIC this cheque sits on, if any.
             'acic_id' => $this->acic_id,
@@ -52,11 +73,6 @@ class ChequeResource extends JsonResource
             // Approved / Disapproved are settled; "Returned" sends it back for rework.
             'is_final' => $this->status->isFinal(),
             'status_label' => $this->status->label(),
-            // Present only when the pending count was loaded (list view).
-            'has_pending_update' => $this->when(
-                $this->pending_update_count !== null,
-                fn () => (int) $this->pending_update_count > 0,
-            ),
 
             // ---- the flow, and the 90-day clock that runs beside it ----
             //
@@ -75,15 +91,18 @@ class ChequeResource extends JsonResource
 
             // What this viewer may do next, decided server-side so the buttons and the
             // endpoints can never disagree. Every step but the teller's is the admin's.
-            'can_route' => $this->admin($request) && $this->effectiveStatus() === ChequeStatus::Registered,
-            'can_receive' => $this->admin($request) && $this->effectiveStatus() === ChequeStatus::OutForSignature,
+            // The draft-checking flow.
+            'can_edit' => $this->preparer($request) && $this->effectiveStatus()->isEditable(),
+            'can_print_draft' => $this->preparer($request) && $this->effectiveStatus()->canPrintDraft(),
+            // Approve or Return — Administrators and Super Admins.
+            'can_check_draft' => $this->admin($request) && $this->effectiveStatus() === ChequeStatus::ForChecking,
+            'can_final_print' => $this->preparer($request) && $this->effectiveStatus() === ChequeStatus::ForFinalPrint,
             'can_assign' => $this->admin($request) && $this->effectiveStatus()->isAcicEligible() && $this->acic_id === null,
             'can_release' => $this->admin($request) && $this->effectiveStatus() === ChequeStatus::Approved && $this->acic_id !== null,
-            'can_rts' => $this->admin($request) && $this->effectiveStatus()->canRts(),
             'can_cancel' => $this->admin($request) && $this->effectiveStatus()->canCancel(),
-            'can_void' => $this->admin($request) && $this->effectiveStatus()->canVoid(),
-            // The cheque face can be printed once the cheque is on an ACIC — that is when it
-            // carries everything the printed form needs.
+            'can_spoil' => $this->admin($request) && $this->effectiveStatus()->canSpoil(),
+            // A cheque on an ACIC can be viewed and reprinted from its row. (Before that, the
+            // draft and the final print are steps of their own.)
             'can_print' => $this->status->isOnAcic(),
             'can_replace' => $this->admin($request) && $this->effectiveStatus() === ChequeStatus::Stale && $this->replaced_by_id === null,
 
@@ -103,8 +122,15 @@ class ChequeResource extends JsonResource
                 'from_unit_name' => $this->from_unit_name,
             ]),
 
-            // The reason behind an RTS, a cancel or a void.
+            // The reason behind an RTS, a cancel or a spoil.
             'exception_reason' => $this->exception_reason,
+
+            // Who marked it Spoiled, and when. The replacement is `replaced_by`.
+            'spoil' => $this->when($this->spoiled_at !== null, fn () => [
+                'spoiled_by' => $this->whenLoaded('spoiledBy', fn () => $this->spoiledBy?->only(['id', 'name', 'username'])),
+                'spoiled_at' => $this->spoiled_at,
+                'reason' => $this->exception_reason,
+            ]),
 
             // Path A. Note `release.received_by_name` is who the cheque was released TO, which
             // is a different thing from the top-level `received_by_name` above (the teller who
@@ -153,9 +179,38 @@ class ChequeResource extends JsonResource
                 'return_reason' => $this->acic->return_reason,
             ]),
 
-            // The stale cheque this replaces, and the one that replaced it.
+            // The cheque this one replaces (stale or spoiled), and the one that replaced it.
             'replaces' => $this->whenLoaded('replaces', fn () => $this->replaces?->only(['id', 'cheque_number'])),
             'replaced_by' => $this->whenLoaded('replacedBy', fn () => $this->replacedBy?->only(['id', 'cheque_number'])),
+            // A spoiled cheque: the ACIC it was on when it was spoiled.
+            'spoiled_from_acic' => $this->whenLoaded('spoiledFromAcic', fn () => $this->spoiledFromAcic?->only(['id', 'acic_number'])),
+            // A replacement of a spoiled cheque that was on an ACIC: that ACIC, and whether
+            // "Use previous ACIC" is open (only while it is still with the admin). Null otherwise.
+            'previous_acic' => $this->when(
+                $this->relationLoaded('replaces') && $this->replaces?->relationLoaded('spoiledFromAcic'),
+                fn () => $this->previousAcic(),
+            ),
+        ];
+    }
+
+    /** @return array{id: int, acic_number: int, spoiled_cheque_number: int, allowed: bool, reason: ?string}|null */
+    private function previousAcic(): ?array
+    {
+        $spoiled = $this->replaces;
+        $acic = $spoiled?->spoiledFromAcic;
+
+        if ($spoiled === null || $spoiled->status !== ChequeStatus::Spoiled || $acic === null) {
+            return null;
+        }
+
+        $why = $acic->notWithAdminBecause();
+
+        return [
+            'id' => $acic->id,
+            'acic_number' => $acic->acic_number,
+            'spoiled_cheque_number' => $spoiled->cheque_number,
+            'allowed' => $why === null,
+            'reason' => $why === null ? null : "ACIC #{$acic->acic_number} {$why}, so the replacement must go on a new ACIC.",
         ];
     }
 }

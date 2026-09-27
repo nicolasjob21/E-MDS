@@ -4,7 +4,6 @@ namespace App\Services;
 
 use App\Enums\ChequeAction;
 use App\Enums\ChequeStatus;
-use App\Enums\RequestStatus;
 use App\Models\Acic;
 use App\Models\Cheque;
 use App\Models\ChequeStatusHistory;
@@ -19,8 +18,8 @@ use Illuminate\Validation\ValidationException;
 /**
  * Every step a cheque takes, and everything that can stop it.
  *
- *   Registered → Out for Signature → (Received) → For ACIC → Approved ─┬─▶ Released to Payee
- *                                                                      └─▶ Forwarded to Teller …
+ *   (blank) → For Checking → For Final Print → For Signature → Approved ─┬─▶ Released to Payee
+ *                  ↕ For Compliance (Return / new draft)                   └─▶ Forwarded to Teller …
  *
  * The ACIC-level half of Branch B lives in `AcicService`, because a whole ACIC is forwarded,
  * claimed and deposited at once. Everything here is per cheque.
@@ -32,7 +31,7 @@ use Illuminate\Validation\ValidationException;
  */
 class ChequeFlowService
 {
-    public const WITH = ['usedBy', 'receivedBy', 'releasedBy', 'forwardedTo', 'acic', 'replaces', 'replacedBy'];
+    public const WITH = ['usedBy', 'receivedBy', 'releasedBy', 'forwardedTo', 'acic', 'replaces.spoiledFromAcic', 'replacedBy', 'spoiledBy', 'spoiledFromAcic'];
 
     /** What a caller is told when the record moved under them. */
     public const CONFLICT = 'This record was updated by another user. Refresh to continue.';
@@ -42,54 +41,156 @@ class ChequeFlowService
     // ------------------------------------------------------------------ the flow
 
     /**
-     * Step 2 — route a registered cheque out for signature.
-     *
-     * @param  array{forward_to_name: string, forward_unit_name?: string|null, date_forwarded: string, note?: string|null}  $details
+     * Print Draft — the preparer submits the cheque to the admins in charge (every active
+     * Administrator and Super Admin) for checking. From no status, or For Compliance after a Return.
      */
-    public function routeForSignature(User $user, Cheque $cheque, array $details, ?string $expected = null): Cheque
+    public function printDraft(User $user, Cheque $cheque, ?string $expected = null): Cheque
     {
-        return $this->move($user, $cheque, ChequeStatus::OutForSignature, 'routed', $expected,
-            function (Cheque $c) use ($details, $user) {
-                $on = $this->date($details['date_forwarded'] ?? null);
-                $this->assertDate($on, 'date_forwarded', $c->cheque_date, 'the cheque date');
+        $cheque = $this->move($user, $cheque, ChequeStatus::ForChecking, 'draft_printed', $expected,
+            function (Cheque $c) {
+                if (! $c->status->canPrintDraft()) {
+                    throw ValidationException::withMessages([
+                        'cheque' => "Cheque #{$c->cheque_number} is {$c->status->describe()} — a draft is printed only before checking, or after a Return.",
+                    ]);
+                }
 
-                return [
-                    'forward_to_name' => trim((string) $details['forward_to_name']),
-                    'forward_unit_name' => $this->text($details['forward_unit_name'] ?? null),
-                    'date_forwarded' => $on->toDateString(),
-                    'forwarded_by' => $user->id,
-                    'forward_note' => $this->text($details['note'] ?? null),
-                ];
+                return [];
             });
+
+        $this->tell(
+            User::query()->activeAdmins()->whereKeyNot($user->id)->get(),
+            'request',
+            "Cheque #{$cheque->cheque_number} — draft for checking",
+            "{$user->name} submitted the draft of cheque #{$cheque->cheque_number}"
+                .($cheque->payee_name ? " ({$cheque->payee_name})" : '').'. Approve it, or return it with a comment.',
+            $cheque->cheque_number,
+        );
+
+        return $cheque;
+    }
+
+    /** Approve — an admin in charge finds the draft correct. For Checking → For Final Print. */
+    public function approveDraft(User $checker, Cheque $cheque, ?string $note = null, ?string $expected = null): Cheque
+    {
+        $this->assertInCharge($checker);
+        $note = $this->text($note);
+
+        $cheque = $this->move($checker, $cheque, ChequeStatus::ForFinalPrint, 'draft_approved', $expected,
+            fn () => [], $note);
+
+        $this->tell(
+            [$this->preparer($cheque)],
+            'approved',
+            "Cheque #{$cheque->cheque_number} — draft approved",
+            "{$checker->name} approved the draft of cheque #{$cheque->cheque_number}. It is ready for Final Print."
+                .($note ? " Comment: {$note}" : ''),
+            $cheque->cheque_number,
+        );
+
+        return $cheque;
     }
 
     /**
-     * Step 3 — the signed cheque is back. Recording receipt carries the cheque **straight on to
-     * For ACIC**, as the flow requires, so the history shows both moves and the cheque comes to
-     * rest where it can be put on an ACIC.
-     *
-     * @param  array{received_by_name?: string|null, date_received: string, from_unit_name?: string|null, note?: string|null}  $details
+     * Return — the draft is not correct. The comment (required) says what to change.
+     * For Checking → For Compliance.
      */
-    public function markAsReceived(User $user, Cheque $cheque, array $details, ?string $expected = null): Cheque
+    public function returnDraft(User $checker, Cheque $cheque, string $comment, ?string $expected = null): Cheque
+    {
+        $this->assertInCharge($checker);
+        $comment = $this->text($comment);
+
+        if ($comment === null) {
+            throw ValidationException::withMessages(['comment' => 'Say what needs to change.']);
+        }
+
+        $cheque = $this->move($checker, $cheque, ChequeStatus::ForCompliance, 'draft_returned', $expected,
+            fn () => [], $comment);
+
+        $this->tell(
+            [$this->preparer($cheque)],
+            'rejected',
+            "Cheque #{$cheque->cheque_number} — draft returned",
+            "{$checker->name} returned the draft of cheque #{$cheque->cheque_number}. Update it and print a new draft. Comment: {$comment}",
+            $cheque->cheque_number,
+        );
+
+        return $cheque;
+    }
+
+    /**
+     * Final Print, confirmed — the cheque printed successfully. For Final Print → For Signature,
+     * from where it may be assigned to an ACIC.
+     */
+    public function confirmFinalPrint(User $user, Cheque $cheque, ?string $expected = null): Cheque
+    {
+        return $this->move($user, $cheque, ChequeStatus::ForSignature, 'final_printed', $expected, fn () => []);
+    }
+
+    /**
+     * Edit the cheque's details — only while it has no status yet, or is For Compliance. The
+     * number never changes. Each edit is a timeline entry of its own, with what changed.
+     *
+     * @param  array{payee_name: string, account_no?: string|null, unit_name?: string|null, amount: mixed, cheque_date: string}  $details
+     */
+    public function updateDetails(User $user, Cheque $cheque, array $details, ?string $expected = null): Cheque
     {
         return DB::transaction(function () use ($user, $cheque, $details, $expected) {
-            $cheque = $this->move($user, $cheque, ChequeStatus::Received, 'received', $expected,
-                function (Cheque $c) use ($details, $user) {
-                    $on = $this->date($details['date_received'] ?? null);
-                    $this->assertDate($on, 'date_received', $c->date_forwarded, 'the date forwarded');
+            $cheque = Cheque::query()->whereKey($cheque->getKey())->lockForUpdate()->firstOrFail();
 
-                    return [
-                        'received_by_name_in' => $this->text($details['received_by_name'] ?? null) ?? $user->name,
-                        'date_received_in' => $on->toDateString(),
-                        'from_unit_name' => $this->text($details['from_unit_name'] ?? null),
-                        'received_by' => $user->id,
-                        'received_at' => Carbon::now(),
-                        'review_note' => $this->text($details['note'] ?? null),
-                    ];
-                });
+            if ($expected !== null && $expected !== $cheque->status->value) {
+                throw ValidationException::withMessages(['cheque' => self::CONFLICT]);
+            }
 
-            // The pass-through: Received never rests.
-            return $this->move($user, $cheque, ChequeStatus::ForAcic, 'ready_for_acic', null, fn () => []);
+            if (! $cheque->effectiveStatus()->isEditable()) {
+                throw ValidationException::withMessages([
+                    'cheque' => "Cheque #{$cheque->cheque_number} is {$cheque->effectiveStatus()->describe()} — its details can be edited only before its first draft, or while it is For Compliance.",
+                ]);
+            }
+
+            $after = [
+                'payee_name' => trim((string) $details['payee_name']),
+                'account_no' => $this->text($details['account_no'] ?? null),
+                'unit_name' => $this->text($details['unit_name'] ?? null),
+                'amount' => number_format((float) $details['amount'], 2, '.', ''),
+                'cheque_date' => Carbon::parse((string) $details['cheque_date'])->toDateString(),
+            ];
+            $before = [
+                'payee_name' => $cheque->payee_name,
+                'account_no' => $cheque->account_no,
+                'unit_name' => $cheque->unit_name,
+                'amount' => $cheque->amount === null ? null : number_format((float) $cheque->amount, 2, '.', ''),
+                'cheque_date' => $cheque->cheque_date?->toDateString(),
+            ];
+
+            $changes = [];
+            foreach ($after as $field => $to) {
+                if ((string) $before[$field] !== (string) $to) {
+                    $changes[$field] = ['from' => $before[$field], 'to' => $to];
+                }
+            }
+
+            if ($changes === []) {
+                return $cheque->fresh(self::WITH);
+            }
+
+            $cheque->update($after);
+
+            ChequeStatusHistory::create([
+                'cheque_id' => $cheque->id,
+                'from_status' => $cheque->status,
+                'to_status' => $cheque->status,
+                'action' => 'edited',
+                'user_id' => $user->id,
+                'acic_id' => $cheque->acic_id,
+                'details' => $changes,
+                'note' => null,
+                'created_at' => Carbon::now(),
+            ]);
+
+            $this->logger->log($user, ChequeAction::EditedCheque, $cheque->cheque_number,
+                "Edited cheque #{$cheque->cheque_number}: ".implode(', ', array_keys($changes)).'.');
+
+            return $cheque->fresh(self::WITH);
         });
     }
 
@@ -131,44 +232,14 @@ class ChequeFlowService
 
     // ------------------------------------------------------------- the ways out
 
-    /** RTS — back to Registered, with a reason. Allowed while the cheque is still in the office. */
-    public function rts(User $user, Cheque $cheque, string $reason, ?string $expected = null): Cheque
-    {
-        return $this->move($user, $cheque, ChequeStatus::Registered, 'rts', $expected,
-            function (Cheque $c) use ($reason) {
-                if (! $c->status->canRts()) {
-                    throw ValidationException::withMessages([
-                        'cheque' => "Cheque #{$c->cheque_number} is {$c->status->label()} and cannot be returned to sender.",
-                    ]);
-                }
-
-                return [
-                    'exception_reason' => $reason,
-                    'rts_at' => Carbon::now(),
-                    // It is going back out again: the last routing is cleared.
-                    'forward_to_name' => null,
-                    'forward_unit_name' => null,
-                    'date_forwarded' => null,
-                    'forwarded_by' => null,
-                ];
-            }, $reason);
-    }
-
     /** Cancel — final, and only before the cheque reaches an ACIC. */
     public function cancel(User $user, Cheque $cheque, string $reason, ?string $expected = null): Cheque
     {
         return $this->move($user, $cheque, ChequeStatus::Cancelled, 'cancelled', $expected,
-            fn () => ['exception_reason' => $reason], $reason);
-    }
-
-    /** Void — final, on an ACIC only, never once a teller has it. The number stays used. */
-    public function void(User $user, Cheque $cheque, string $reason, ?string $expected = null): Cheque
-    {
-        return $this->move($user, $cheque, ChequeStatus::Voided, 'voided', $expected,
             function (Cheque $c) use ($reason) {
-                if (! $c->status->canVoid()) {
+                if (! $c->status->canCancel()) {
                     throw ValidationException::withMessages([
-                        'cheque' => "Cheque #{$c->cheque_number} is {$c->status->label()} — a cheque can only be voided while it is Approved.",
+                        'cheque' => "Cheque #{$c->cheque_number} is {$c->status->describe()} — only a cheque not yet on an ACIC can be cancelled.",
                     ]);
                 }
 
@@ -203,19 +274,9 @@ class ChequeFlowService
                 throw ValidationException::withMessages(['cheque' => self::CONFLICT]);
             }
 
-            // A cheque whose details are in dispute does not move on: nobody signs off on, or
-            // hands over, figures an admin has yet to rule on. The system's own steps (going
-            // stale, and the exceptions that close a cheque) are not held up by it.
-            if (! in_array($action, ['staled', 'cancelled', 'voided', 'rts'], true)
-                && $cheque->updateRequests()->where('status', RequestStatus::Pending)->exists()) {
-                throw ValidationException::withMessages([
-                    'cheque' => "Cheque #{$cheque->cheque_number} is on hold — a detail update request is awaiting approval and must be resolved first.",
-                ]);
-            }
-
             if (! $from->canMoveTo($to)) {
                 throw ValidationException::withMessages([
-                    'cheque' => "Cheque #{$cheque->cheque_number} is {$from->label()} and cannot be moved to {$to->label()}.",
+                    'cheque' => "Cheque #{$cheque->cheque_number} is {$from->describe()} and cannot be moved to {$to->describe()}.",
                 ]);
             }
 
@@ -239,7 +300,7 @@ class ChequeFlowService
             ]);
 
             $this->logger->log($user, self::AUDIT[$action] ?? ChequeAction::ReviewedCheque, $cheque->cheque_number,
-                ucfirst(str_replace('_', ' ', $action))." cheque #{$cheque->cheque_number}: {$from->label()} → {$to->label()}."
+                ucfirst(str_replace('_', ' ', $action))." cheque #{$cheque->cheque_number}: ".($from->label() ?: '(no status)').' → '.($to->label() ?: '(no status)').'.'
                     .($note ? " Reason: {$note}" : ''));
 
             return $cheque->fresh(self::WITH);
@@ -248,13 +309,13 @@ class ChequeFlowService
 
     /** Which audit action each step writes. */
     private const AUDIT = [
-        'routed' => ChequeAction::RoutedForSignature,
-        'received' => ChequeAction::ReceivedCheque,
-        'ready_for_acic' => ChequeAction::ReadyForAcic,
+        'draft_printed' => ChequeAction::PrintedDraft,
+        'draft_approved' => ChequeAction::ApprovedDraft,
+        'draft_returned' => ChequeAction::ReturnedDraft,
+        'final_printed' => ChequeAction::PrintedFinal,
         'released' => ChequeAction::ReleasedCheque,
-        'rts' => ChequeAction::RtsCheque,
         'cancelled' => ChequeAction::CancelledCheque,
-        'voided' => ChequeAction::VoidedCheque,
+        'spoiled' => ChequeAction::SpoiledCheque,
         'assigned' => ChequeAction::UsedAcic,
         'unassigned' => ChequeAction::ReassignedAcic,
         'forwarded_to_teller' => ChequeAction::ForwardedChequeToTeller,
@@ -309,5 +370,24 @@ class ChequeFlowService
                 kind: $kind, title: $title, message: $message, url: $url, chequeNumber: $chequeNumber,
             ));
         }
+    }
+
+    /** Only an admin in charge — an Administrator or Super Admin — checks drafts. */
+    private function assertInCharge(User $user): void
+    {
+        if (! $user->isAdmin()) {
+            throw ValidationException::withMessages([
+                'cheque' => 'Only an Administrator or Super Admin can approve or return a draft.',
+            ]);
+        }
+    }
+
+    /** Whoever printed the latest draft — the one told when it is approved or returned. */
+    private function preparer(Cheque $cheque): ?User
+    {
+        $step = $cheque->statusHistory()
+            ->where('action', 'draft_printed')->latest('id')->first();
+
+        return $step?->user ?? $cheque->usedBy;
     }
 }

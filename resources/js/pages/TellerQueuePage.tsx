@@ -1,29 +1,35 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { HandCoins, Undo2, Inbox, CheckCircle2, RotateCcw, X } from 'lucide-react';
+import { HandCoins, Undo2, Inbox, Send, ClipboardCheck, Search, X, Eye, UserRound } from 'lucide-react';
 import { AcicTellerApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
-import type { Acic, AcicTellerStatus, TellerQueue } from '../lib/types';
+import type { Acic, AcicTellerStatus, TellerForwardTo, TellerQueue } from '../lib/types';
 import { PageHeader, Spinner, Alert, EmptyState } from '../components/ui';
-import { formatDateTime, formatMoney } from '../lib/format';
+import TellerActionModal from '../components/TellerActionModal';
+import AcicViewModal from '../components/AcicViewModal';
+import PayeeForwardModal from '../components/PayeeForwardModal';
+import { formatDateTime, formatMoney, formatManila } from '../lib/format';
 
-/** The dashboard's five lists, in the order a teller works through them. */
-const TABS: { key: keyof Omit<TellerQueue, 'bank_name'>; label: string; status: AcicTellerStatus }[] = [
-    { key: 'pending', label: 'Pending', status: 'pending' },
-    { key: 'accepted', label: 'My Accepted', status: 'accepted_by_teller' },
-    { key: 'returned', label: 'Returned by Bank', status: 'returned_by_bank' },
-    { key: 'completed', label: 'Completed', status: 'completed' },
+/** The dashboard's lists, in the order a teller works through them. */
+const TABS: { key: keyof Omit<TellerQueue, 'bank_name'>; label: string }[] = [
+    { key: 'pending', label: 'Pending' },
+    { key: 'accepted', label: 'My Accepted' },
+    { key: 'forwarded', label: 'Forwarded' },
+    { key: 'rts', label: 'RTS' },
+    { key: 'completed', label: 'Completed' },
 ];
 
-/** Which step the teller is taking on an ACIC. */
-type Step = 'complete' | 'returned' | 'return-admin';
+/** Every teller status an ACIC can hold today, in the order the teller works through them. */
+const STATUS_OPTIONS: { value: AcicTellerStatus | ''; label: string }[] = [
+    { value: '', label: 'All' },
+    { value: 'pending', label: 'Pending' },
+    { value: 'accepted_by_teller', label: 'Accepted' },
+    { value: 'forwarded_to_land_bank', label: 'Forwarded to LBP' },
+    { value: 'forwarded_to_payee', label: 'Forwarded to Payee' },
+    { value: 'rts', label: 'RTS' },
+    { value: 'completed', label: 'Completed' },
+];
 
-const EMPTY: TellerQueue = { pending: [], accepted: [], returned: [], completed: [], bank_name: 'Land Bank of the Philippines' };
-
-function nowLocal(): string {
-    const d = new Date();
-    d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-    return d.toISOString().slice(0, 16);
-}
+const EMPTY: TellerQueue = { pending: [], accepted: [], forwarded: [], rts: [], completed: [], bank_name: 'Land Bank of the Philippines' };
 
 function Field({ label, htmlFor, optional = false, children }: { label: string; htmlFor: string; optional?: boolean; children: ReactNode }) {
     return (
@@ -44,6 +50,9 @@ function TellerStatusBadge({ status }: { status?: AcicTellerStatus | null }) {
     const config: Record<AcicTellerStatus, { styles: string; label: string }> = {
         pending: { styles: 'border-accent-400/50 bg-accent-400/10 text-accent-400', label: 'Pending' },
         accepted_by_teller: { styles: 'border-indigo-400/50 bg-indigo-400/10 text-indigo-300', label: 'Accepted' },
+        forwarded_to_land_bank: { styles: 'border-blue-400/50 bg-blue-400/10 text-blue-300', label: 'Forwarded to LBP' },
+        forwarded_to_payee: { styles: 'border-teal-400/50 bg-teal-400/10 text-teal-300', label: 'Forwarded to Payee' },
+        rts: { styles: 'border-amber-400/50 bg-amber-400/10 text-amber-400', label: 'RTS' },
         returned_by_bank: { styles: 'border-amber-400/50 bg-amber-400/10 text-amber-400', label: 'Returned by Bank' },
         completed: { styles: 'border-success/40 bg-success/10 text-success-fg', label: 'Completed' },
     };
@@ -82,36 +91,56 @@ export default function TellerQueuePage() {
     const [type, setType] = useState('');
     const [from, setFrom] = useState('');
     const [to, setTo] = useState('');
+    const [status, setStatus] = useState('');
+    const [search, setSearch] = useState('');
+    // Debounced copy — the lists only refetch once typing pauses.
+    const [query, setQuery] = useState('');
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [notice, setNotice] = useState('');
     const [busy, setBusy] = useState<number | null>(null);
 
-    const [acting, setActing] = useState<{ acic: Acic; step: Step } | null>(null);
-    const [at, setAt] = useState(nowLocal());
+    // Return to Admin — the one step kept in this page's own dialog.
+    const [returning, setReturning] = useState<Acic | null>(null);
     const [reason, setReason] = useState('');
-    const [note, setNote] = useState('');
+    // The accepting teller's Forward and Action.
+    const [stepping, setStepping] = useState<{ acic: Acic; step: 'forward' | 'action'; forwardTo?: TellerForwardTo } | null>(null);
+    // Forward to Payee: the cheques, the receiver, the date and the unit.
+    const [payeeForwarding, setPayeeForwarding] = useState<Acic | null>(null);
+    // The read-only View, on every row.
+    const [viewingId, setViewingId] = useState<number | null>(null);
 
     const load = useCallback(async () => {
         try {
-            setQueue(await AcicTellerApi.queue({ type: type || undefined, from: from || undefined, to: to || undefined }));
+            setQueue(
+                await AcicTellerApi.queue({
+                    type: type || undefined,
+                    from: from || undefined,
+                    to: to || undefined,
+                    search: query || undefined,
+                    status: status || undefined,
+                }),
+            );
             setError('');
         } catch (err) {
             setError(toApiError(err).message);
         } finally {
             setLoading(false);
         }
-    }, [type, from, to]);
+    }, [type, from, to, query, status]);
+
+    useEffect(() => {
+        const timer = setTimeout(() => setQuery(search.trim()), 300);
+        return () => clearTimeout(timer);
+    }, [search]);
 
     useEffect(() => {
         void load();
     }, [load]);
 
-    function open(acic: Acic, step: Step) {
-        setActing({ acic, step });
-        setAt(nowLocal());
+    function openReturn(acic: Acic) {
+        setReturning(acic);
         setReason('');
-        setNote('');
         setError('');
     }
 
@@ -134,31 +163,14 @@ export default function TellerQueuePage() {
 
     async function submit(e: FormEvent) {
         e.preventDefault();
-        if (!acting) return;
-        const { acic, step } = acting;
-        const expected = acic.teller_status ?? undefined;
+        if (!returning) return;
+        const acic = returning;
         setBusy(acic.id);
         setError('');
         try {
-            if (step === 'complete') {
-                await AcicTellerApi.confirmAndComplete(acic.id, {
-                    forwarded_at: at,
-                    note: note.trim() || undefined,
-                    expected_status: expected,
-                });
-                setNotice(`ACIC #${acic.acic_number} forwarded to ${queue.bank_name} and completed.`);
-            } else if (step === 'returned') {
-                await AcicTellerApi.returnedByBank(acic.id, {
-                    returned_at: at,
-                    reason: reason.trim(),
-                    expected_status: expected,
-                });
-                setNotice(`ACIC #${acic.acic_number} marked as returned by the bank.`);
-            } else {
-                await AcicTellerApi.returnToAdmin(acic.id, reason.trim(), expected);
-                setNotice(`ACIC #${acic.acic_number} returned to the admin.`);
-            }
-            setActing(null);
+            await AcicTellerApi.returnToAdmin(acic.id, reason.trim(), acic.teller_status ?? undefined);
+            setNotice(`ACIC #${acic.acic_number} returned to the admin.`);
+            setReturning(null);
             await load();
         } catch (err) {
             const apiErr = toApiError(err);
@@ -169,13 +181,7 @@ export default function TellerQueuePage() {
     }
 
     const rows = queue[tab];
-    const mine = (acic: Acic) => isAdmin || acic.accepted_by?.id === user?.id;
-
-    const TITLES: Record<Step, string> = {
-        complete: 'Confirm and Complete',
-        returned: 'Returned by Bank',
-        'return-admin': 'Return to Admin',
-    };
+    const mine = (acic: Acic) => acic.accepted_by?.id === user?.id;
 
     return (
         <div>
@@ -199,8 +205,37 @@ export default function TellerQueuePage() {
                 </div>
             )}
 
-            {/* Filters — type and the date it was forwarded. */}
-            <div className="card mb-4 grid grid-cols-1 gap-3 p-4 sm:grid-cols-[minmax(0,12rem)_minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
+            {/* Filters — on the server, together; they only narrow each list. */}
+            <div
+                className="card mb-4 grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 lg:grid-cols-[minmax(15rem,1fr)_11rem_7rem_9.5rem_9.5rem_auto] lg:items-end"
+                role="search"
+                aria-label="Filter ACICs"
+            >
+                <div className="sm:col-span-2 lg:col-span-1">
+                    <Field label="Search" htmlFor="q-search">
+                        <div className="relative">
+                            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-subtle" />
+                            <input
+                                id="q-search"
+                                type="search"
+                                className="field !py-1.5 !pl-10"
+                                value={search}
+                                onChange={(e) => setSearch(e.target.value)}
+                                placeholder="ACIC no., cheque no., LDDAP no., or DV no."
+                                maxLength={100}
+                            />
+                        </div>
+                    </Field>
+                </div>
+                <Field label="Status" htmlFor="q-status">
+                    <select id="q-status" className="field !py-1.5" value={status} onChange={(e) => setStatus(e.target.value)}>
+                        {STATUS_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>
+                                {o.label}
+                            </option>
+                        ))}
+                    </select>
+                </Field>
                 <Field label="Type" htmlFor="q-type">
                     <select id="q-type" className="field !py-1.5" value={type} onChange={(e) => setType(e.target.value)}>
                         <option value="">All</option>
@@ -216,8 +251,11 @@ export default function TellerQueuePage() {
                 </Field>
                 <button
                     type="button"
-                    className="btn btn-ghost !py-1.5"
+                    className="btn btn-ghost !py-1.5 sm:col-span-2 lg:col-span-1"
                     onClick={() => {
+                        setSearch('');
+                        setQuery('');
+                        setStatus('');
                         setType('');
                         setFrom('');
                         setTo('');
@@ -228,7 +266,7 @@ export default function TellerQueuePage() {
                 </button>
             </div>
 
-            {/* The five lists. */}
+            {/* The lists. */}
             <div className="mb-4 flex flex-wrap gap-1 border-b border-line">
                 {TABS.map(({ key, label }) => (
                     <button
@@ -262,7 +300,7 @@ export default function TellerQueuePage() {
                                     <th className="px-4 py-3 text-right font-semibold">Total</th>
                                     <th className="px-4 py-3 font-semibold">Forwarded by</th>
                                     <th className="px-4 py-3 font-semibold">Forwarded to teller</th>
-                                    <th className="px-4 py-3 font-semibold">To Land Bank</th>
+                                    <th className="px-4 py-3 font-semibold">Forwarded out</th>
                                     <th className="px-4 py-3 font-semibold">Status</th>
                                     <th className="px-4 py-3 font-semibold">Last note</th>
                                     <th className="px-4 py-3 text-right font-semibold">Action</th>
@@ -274,7 +312,7 @@ export default function TellerQueuePage() {
                                         (acic.cheques ?? []).reduce((s, c) => s + Number(c.amount ?? 0), 0) +
                                         (acic.lddaps ?? []).reduce((s, l) => s + Number(l.amount ?? 0), 0);
                                     const lastNote =
-                                        acic.bank_return_reason ?? acic.land_bank_note ?? acic.forward_note ?? acic.completion_note ?? null;
+                                        acic.rts_reason ?? acic.bank_return_reason ?? acic.land_bank_note ?? acic.forward_note ?? acic.completion_note ?? null;
 
                                     return (
                                         <tr key={acic.id} className="border-b border-line/60 last:border-0">
@@ -293,14 +331,31 @@ export default function TellerQueuePage() {
                                                     </span>
                                                 )}
                                             </td>
-                                            {/* Every completion records when it went over the counter. */}
+                                            {/* Where the accepting teller took it, and when. */}
                                             <td className="px-4 py-3 whitespace-nowrap text-xs text-muted">
-                                                {acic.forwarded_to_land_bank_at
-                                                    ? formatDateTime(acic.forwarded_to_land_bank_at)
-                                                    : '—'}
+                                                {acic.teller_forwarded_to === 'payee' && acic.teller_forwarded_at ? (
+                                                    <>
+                                                        To Payee
+                                                        <span className="mt-0.5 block text-subtle">{formatManila(acic.teller_forwarded_at)}</span>
+                                                    </>
+                                                ) : acic.forwarded_to_land_bank_at ? (
+                                                    <>
+                                                        Forwarded to Bank
+                                                        <span className="mt-0.5 block text-subtle">
+                                                            {formatManila(acic.forwarded_to_land_bank_at)}
+                                                        </span>
+                                                    </>
+                                                ) : (
+                                                    '—'
+                                                )}
                                             </td>
                                             <td className="px-4 py-3">
                                                 <TellerStatusBadge status={acic.teller_status} />
+                                                {acic.payee_progress && acic.payee_progress.forwarded > 0 && (
+                                                    <span className="mt-1 block text-xs text-teal-300">
+                                                        {acic.payee_progress.forwarded}/{acic.payee_progress.total} forwarded to payee
+                                                    </span>
+                                                )}
                                             </td>
                                             <td className="px-4 py-3 max-w-[16rem] truncate text-xs text-muted" title={lastNote ?? ''}>
                                                 {lastNote ?? '—'}
@@ -318,46 +373,58 @@ export default function TellerQueuePage() {
                                                         </button>
                                                     )}
 
-                                                    {acic.teller_status === 'accepted_by_teller' && mine(acic) && (
-                                                        <>
-                                                            <button className="btn btn-primary !px-3 !py-1.5" onClick={() => open(acic, 'complete')}>
-                                                                <CheckCircle2 className="h-3.5 w-3.5" />
-                                                                Confirm and Complete
-                                                            </button>
-                                                            <button className="btn btn-ghost !px-3 !py-1.5" onClick={() => open(acic, 'return-admin')}>
-                                                                <Undo2 className="h-3.5 w-3.5" />
-                                                                Return to Admin
-                                                            </button>
-                                                        </>
+                                                    {/* Only the teller who accepted it forwards it or takes the Action. */}
+                                                    {/* LBP for every ACIC; the payee for a cheque ACIC only. */}
+                                                    {acic.teller_forward_options?.includes('land_bank') && (
+                                                        <button
+                                                            className="btn btn-primary !px-3 !py-1.5"
+                                                            onClick={() => setStepping({ acic, step: 'forward', forwardTo: 'land_bank' })}
+                                                        >
+                                                            <Send className="h-3.5 w-3.5" />
+                                                            Forward to LBP
+                                                        </button>
+                                                    )}
+                                                    {/* Cheque ACICs: one, several or all cheques to their payees. */}
+                                                    {acic.can_forward_to_payee && (
+                                                        <button
+                                                            className="btn btn-outline !px-3 !py-1.5"
+                                                            onClick={() => setPayeeForwarding(acic)}
+                                                        >
+                                                            <UserRound className="h-3.5 w-3.5" />
+                                                            Forward to Payee
+                                                        </button>
                                                     )}
 
-                                                    {acic.teller_status === 'returned_by_bank' && mine(acic) && (
-                                                        <>
-                                                            <button className="btn btn-primary !px-3 !py-1.5" onClick={() => open(acic, 'complete')}>
-                                                                <CheckCircle2 className="h-3.5 w-3.5" />
-                                                                Confirm and Complete
-                                                            </button>
-                                                            <button className="btn btn-ghost !px-3 !py-1.5" onClick={() => open(acic, 'return-admin')}>
-                                                                <Undo2 className="h-3.5 w-3.5" />
-                                                                Return to Admin
-                                                            </button>
-                                                        </>
+                                                    {acic.can_teller_act && (
+                                                        <button
+                                                            className="btn btn-primary !px-3 !py-1.5"
+                                                            onClick={() => setStepping({ acic, step: 'action' })}
+                                                        >
+                                                            <ClipboardCheck className="h-3.5 w-3.5" />
+                                                            Action
+                                                        </button>
+                                                    )}
+
+                                                    {acic.can_return_to_admin && (
+                                                        <button className="btn btn-ghost !px-3 !py-1.5" onClick={() => openReturn(acic)}>
+                                                            <Undo2 className="h-3.5 w-3.5" />
+                                                            Return to Admin
+                                                        </button>
                                                     )}
 
                                                     {acic.teller_status === 'completed' && (
-                                                        mine(acic) ? (
-                                                            <button className="btn btn-outline !px-3 !py-1.5" onClick={() => open(acic, 'returned')}>
-                                                                <RotateCcw className="h-3.5 w-3.5" />
-                                                                Returned by Bank
-                                                            </button>
-                                                        ) : (
-                                                            <span className="text-xs text-subtle">
-                                                                Completed {formatDateTime(acic.forwarded_to_land_bank_at)}
-                                                            </span>
-                                                        )
+                                                        <span className="text-xs text-subtle">
+                                                            Completed {formatDateTime(acic.teller_action_at ?? acic.completed_at)}
+                                                            {acic.teller_action_by && ` by ${acic.teller_action_by.name}`}
+                                                        </span>
                                                     )}
 
-                                                    {acic.teller_status !== 'completed' && !mine(acic) && acic.teller_status !== 'pending' && (
+                                                    <button className="btn btn-ghost !px-3 !py-1.5" onClick={() => setViewingId(acic.id)}>
+                                                        <Eye className="h-3.5 w-3.5" />
+                                                        View
+                                                    </button>
+
+                                                    {acic.teller_status !== 'completed' && acic.teller_status !== 'pending' && !mine(acic) && (
                                                         <span className="text-xs text-subtle">
                                                             With {acic.accepted_by?.name ?? 'another teller'}
                                                         </span>
@@ -373,106 +440,85 @@ export default function TellerQueuePage() {
                 </div>
             )}
 
-            {acting && (
+            {returning && (
                 <div
                     className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-                    onClick={() => setActing(null)}
+                    onClick={() => setReturning(null)}
                     role="dialog"
                     aria-modal="true"
+                    aria-labelledby="return-admin-title"
                 >
                     <form className="card w-full max-w-md space-y-3 p-6" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
-                        <h2 className="font-display text-xl font-extrabold text-fg">{TITLES[acting.step]}</h2>
+                        <h2 id="return-admin-title" className="font-display text-xl font-extrabold text-fg">
+                            Return to Admin
+                        </h2>
                         <p className="text-sm text-muted">
-                            ACIC #{acting.acic.acic_number} · {acting.acic.type_label ?? '—'} ·{' '}
-                            {acting.acic.total_records ?? 0} record(s)
-                            {acting.step === 'complete' && ' — this lodges it with the bank and closes it.'}
-                            {acting.step === 'returned' && ' — every record on it is flagged unless the bank named fewer.'}
-                            {acting.step === 'return-admin' && ' — it goes back to the admin to fix.'}
+                            ACIC #{returning.acic_number} · {returning.type_label ?? '—'} · {returning.total_records ?? 0} record(s) — it
+                            goes back to the admin to fix.
                         </p>
 
                         {error && <Alert kind="error">{error}</Alert>}
 
-                        {(acting.step === 'complete' || acting.step === 'returned') && (
-                            <Field
-                                label={
-                                    acting.step === 'complete'
-                                        ? 'Date and time forwarded to Land Bank'
-                                        : 'Date and time returned'
-                                }
-                                htmlFor="t-at"
-                            >
-                                <input
-                                    id="t-at"
-                                    type="datetime-local"
-                                    className="field !py-1.5"
-                                    value={at}
-                                    onChange={(e) => setAt(e.target.value)}
-                                    max={nowLocal()}
-                                    required
-                                />
-                            </Field>
-                        )}
+                        <Field label="Reason" htmlFor="t-reason">
+                            <textarea
+                                id="t-reason"
+                                className="field min-h-24 !py-1.5"
+                                value={reason}
+                                onChange={(e) => setReason(e.target.value)}
+                                minLength={3}
+                                maxLength={2000}
+                                required
+                                autoFocus
+                            />
+                        </Field>
 
-                        {acting.step === 'complete' && (
-                            <Field label="Bank" htmlFor="t-bank">
-                                <input id="t-bank" className="field !py-1.5" value={queue.bank_name} disabled readOnly />
-                            </Field>
-                        )}
-
-
-
-
-                        {(acting.step === 'returned' || acting.step === 'return-admin') && (
-                            <Field label={acting.step === 'returned' ? 'Return reason / status notes' : 'Reason'} htmlFor="t-reason">
-                                <textarea
-                                    id="t-reason"
-                                    className="field min-h-24 !py-1.5"
-                                    value={reason}
-                                    onChange={(e) => setReason(e.target.value)}
-                                    minLength={3}
-                                    maxLength={2000}
-                                    required
-                                    autoFocus
-                                />
-                            </Field>
-                        )}
-
-                        {acting.step === 'complete' && (
-                            <Field label="Note" htmlFor="t-note" optional>
-                                <textarea
-                                    id="t-note"
-                                    className="field min-h-20 !py-1.5"
-                                    value={note}
-                                    onChange={(e) => setNote(e.target.value)}
-                                    maxLength={2000}
-                                />
-                            </Field>
-                        )}
-
-                        <div className="flex flex-col gap-2 pt-2 sm:flex-row sm:justify-end">
-                            <button type="button" className="btn btn-ghost" onClick={() => setActing(null)}>
+                        <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
+                            <button type="button" className="btn btn-ghost" onClick={() => setReturning(null)}>
                                 Cancel
                             </button>
-                            <button
-                                type="submit"
-                                className="btn btn-primary"
-                                disabled={
-                                    busy !== null ||
-                                    ((acting.step === 'returned' || acting.step === 'return-admin') && reason.trim().length < 3) ||
-                                    (acting.step === 'complete' && at === '')
-                                }
-                            >
-                                {busy !== null ? 'Saving…' : TITLES[acting.step]}
+                            <button type="submit" className="btn btn-primary" disabled={busy !== null || reason.trim().length < 3}>
+                                {busy !== null ? 'Saving…' : 'Return to Admin'}
                             </button>
                         </div>
                     </form>
                 </div>
             )}
 
-            <p className="mt-6 flex items-center gap-2 text-xs text-subtle">
-                <Inbox className="h-3.5 w-3.5" />
-                Deposits go to <strong>{queue.bank_name}</strong>. Accepting an ACIC claims it — the first teller to
-                accept takes it, and it leaves every other teller&rsquo;s Pending list.
+            {stepping && (
+                <TellerActionModal
+                    acic={stepping.acic}
+                    step={stepping.step}
+                    forwardTo={stepping.forwardTo}
+                    onClose={() => setStepping(null)}
+                    onDone={(_acic, message) => {
+                        setStepping(null);
+                        setNotice(message);
+                        void load();
+                    }}
+                />
+            )}
+
+            {viewingId !== null && <AcicViewModal acicId={viewingId} onClose={() => setViewingId(null)} />}
+
+            {payeeForwarding && (
+                <PayeeForwardModal
+                    acic={payeeForwarding}
+                    onClose={() => setPayeeForwarding(null)}
+                    onDone={(_acic, message) => {
+                        setPayeeForwarding(null);
+                        setNotice(message);
+                        void load();
+                    }}
+                />
+            )}
+
+            <p className="mt-6 flex items-start gap-2 text-xs text-subtle">
+                <Inbox className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                    Accepting an ACIC claims it — the first teller to accept takes it, and it leaves every other teller&rsquo;s
+                    Pending list. Only that teller forwards it — to <strong>LBP</strong> ({queue.bank_name}), or a cheque ACIC to
+                    the payee — and takes the Action.
+                </span>
             </p>
         </div>
     );

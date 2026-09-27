@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { X, FilePlus2, Calculator, Save } from 'lucide-react';
-import { LddapApi, PayeeApi, toApiError } from '../lib/api';
-import type { Lddap, LddapDraft, LddapOptions, Payee } from '../lib/types';
-import { formatMoney } from '../lib/format';
+import { LddapApi, toApiError } from '../lib/api';
+import type { Lddap, LddapDraft, LddapOptions, PayeeOption } from '../lib/types';
+import { isPcgUnit } from '../lib/pcgUnits';
+import { formatDashedNumber, formatMoney, DASHED_NUMBER_PATTERN } from '../lib/format';
 import { WTAX_RATES, VAT_RATES, withheld, sum } from '../lib/tax';
 import { Alert, Spinner } from './ui';
 import PayeePicker from './PayeePicker';
+import UnitSelect from './UnitSelect';
 
 interface Props {
     /**
@@ -29,14 +31,13 @@ const zeroes = (rates: readonly string[]): Record<string, string> =>
 const emptyDraft = (): LddapDraft => ({
     lddap_no: '',
     nca_no: '',
-    orb_no: '',
+    obr_no: '',
     dv_no: '',
     nature_of_payment: '',
     obj_no: '',
-    unit_id: '',
+    unit_name: '',
     check_date: today(),
     payee: null,
-    payee_account_id: null,
     acic_ref: '',
     gross_amount: '',
     wtax: zeroes(WTAX_RATES),
@@ -65,14 +66,22 @@ function draftFrom(lddap: Lddap): LddapDraft {
     return {
         lddap_no: lddap.lddap_no,
         nca_no: lddap.nca_no ?? '',
-        orb_no: lddap.orb_no ?? '',
+        obr_no: lddap.obr_no ?? '',
         dv_no: lddap.dv_no ?? '',
         nature_of_payment: lddap.nature_of_payment ?? '',
         obj_no: lddap.obj_no ?? '',
-        unit_id: lddap.unit_id != null ? String(lddap.unit_id) : '',
+        unit_name: lddap.unit_name ?? '',
         check_date: lddap.check_date ?? today(),
-        payee: null,
-        payee_account_id: lddap.payee_account_id ?? null,
+        // The copy saved on the record — shown as it is, kept unless a new payee is picked.
+        payee: lddap.payee_name
+            ? {
+                  type: lddap.payee_type ?? null,
+                  type_label: lddap.payee_type_label ?? null,
+                  id: null,
+                  name: lddap.payee_name,
+                  account_no: lddap.payee_account_no ?? null,
+              }
+            : null,
         acic_ref: lddap.acic_ref ?? '',
         gross_amount: lddap.gross_amount != null ? String(lddap.gross_amount) : String(lddap.amount ?? ''),
         wtax: rates(lddap.wtax, WTAX_RATES),
@@ -203,8 +212,6 @@ export default function LddapRegisterModal({ lddap = null, onClose, onSaved }: P
     const editing = lddap !== null;
     const [draft, setDraft] = useState<LddapDraft>(() => (lddap ? draftFrom(lddap) : emptyDraft()));
     const [options, setOptions] = useState<LddapOptions | null>(null);
-    // Edit only: the saved payee, with its accounts, on its way in.
-    const [payeeLoading, setPayeeLoading] = useState(editing && lddap?.payee_id != null);
     // Rates whose amounts were computed and should follow the gross.
     const [activeWtax, setActiveWtax] = useState<Set<string>>(new Set());
     const [activeVat, setActiveVat] = useState<Set<string>>(new Set());
@@ -224,32 +231,6 @@ export default function LddapRegisterModal({ lddap = null, onClose, onSaved }: P
         void load();
     }, [load]);
 
-    // Editing: show the saved payee and account, with the picker still there to change them.
-    useEffect(() => {
-        if (!lddap?.payee_id) return;
-        const payeeId = lddap.payee_id;
-        const accountId = lddap.payee_account_id ?? null;
-        let active = true;
-        PayeeApi.get(payeeId)
-            .then((payee) => {
-                if (!active) return;
-                setDraft((prev) => ({
-                    ...prev,
-                    payee,
-                    payee_account_id: payee.accounts.some((a) => a.id === accountId) ? accountId : null,
-                }));
-            })
-            .catch((err) => {
-                if (active) setError(toApiError(err).message);
-            })
-            .finally(() => {
-                if (active) setPayeeLoading(false);
-            });
-        return () => {
-            active = false;
-        };
-    }, [lddap?.payee_id, lddap?.payee_account_id]);
-
     useEffect(() => {
         function onKey(e: KeyboardEvent) {
             if (e.key === 'Escape' && !busy) onClose();
@@ -262,12 +243,12 @@ export default function LddapRegisterModal({ lddap = null, onClose, onSaved }: P
         setDraft((prev) => ({ ...prev, ...patch }));
     }
 
-    /** Picking a payee: a lone account is chosen for them; several leave the select to them. */
-    function setPayee(payee: Payee | null) {
-        update({
-            payee,
-            payee_account_id: payee && payee.accounts.length === 1 ? payee.accounts[0].id : null,
-        });
+    /**
+     * Picking a payee fills its type, account number and unit (the unit only when it is one on
+     * the PCG list); picking another refills them; clearing empties them.
+     */
+    function setPayee(payee: PayeeOption | null) {
+        update({ payee, unit_name: payee && isPcgUnit(payee.unit) ? (payee.unit as string) : '' });
     }
 
     /** A gross change recomputes every active rate, in both grids. */
@@ -338,13 +319,8 @@ export default function LddapRegisterModal({ lddap = null, onClose, onSaved }: P
         setFieldErrors({});
 
         if (draft.payee === null) {
-            setFieldErrors({ payee_id: ['Choose a registered payee.'] });
-            setError('Choose a registered payee.');
-            return;
-        }
-        if (draft.payee_account_id === null) {
-            setFieldErrors({ payee_account_id: ['Choose the account the payment goes to.'] });
-            setError('Choose the account the payment goes to.');
+            setFieldErrors({ payee_ref: ['Choose a payee.'] });
+            setError('Choose a payee.');
             return;
         }
 
@@ -398,7 +374,7 @@ export default function LddapRegisterModal({ lddap = null, onClose, onSaved }: P
                         : 'One record at a time. It goes out for routing without a check number — the number is added from the LDDAP table once the record is back. The LDDAP number must not have been used before.'}
                 </p>
 
-                {options === null || payeeLoading ? (
+                {options === null ? (
                     <div className="py-6">
                         <Spinner />
                     </div>
@@ -412,29 +388,38 @@ export default function LddapRegisterModal({ lddap = null, onClose, onSaved }: P
                                         id="reg-lddap-no"
                                         className={`field !py-1.5 ${fieldError('lddap_no') ? '!border-danger/60' : ''}`}
                                         value={draft.lddap_no}
-                                        onChange={(e) => update({ lddap_no: e.target.value })}
-                                        placeholder="LDDAP 09-03403"
+                                        onChange={(e) => update({ lddap_no: formatDashedNumber(e.target.value) })}
+                                        placeholder="00-00-00000"
+                                        inputMode="numeric"
+                                        pattern={DASHED_NUMBER_PATTERN}
+                                        title="LDDAP Number must be in the format 00-00-00000."
+                                        autoComplete="off"
                                         maxLength={100}
                                         autoFocus
                                         required
                                     />
                                 </Field>
-                                <Field label="NCA Number" htmlFor="reg-nca-no" error={fieldError('nca_no')}>
+                                <Field label="NCA Code" htmlFor="reg-nca-no" error={fieldError('nca_no')}>
+                                    {/* 0000000: digits only, up to 7 — text, so leading zeros stay. */}
                                     <input
                                         id="reg-nca-no"
-                                        className="field !py-1.5"
+                                        className="field !py-1.5 font-mono"
                                         value={draft.nca_no}
-                                        onChange={(e) => update({ nca_no: e.target.value })}
-                                        maxLength={100}
+                                        onChange={(e) => update({ nca_no: e.target.value.replace(/\D/g, '').slice(0, 7) })}
+                                        inputMode="numeric"
+                                        pattern="\d{7}"
+                                        placeholder="0000000"
+                                        title="NCA Code must be exactly 7 digits."
+                                        autoComplete="off"
                                         required
                                     />
                                 </Field>
-                                <Field label="ORB Number" htmlFor="reg-orb-no" error={fieldError('orb_no')}>
+                                <Field label="OBR Number" htmlFor="reg-obr-no" error={fieldError('obr_no')}>
                                     <input
-                                        id="reg-orb-no"
+                                        id="reg-obr-no"
                                         className="field !py-1.5"
-                                        value={draft.orb_no}
-                                        onChange={(e) => update({ orb_no: e.target.value })}
+                                        value={draft.obr_no}
+                                        onChange={(e) => update({ obr_no: e.target.value })}
                                         maxLength={100}
                                         required
                                     />
@@ -444,7 +429,12 @@ export default function LddapRegisterModal({ lddap = null, onClose, onSaved }: P
                                         id="reg-dv-no"
                                         className="field !py-1.5"
                                         value={draft.dv_no}
-                                        onChange={(e) => update({ dv_no: e.target.value })}
+                                        onChange={(e) => update({ dv_no: formatDashedNumber(e.target.value) })}
+                                        placeholder="00-00-00000"
+                                        inputMode="numeric"
+                                        pattern={DASHED_NUMBER_PATTERN}
+                                        title="DV Number must be in the format 00-00-00000."
+                                        autoComplete="off"
                                         maxLength={100}
                                         required
                                     />
@@ -475,23 +465,14 @@ export default function LddapRegisterModal({ lddap = null, onClose, onSaved }: P
                                         maxLength={100}
                                     />
                                 </Field>
-                                <Field label="Unit Name" htmlFor="reg-unit" error={fieldError('unit_id')}>
-                                    <select
+                                <Field label="Unit Name" htmlFor="reg-unit" error={fieldError('unit_name')}>
+                                    <UnitSelect
                                         id="reg-unit"
                                         className="field !py-1.5"
-                                        value={draft.unit_id}
-                                        onChange={(e) => update({ unit_id: e.target.value })}
+                                        value={draft.unit_name}
+                                        onChange={(unit_name) => update({ unit_name })}
                                         required
-                                    >
-                                        <option value="">
-                                            {options.units.length === 0 ? 'No units registered' : 'Choose…'}
-                                        </option>
-                                        {options.units.map((u) => (
-                                            <option key={u.id} value={u.id}>
-                                                {u.name}
-                                            </option>
-                                        ))}
-                                    </select>
+                                    />
                                 </Field>
                                 <Field label="Date Issued" htmlFor="reg-date" error={fieldError('check_date')}>
                                     <input
@@ -507,42 +488,38 @@ export default function LddapRegisterModal({ lddap = null, onClose, onSaved }: P
                         </Section>
 
                         {/* ---- Payee ------------------------------------------------------ */}
-                        <Section title="Payee" hint="Search the register, select the payee, then the account the payment goes to.">
+                        <Section title="Payee" hint="Search Creditors and PCG Personnel. The payee type, account number and unit fill in from the pick.">
                             <div className="grid gap-3 sm:grid-cols-2">
-                                <Field label="Payee" htmlFor="reg-payee" error={fieldError('payee_id')} className="sm:col-span-2">
+                                <Field label="Payee" htmlFor="reg-payee" error={fieldError('payee_ref') ?? fieldError('payee_type')}>
                                     <PayeePicker
                                         id="reg-payee"
                                         label="Payee"
                                         value={draft.payee}
                                         onChange={setPayee}
-                                        error={fieldError('payee_id')}
+                                        error={fieldError('payee_ref') ?? fieldError('payee_type')}
                                         disabled={busy}
                                     />
                                 </Field>
-                                <Field label="Account Number" htmlFor="reg-account" error={fieldError('payee_account_id')}>
-                                    <select
+                                {/* Read-only: from the list the payee was picked from. */}
+                                <Field label="Payee Type" htmlFor="reg-payee-type">
+                                    <input
+                                        id="reg-payee-type"
+                                        className="field !py-1.5"
+                                        value={draft.payee?.type_label ?? ''}
+                                        placeholder={draft.payee ? '—' : 'Select a payee first'}
+                                        disabled
+                                        readOnly
+                                    />
+                                </Field>
+                                <Field label="Account Number" htmlFor="reg-account">
+                                    <input
                                         id="reg-account"
                                         className="field !py-1.5 font-mono"
-                                        value={draft.payee_account_id ?? ''}
-                                        onChange={(e) =>
-                                            update({ payee_account_id: e.target.value ? Number(e.target.value) : null })
-                                        }
-                                        disabled={!draft.payee}
-                                        required
-                                    >
-                                        <option value="">
-                                            {!draft.payee
-                                                ? 'Select a payee first'
-                                                : draft.payee.accounts.length === 0
-                                                  ? 'No account on file'
-                                                  : 'Choose…'}
-                                        </option>
-                                        {draft.payee?.accounts.map((a) => (
-                                            <option key={a.id} value={a.id}>
-                                                {a.label}
-                                            </option>
-                                        ))}
-                                    </select>
+                                        value={draft.payee?.account_no ?? ''}
+                                        placeholder={draft.payee ? '—' : 'Select a payee first'}
+                                        disabled
+                                        readOnly
+                                    />
                                 </Field>
                                 {/* Read-only: both arrive with "Assign LDDAP to ACIC", never from
                                     this form. */}

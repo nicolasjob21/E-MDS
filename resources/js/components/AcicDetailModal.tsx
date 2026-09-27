@@ -16,7 +16,7 @@ import {
 import { AcicApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
 import type { Acic, Cheque } from '../lib/types';
-import { formatDate, formatDateTime, formatMoney } from '../lib/format';
+import { formatDate, formatDateTime, formatMoney, formatManila } from '../lib/format';
 import { Alert, Spinner, StatusBadge, LddapStatusBadge, AcicStatusBadge } from './ui';
 import ChequeStepModal from './ChequeStepModal';
 import AcicReassignModal from './AcicReassignModal';
@@ -51,10 +51,7 @@ function printMoney(value?: string | null): string {
 
 interface Props {
     acicId: number;
-    /** `confirm` adds the teller's finalise step on top of the same details. */
-    mode: 'view' | 'confirm';
     onClose: () => void;
-    onCompleted?: (acic: Acic) => void;
     /** The ACIC changed in here (approved, re-assigned); the list behind needs a refresh. */
     onChanged?: () => void;
     /** Hand the approved ACIC to the page's forward dialog. */
@@ -63,23 +60,19 @@ interface Props {
 
 /**
  * The full record for one ACIC: its own fields plus every cheque on it.
- *
- * In `confirm` mode this doubles as the teller's completion prompt — the teller sees exactly
- * which cheques they are finalising before committing, rather than confirming a bare number.
+
  *
  * Laid out to match ChequeDetailModal: same width, same header, same Row list, same
  * well-boxed sections and stacked sub-cards.
  */
 export default function AcicDetailModal({
     acicId,
-    mode,
     onClose,
-    onCompleted,
     onChanged,
     onForward,
 }: Props) {
     const { user } = useAuth();
-    const isAdmin = user?.role === 'admin';
+    const isAdmin = user?.role === 'admin' || user?.role === 'super_admin';
     const canManage = isAdmin || user?.role === 'staff';
 
     const [acic, setAcic] = useState<Acic | null>(null);
@@ -111,20 +104,6 @@ export default function AcicDetailModal({
         return () => window.removeEventListener('keydown', onKey);
     }, [onClose, busy]);
 
-    async function handleComplete() {
-        if (!acic) return;
-        setBusy(true);
-        setError('');
-        try {
-            const updated = await AcicApi.complete(acic.id);
-            onCompleted?.(updated);
-        } catch (err) {
-            const apiErr = toApiError(err);
-            setError(Object.values(apiErr.errors)[0]?.[0] ?? apiErr.message);
-            setBusy(false);
-        }
-    }
-
     async function handleApprove() {
         if (!acic) return;
         setBusy(true);
@@ -149,7 +128,6 @@ export default function AcicDetailModal({
     const total =
         cheques.reduce((sum, c) => sum + Number(c.amount ?? 0), 0) +
         lddaps.reduce((sum, l) => sum + Number(l.amount ?? 0), 0);
-    const isConfirm = mode === 'confirm';
     const isUsed = acic?.status === 'used';
     const isApproved = acic?.status === 'approved';
     /**
@@ -185,7 +163,7 @@ export default function AcicDetailModal({
             <div className="card max-h-[90vh] w-full max-w-xl overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
                 <div className="mb-5 flex items-start justify-between gap-4">
                     <div>
-                        <span className="eyebrow">{isConfirm ? 'Confirm completion' : 'ACIC'}</span>
+                        <span className="eyebrow">ACIC</span>
                         <div
                             id="acic-detail-title"
                             className="mt-2 font-display text-4xl font-extrabold tracking-tight text-brandink"
@@ -207,16 +185,6 @@ export default function AcicDetailModal({
                     <Spinner />
                 ) : (
                     <div className="space-y-5">
-                        {isConfirm && (
-                            <p className="flex items-start gap-2 rounded-xs border border-accent-400/40 bg-accent-400/10 p-3 text-sm text-accent-400">
-                                <Clock className="mt-0.5 h-4 w-4 shrink-0" />
-                                <span>
-                                    Confirm you have finished this transaction. Completing records receipt
-                                    against the {cheques.length} cheque{cheques.length === 1 ? '' : 's'} below
-                                    and cannot be undone.
-                                </span>
-                            </p>
-                        )}
 
                         {/* ACIC record */}
                         <section>
@@ -235,6 +203,8 @@ export default function AcicDetailModal({
                                 <Landmark className="h-4 w-4" />
                                 Forwarding
                             </h3>
+                            {/* When the accepting teller forwarded it to LBP (Philippine time); "—" before then. */}
+                            <Row label="Forwarded to Bank" value={formatManila(acic.forwarded_to_land_bank_at)} />
                             {acic.forwarded_at ? (
                                 <>
                                     <Row label="Forward date" value={formatDateTime(acic.forwarded_at)} />
@@ -302,11 +272,17 @@ export default function AcicDetailModal({
                                                     </td>
                                                     <td className="px-3 py-2">
                                                         <StatusBadge status={c.effective_status ?? c.status} />
-                                                        {c.release?.received_by_name && (
+                                                        {c.payee_receipt?.received_by ? (
+                                                            <span className="mt-0.5 block text-xs text-subtle">
+                                                                Received by {c.payee_receipt.received_by}
+                                                                {c.payee_receipt.unit && ` (${c.payee_receipt.unit})`} ·{' '}
+                                                                {formatDate(c.payee_receipt.date_received)}
+                                                            </span>
+                                                        ) : c.release?.received_by_name ? (
                                                             <span className="mt-0.5 block text-xs text-subtle">
                                                                 to {c.release.received_by_name}
                                                             </span>
-                                                        )}
+                                                        ) : null}
                                                     </td>
                                                 </tr>
                                             ))}
@@ -358,21 +334,10 @@ export default function AcicDetailModal({
                         {/* Actions, below the record they act on. What is offered follows the
                             status: a Used ACIC is signed off; an Approved one is forwarded or
                             printed; membership can be swapped either side of that. Dismissing is
-                            the X in the header — only the teller's confirm keeps an explicit
-                            Cancel beside the irreversible button. */}
+                            the X in the header. */}
                         <div className="flex flex-col gap-2 border-t border-line pt-5 sm:flex-row">
-                            {isConfirm && (
-                                <button
-                                    type="button"
-                                    className="btn btn-ghost sm:flex-1"
-                                    onClick={onClose}
-                                    disabled={busy}
-                                >
-                                    Cancel
-                                </button>
-                            )}
 
-                            {!isConfirm && canManage && canAddCheques && (
+                            {canManage && canAddCheques && (
                                 <button
                                     type="button"
                                     className="btn btn-outline sm:flex-1"
@@ -384,7 +349,7 @@ export default function AcicDetailModal({
                                 </button>
                             )}
 
-                            {!isConfirm && canManage && canAddLddaps && (
+                            {canManage && canAddLddaps && (
                                 <button
                                     type="button"
                                     className="btn btn-outline sm:flex-1"
@@ -396,7 +361,7 @@ export default function AcicDetailModal({
                                 </button>
                             )}
 
-                            {!isConfirm && canManage && (isUsed || isApproved) && (
+                            {canManage && (isUsed || isApproved) && (
                                 <button
                                     type="button"
                                     className="btn btn-outline sm:flex-1"
@@ -408,7 +373,7 @@ export default function AcicDetailModal({
                                 </button>
                             )}
 
-                            {!isConfirm && isApproved && (
+                            {isApproved && (
                                 <button
                                     type="button"
                                     className="btn btn-outline sm:flex-1"
@@ -423,7 +388,7 @@ export default function AcicDetailModal({
                             {/* Branch A, beside Branch B's Forward: hand a cheque to its payee.
                                 One releasable cheque goes straight to the dialog; several put
                                 the choice first, since a release is per cheque. */}
-                            {!isConfirm && isAdmin && releasable.length > 0 && (
+                            {isAdmin && releasable.length > 0 && (
                                 <button
                                     type="button"
                                     className="btn btn-primary sm:flex-1"
@@ -440,7 +405,9 @@ export default function AcicDetailModal({
                                 </button>
                             )}
 
-                            {!isConfirm && isApproved && isAdmin && onForward && (
+                            {/* Forward sends it to the tellers: once they have it, there is nothing to forward
+                                until they hand it back. */}
+                            {isApproved && isAdmin && onForward && !acic.teller_status && (
                                 <button
                                     type="button"
                                     className="btn btn-outline sm:flex-1"
@@ -452,7 +419,7 @@ export default function AcicDetailModal({
                                 </button>
                             )}
 
-                            {!isConfirm && isUsed && isAdmin && (
+                            {isUsed && isAdmin && (
                                 <button
                                     type="button"
                                     className="btn btn-primary sm:flex-1"
@@ -464,17 +431,6 @@ export default function AcicDetailModal({
                                 </button>
                             )}
 
-                            {isConfirm && (
-                                <button
-                                    type="button"
-                                    className="btn btn-primary sm:flex-1"
-                                    onClick={() => void handleComplete()}
-                                    disabled={busy}
-                                >
-                                    <CheckCircle2 className="h-4 w-4" />
-                                    {busy ? 'Completing…' : 'Confirm & complete'}
-                                </button>
-                            )}
                         </div>
                     </div>
                 )}

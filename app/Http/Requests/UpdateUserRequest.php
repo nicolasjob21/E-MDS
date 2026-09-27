@@ -25,8 +25,18 @@ class UpdateUserRequest extends FormRequest
             'name' => ['sometimes', 'required', 'string', 'max:255'],
             'username' => ['sometimes', 'required', 'string', 'max:255', 'alpha_dash', Rule::unique('users', 'username')->ignore($userId)],
             'password' => ['nullable', 'string', Password::defaults()],
-            'role' => ['sometimes', 'required', Rule::enum(UserRole::class)],
+            'role' => ['sometimes', 'required', Rule::enum(UserRole::class), $this->roleRule()],
             'is_active' => ['sometimes', 'boolean'],
         ];
+    }
+
+    /** Only a Super Admin may make someone a Super Admin. */
+    private function roleRule(): \Closure
+    {
+        return function (string $attribute, mixed $value, \Closure $fail) {
+            if ($value === UserRole::SuperAdmin->value && ! $this->user()?->isSuperAdmin()) {
+                $fail('Only a Super Admin can give someone the Super Admin role.');
+            }
+        };
     }
 }

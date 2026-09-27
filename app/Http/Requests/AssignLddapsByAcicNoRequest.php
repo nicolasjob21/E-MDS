@@ -13,7 +13,7 @@ class AssignLddapsByAcicNoRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return in_array($this->user()?->role, [UserRole::Admin, UserRole::Staff], true);
+        return in_array($this->user()?->role, [UserRole::SuperAdmin, UserRole::Admin, UserRole::Staff], true);
     }
 
     /**

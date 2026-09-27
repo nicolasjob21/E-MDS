@@ -41,20 +41,31 @@ class LddapResource extends JsonResource
 
             // The references the disbursement is drawn against.
             'nca_no' => $this->nca_no,
-            'orb_no' => $this->orb_no,
+            'obr_no' => $this->obr_no,
             'dv_no' => $this->dv_no,
             'nature_of_payment' => $this->nature_of_payment?->value,
             'nature_of_payment_label' => $this->nature_of_payment?->label(),
-            'unit_id' => $this->unit_id,
-            'unit_name' => $this->whenLoaded('unit', fn () => $this->unit?->name),
+            'unit_name' => $this->unit_name,
 
             // The UACS object code — what prints as OBJ CODE on the ACIC.
             'obj_no' => $this->obj_no,
             'amount' => $this->amount,
+            // The teller's Action: who received it (forwarded to the payee), and its RTS outcome.
+            'payee_received_by' => $this->payee_received_by,
+            'payee_received_on' => $this->payee_received_on?->toDateString(),
+            'rts_status' => $this->rts_status,
 
             // The payee and account as they stood when the record was registered.
             'payee_id' => $this->payee_id,
             'payee_name' => $this->payee_name,
+            // "creditor" or "pcg_personnel" — which list the payee was chosen from. Blank on LDDAPs
+            // registered before the payee came from those lists.
+            'payee_type' => $this->payee_type,
+            'payee_type_label' => match ($this->payee_type) {
+                'creditor' => 'Creditor',
+                'pcg_personnel' => 'PCG Personnel',
+                default => null,
+            },
             'payee_account_id' => $this->payee_account_id,
             'payee_account_no' => $this->payee_account_no,
             'payee_bank' => $this->payee_bank,
@@ -97,19 +108,11 @@ class LddapResource extends JsonResource
             'review_note' => $this->review_note,
             'is_final' => $this->status->isFinal(),
             'status_label' => $this->status->label(),
-            // Which single next step the status allows.
-            'can_forward' => $this->status->canForward(),
-            'can_receive' => $this->status->canReceive(),
+            // Which next step the status allows: RTS / Cancel / Assign on For Signature, Resubmit on RTS.
             'awaits_action' => $this->status->awaitsAction(),
-
-            // The most recent forward and return.
-            'forward_to' => $this->forward_to,
-            'forward_unit_name' => $this->whenLoaded('forwardUnit', fn () => $this->forwardUnit?->name),
-            'forwarded_by' => $this->whenLoaded('forwardedBy', fn () => $this->forwardedBy?->only(['id', 'name', 'username'])),
-            'date_forwarded' => $this->date_forwarded?->toDateString(),
-            'return_unit_name' => $this->whenLoaded('returnUnit', fn () => $this->returnUnit?->name),
-            'returned_by' => $this->whenLoaded('returnedBy', fn () => $this->returnedBy?->only(['id', 'name', 'username'])),
-            'date_returned' => $this->date_returned?->toDateString(),
+            'can_resubmit' => $this->status->canResubmit(),
+            'is_acic_eligible' => $this->status->isAcicEligible() && $this->acic_id === null,
+            // (The old Forward / Receive data stays in the database and is not sent to any page.)
 
             // The cancellation, when there is one.
             'canceled_by' => $this->whenLoaded('canceledBy', fn () => $this->canceledBy?->only(['id', 'name', 'username'])),

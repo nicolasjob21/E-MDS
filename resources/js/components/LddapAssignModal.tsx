@@ -18,7 +18,7 @@ interface Props {
 }
 
 /**
- * "Assign LDDAP to ACIC" — put approved LDDAP records that have no ACIC yet onto one.
+ * "Assign LDDAP to ACIC" — put For Signature LDDAP records that have no ACIC yet onto one.
  *
  * Going on an ACIC is when a record takes its **check number**. N ticked records take a block
  * of N **consecutive** numbers — the first run long enough, searching up from the lowest unused;
@@ -196,7 +196,7 @@ export default function LddapAssignModal({ preselect, acic, onClose, onAssigned 
                 </div>
 
                 <p className="mb-4 text-sm text-muted">
-                    Only <span className="font-semibold text-fg">approved</span> LDDAP records with no ACIC
+                    Only <span className="font-semibold text-fg">For Signature</span> LDDAP records with no ACIC
                     yet are listed. Many can share one ACIC number. The records you tick take a{' '}
                     <span className="font-semibold text-fg">consecutive block</span> of check numbers — the
                     first run long enough, searching up from the lowest unused — in the order ticked, shown
@@ -268,7 +268,7 @@ export default function LddapAssignModal({ preselect, acic, onClose, onAssigned 
                         ) : visible.length === 0 ? (
                             <p className="p-6 text-center text-sm text-subtle">
                                 {lddaps.length === 0
-                                    ? 'No approved LDDAP records are waiting for an ACIC.'
+                                    ? 'No For Signature LDDAP records are waiting for an ACIC.'
                                     : 'No LDDAP matches that filter.'}
                             </p>
                         ) : (

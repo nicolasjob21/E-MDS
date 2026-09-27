@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Support\PcgUnits;
 use Illuminate\Foundation\Http\FormRequest;
 
 class UseChequeRequest extends FormRequest
@@ -23,6 +24,9 @@ class UseChequeRequest extends FormRequest
 
             // Details recorded against the cheque at the moment it is used.
             'payee_name' => ['required', 'string', 'max:255'],
+            // Text, so an account number keeps its leading zeros.
+            'account_no' => ['nullable', 'string', 'max:255'],
+            'unit_name' => ['nullable', 'string', PcgUnits::rule()],
             'amount' => ['required', 'numeric', 'min:0.01', 'max:9999999999999.99'],
             'cheque_date' => ['required', 'date'],
         ];

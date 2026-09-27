@@ -9,7 +9,7 @@ use Illuminate\Validation\Rule;
 
 /**
  * The LDDAP table's filter bar, as query parameters so a filtered view can be bookmarked:
- * `search`, `status`, `nature`, `page`, `per_page`. Every filter is optional; "all" and an
+ * `search`, `status`, `nature`, `payee_type`, `page`, `per_page`. Every filter is optional; "all" and an
  * empty value both mean "don't filter on this".
  */
 class FilterLddapsRequest extends FormRequest
@@ -25,6 +25,8 @@ class FilterLddapsRequest extends FormRequest
             'search' => ['nullable', 'string', 'max:100'],
             'status' => ['nullable', 'string', Rule::in(['all', ...array_column(LddapStatus::cases(), 'value')])],
             'nature' => ['nullable', 'string', Rule::in(['all', ...array_column(NatureOfPayment::cases(), 'value')])],
+            // Which list the payee came from; older records with no type match only "all".
+            'payee_type' => ['nullable', 'string', Rule::in(['all', 'creditor', 'pcg_personnel'])],
             'page' => ['nullable', 'integer', 'min:1'],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:200'],
         ];
@@ -35,6 +37,7 @@ class FilterLddapsRequest extends FormRequest
         return [
             'status.in' => 'Choose a status from the list.',
             'nature.in' => 'Choose a nature of payment from the list.',
+            'payee_type.in' => 'Choose a payee type from the list.',
         ];
     }
 
@@ -54,6 +57,14 @@ class FilterLddapsRequest extends FormRequest
     public function nature(): ?NatureOfPayment
     {
         return NatureOfPayment::tryFrom((string) $this->validated('nature', 'all'));
+    }
+
+    /** "creditor" or "pcg_personnel", or null for all. */
+    public function payeeType(): ?string
+    {
+        $type = (string) $this->validated('payee_type', 'all');
+
+        return $type === 'all' || $type === '' ? null : $type;
     }
 
     public function perPage(): int

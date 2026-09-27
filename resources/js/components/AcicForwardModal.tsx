@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { X, Send } from 'lucide-react';
-import { AcicApi, UserApi, toApiError } from '../lib/api';
-import type { Acic, User } from '../lib/types';
+import { AcicTellerApi, toApiError } from '../lib/api';
+import type { Acic } from '../lib/types';
 import { Alert } from './ui';
 
 interface Props {
@@ -10,33 +10,24 @@ interface Props {
     onForwarded: (acic: Acic) => void;
 }
 
-/** Sentinel for "the recipient has no account" — the name is typed in instead. */
-const OTHER = 'other';
-
 /**
- * Forward an ACIC onward, recording the forward date and who received it.
+ * Forward an ACIC — cheque or LDDAP — to the tellers (`POST acics/{acic}/forward-to-teller`).
  *
- * The recipient is normally the teller. When the ACIC is handed to someone with no account,
- * choosing "Someone else" records the typed-in name of whoever accepted it instead.
+ * There is nobody to pick: every teller is notified, it shows as **Pending** until one accepts
+ * it, and the first to accept takes it. So the dialog only asks the admin to confirm.
  */
 export default function AcicForwardModal({ acic, onClose, onForwarded }: Props) {
-    const [users, setUsers] = useState<User[]>([]);
-    const [receivedBy, setReceivedBy] = useState('');
-    const [receivedName, setReceivedName] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
 
-    const isOther = receivedBy === OTHER;
-
-    useEffect(() => {
-        void (async () => {
-            try {
-                setUsers((await UserApi.list()).filter((u) => u.is_active));
-            } catch (err) {
-                setError(toApiError(err).message);
-            }
-        })();
-    }, []);
+    const cheques = acic.cheque_count ?? acic.cheques?.length ?? 0;
+    const lddaps = acic.lddap_count ?? acic.lddaps?.length ?? 0;
+    const carries = [
+        cheques > 0 ? `${cheques} cheque${cheques === 1 ? '' : 's'}` : null,
+        lddaps > 0 ? `${lddaps} LDDAP record${lddaps === 1 ? '' : 's'}` : null,
+    ]
+        .filter(Boolean)
+        .join(' and ');
 
     useEffect(() => {
         function onKey(e: KeyboardEvent) {
@@ -48,23 +39,10 @@ export default function AcicForwardModal({ acic, onClose, onForwarded }: Props) 
 
     async function handleSubmit(e: FormEvent) {
         e.preventDefault();
-        if (!receivedBy) {
-            setError('Choose who is receiving this ACIC.');
-            return;
-        }
-        if (isOther && receivedName.trim() === '') {
-            setError('Type the name of whoever accepted this ACIC.');
-            return;
-        }
         setBusy(true);
         setError('');
         try {
-            onForwarded(
-                await AcicApi.forward(
-                    acic.id,
-                    isOther ? { receivedName: receivedName.trim() } : { receivedBy: Number(receivedBy) },
-                ),
-            );
+            onForwarded(await AcicTellerApi.forwardToTeller(acic.id));
         } catch (err) {
             const apiErr = toApiError(err);
             setError(Object.values(apiErr.errors)[0]?.[0] ?? apiErr.message);
@@ -84,10 +62,7 @@ export default function AcicForwardModal({ acic, onClose, onForwarded }: Props) 
                 <div className="mb-4 flex items-start justify-between gap-4">
                     <div>
                         <span className="eyebrow">Forward</span>
-                        <h2
-                            id="acic-forward-title"
-                            className="mt-2 font-display text-2xl font-extrabold tracking-tight text-fg"
-                        >
+                        <h2 id="acic-forward-title" className="mt-2 font-display text-2xl font-extrabold tracking-tight text-fg">
                             ACIC #{acic.acic_number}
                         </h2>
                     </div>
@@ -96,71 +71,27 @@ export default function AcicForwardModal({ acic, onClose, onForwarded }: Props) 
                     </button>
                 </div>
 
-                <p className="mb-4 text-sm text-muted">
-                    Forwarding stamps today’s date on this ACIC and records who received it. It carries{' '}
-                    <span className="font-semibold text-fg">
-                        {acic.cheque_count ?? acic.cheques?.length ?? 0}
-                    </span>{' '}
-                    cheque{(acic.cheque_count ?? acic.cheques?.length ?? 0) === 1 ? '' : 's'}. This cannot be
-                    undone.
-                </p>
-
                 <form onSubmit={handleSubmit}>
-                    <div>
-                        <label htmlFor="received-by" className="label">
-                            Received by
-                        </label>
-                        <select
-                            id="received-by"
-                            className="field"
-                            value={receivedBy}
-                            onChange={(e) => setReceivedBy(e.target.value)}
-                            required
-                            autoFocus
-                        >
-                            <option value="">Choose a user…</option>
-                            {users.map((u) => (
-                                <option key={u.id} value={u.id}>
-                                    {u.name} ({u.username})
-                                </option>
-                            ))}
-                            <option value={OTHER}>Someone else…</option>
-                        </select>
-                    </div>
-
-                    {isOther && (
-                        <div className="mt-4">
-                            <label htmlFor="received-name" className="label">
-                                Name of whoever accepted it
-                            </label>
-                            <input
-                                id="received-name"
-                                className="field"
-                                value={receivedName}
-                                onChange={(e) => setReceivedName(e.target.value)}
-                                placeholder="e.g. J. Dela Cruz"
-                                maxLength={255}
-                                required
-                            />
-                            <p className="mt-1 text-xs text-subtle">
-                                Use this when the recipient has no account in the system.
-                            </p>
-                        </div>
-                    )}
+                    <p className="mb-4 text-sm text-muted">
+                        Forward ACIC #{acic.acic_number} to the tellers? It carries{' '}
+                        <span className="font-semibold text-fg">{carries || 'nothing yet'}</span>. It shows as{' '}
+                        <span className="font-semibold text-fg">Pending</span> until a teller accepts it; every teller is
+                        notified, and the first to accept takes it.
+                    </p>
 
                     {error && (
-                        <div className="mt-4">
+                        <div className="mb-4">
                             <Alert kind="error">{error}</Alert>
                         </div>
                     )}
 
-                    <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
+                    <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                         <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
                             Cancel
                         </button>
-                        <button type="submit" className="btn btn-primary" disabled={busy}>
+                        <button type="submit" className="btn btn-primary" disabled={busy} autoFocus>
                             <Send className="h-4 w-4" />
-                            {busy ? 'Forwarding…' : 'Forward ACIC'}
+                            {busy ? 'Forwarding…' : 'Yes, forward to Teller'}
                         </button>
                     </div>
                 </form>

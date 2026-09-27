@@ -39,9 +39,11 @@ class ChequeSearchTest extends TestCase
         $staff = $this->staff();
         foreach (range(0, 2) as $i) {
             $cheques->useNext($staff, 10001 + $i, [
-                'payee_name' => 'Payee '.$i,
+                'payee_name' => ['Acme Supplies', 'Juan Dela Cruz', 'Northwind Trading'][$i],
+                'account_no' => ['0028901011', '1122334455', '0099886655'][$i],
+                'unit_name' => ['CG-8 Comptrollership', 'CG-8 Comptrollership', 'CG-1 Personnel'][$i],
                 'amount' => 100,
-                'cheque_date' => '2026-08-30',
+                'cheque_date' => ['2026-08-28', '2026-08-30', '2026-09-02'][$i],
             ]);
         }
 
@@ -77,13 +79,82 @@ class ChequeSearchTest extends TestCase
         $this->assertSame([10005], $this->search('005'));
     }
 
-    public function test_an_acic_number_finds_the_cheques_on_it(): void
+    public function test_a_payee_matches_partially_in_any_case(): void
     {
         $this->seedCheques();
         Sanctum::actingAs($this->staff());
 
-        // ACIC #7 carries #10001 and #10002.
-        $this->assertSame([10001, 10002], $this->search('7'));
+        $this->assertSame([10002], $this->search('dela CRUZ'));
+        $this->assertSame([10001], $this->search('acme'));
+    }
+
+    public function test_an_account_number_matches_partially(): void
+    {
+        $this->seedCheques();
+        Sanctum::actingAs($this->staff());
+
+        $this->assertSame([10002], $this->search('223344'));
+        // Leading zeros are kept — the account number is text.
+        $this->assertSame([10001], $this->search('0028'));
+    }
+
+    public function test_the_acic_number_is_not_searched(): void
+    {
+        $this->seedCheques();
+        Sanctum::actingAs($this->staff());
+
+        // #10001 and #10002 sit on ACIC #7, but only cheque, payee and account are searched.
+        $this->assertSame([], $this->search('7'));
+    }
+
+    /** @return list<int> */
+    private function filter(array $params): array
+    {
+        return array_column($this->getJson('/api/v1/cheques?'.http_build_query($params))->assertOk()->json('data'), 'cheque_number');
+    }
+
+    public function test_the_unit_filter_matches_the_chosen_unit(): void
+    {
+        $this->seedCheques();
+        Sanctum::actingAs($this->staff());
+
+        $this->assertSame([10001, 10002], $this->filter(['unit' => 'CG-8 Comptrollership']));
+        $this->assertSame([10003], $this->filter(['unit' => 'CG-1 Personnel']));
+        $this->getJson('/api/v1/cheques?unit=Nowhere')->assertUnprocessable()->assertJsonValidationErrors('unit');
+    }
+
+    public function test_the_date_range_includes_both_ends_and_either_may_be_open(): void
+    {
+        $this->seedCheques();
+        Sanctum::actingAs($this->staff());
+
+        $this->assertSame([10002, 10003], $this->filter(['date_from' => '2026-08-30']));
+        $this->assertSame([10001, 10002], $this->filter(['date_to' => '2026-08-30']));
+        $this->assertSame([10002], $this->filter(['date_from' => '2026-08-30', 'date_to' => '2026-08-30']));
+        // Available cheques have no date, so any date filter leaves them out.
+        $this->assertSame([10001, 10002, 10003], $this->filter(['date_from' => '2026-01-01', 'date_to' => '2026-12-31']));
+    }
+
+    public function test_a_start_after_the_end_is_rejected(): void
+    {
+        Sanctum::actingAs($this->staff());
+
+        $this->getJson('/api/v1/cheques?date_from=2026-09-10&date_to=2026-09-01')
+            ->assertUnprocessable()->assertJsonValidationErrors('date_to');
+    }
+
+    public function test_every_filter_works_together(): void
+    {
+        $this->seedCheques();
+        Sanctum::actingAs($this->staff());
+
+        // #10001–10002 are Approved (on ACIC #7), both CG-8; only #10002 is from the 30th on.
+        $this->assertSame([10002], $this->filter([
+            'tab' => 'approved', 'unit' => 'CG-8 Comptrollership', 'date_from' => '2026-08-29', 'search' => '1000',
+        ]));
+        // No Status = the blank status, stored `registered`.
+        $this->assertSame([10003], $this->filter(['tab' => 'registered', 'search' => 'north']));
+        $this->assertSame([], $this->filter(['tab' => 'registered', 'unit' => 'CG-8 Comptrollership']));
     }
 
     public function test_search_combines_with_the_status_filter(): void
@@ -105,7 +176,6 @@ class ChequeSearchTest extends TestCase
 
         $this->assertSame([], $this->search('NOPE-1234'));
         $this->assertSame([], $this->search('99999'));
-        // No ACIC #4 exists, so nothing is matched through the link either.
         $this->assertSame([], $this->search('ACIC'));
     }
 

@@ -15,6 +15,7 @@ const DOT: Record<NotificationKind, string> = {
     used: 'bg-accent-400',
     expiring: 'bg-amber-400',
     stale: 'bg-danger',
+    spoiled: 'bg-danger',
 };
 
 /**

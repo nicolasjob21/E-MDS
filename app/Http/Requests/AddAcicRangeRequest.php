@@ -2,7 +2,6 @@
 
 namespace App\Http\Requests;
 
-use App\Enums\UserRole;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -12,7 +11,7 @@ class AddAcicRangeRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()?->role === UserRole::Admin;
+        return $this->user()?->isAdmin() === true;
     }
 
     /**

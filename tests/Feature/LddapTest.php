@@ -10,10 +10,11 @@ use App\Enums\UserRole;
 use App\Models\Acic;
 use App\Models\Cheque;
 use App\Models\ChequeLog;
+use App\Models\Creditor;
 use App\Models\Lddap;
 use App\Models\LddapCheck;
-use App\Models\Payee;
-use App\Models\Unit;
+use App\Models\LddapRoutingHistory;
+use App\Models\PcgPersonnel;
 use App\Models\User;
 use App\Services\AcicService;
 use App\Services\ChequeService;
@@ -21,7 +22,9 @@ use App\Services\LddapService;
 use App\Services\LddapUpdateRequestService;
 use App\Support\Money;
 use App\Support\Tax;
+use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\QueryException;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -62,28 +65,27 @@ class LddapTest extends TestCase
     }
 
     /** The reference lists a registration draws on — one unit, one payee — created on demand. */
-    private function unit(): Unit
+    private function unit(): string
     {
-        return Unit::firstOrCreate(['name' => 'ACCOUNTING']);
+        return 'CG-8 Comptrollership';
     }
 
-    /** A payee with a single account, so a registration can leave the account implicit. */
-    private function payee(): Payee
+    /** A payee from the Creditors list. */
+    private function payee(): Creditor
     {
-        $payee = Payee::firstOrCreate(['name' => 'ACME SUPPLIES INC.']);
-        $payee->accounts()->firstOrCreate(['account_no' => '2028-9010-11'], ['bank' => 'LBP']);
-
-        return $payee->load('accounts');
+        return Creditor::firstOrCreate(
+            ['name' => 'ACME SUPPLIES INC.'],
+            ['account_no' => '0028901011', 'unit' => 'CG-8 Comptrollership'],
+        );
     }
 
-    /** A payee holding two accounts, for the choose-which-account cases. */
-    private function multiAccountPayee(): Payee
+    /** A payee from the PCG Personnel list. */
+    private function personnelPayee(): PcgPersonnel
     {
-        $payee = Payee::firstOrCreate(['name' => 'BLUEOCEAN LOGISTICS']);
-        $payee->accounts()->firstOrCreate(['account_no' => '1701-0426-18'], ['bank' => 'LBP']);
-        $payee->accounts()->firstOrCreate(['account_no' => '0451-2210-07'], ['bank' => 'DBP']);
-
-        return $payee->load('accounts');
+        return PcgPersonnel::firstOrCreate(
+            ['name' => 'JUAN DELA CRUZ'],
+            ['account_no' => '0451221007', 'unit' => 'CG-4 Logistics'],
+        );
     }
 
     /**
@@ -97,15 +99,16 @@ class LddapTest extends TestCase
         $payee = $this->payee();
 
         return array_map(fn (int $i) => [
-            'lddap_no' => 'LDDAP-'.str_pad((string) ($i + $offset), 4, '0', STR_PAD_LEFT),
-            'nca_no' => 'NCA-'.($i + $offset),
-            'orb_no' => 'ORB-'.($i + $offset),
-            'dv_no' => 'DV-'.($i + $offset),
+            'lddap_no' => '26-09-'.str_pad((string) ($i + $offset), 5, '0', STR_PAD_LEFT),
+            'nca_no' => sprintf('%07d', $i + $offset),
+            'obr_no' => 'OBR-'.($i + $offset),
+            'dv_no' => '10-00-'.str_pad((string) ($i + $offset), 5, '0', STR_PAD_LEFT),
             'nature_of_payment' => NatureOfPayment::CommercialClaims->value,
             'obj_no' => 'OBJ-'.($i + $offset),
-            'unit_id' => $unit->id,
+            'unit_name' => $unit,
             'check_date' => '2026-09-21',
-            'payee_id' => $payee->id,
+            'payee_type' => 'creditor',
+            'payee_ref' => $payee->id,
             'gross_amount' => 100 * ($i + $offset),
         ], range(1, $count));
     }
@@ -117,65 +120,31 @@ class LddapTest extends TestCase
     }
 
     /** The routing steps, as the dialogs submit them. */
-    private function forwardDetails(): array
-    {
-        return [
-            'forward_to' => 'Accounting Division',
-            'unit_id' => $this->unit()->id,
-            'date_forwarded' => '2026-09-22',
-            'note' => 'For signature.',
-        ];
-    }
-
-    private function receiveDetails(): array
-    {
-        return [
-            'unit_id' => $this->unit()->id,
-            'date_received' => '2026-09-23',
-            'note' => 'Signed.',
-        ];
-    }
-
     /** The RTS step, as the dialog submits it. */
     private function rtsDetails(array $overrides = []): array
     {
         return array_merge([
             'received_on' => '2026-09-23',
             'received_by' => 'M. Santos',
-            'unit_id' => $this->unit()->id,
+            'unit_name' => $this->unit(),
             'rts_date' => '2026-09-24',
             'note' => 'Wrong OBJ code — please correct and resend.',
         ], $overrides);
     }
 
-    /** Register one LDDAP, forward it and receive it back — Returned for ACIC, no check number. */
-    private function returnedLddap(?User $user = null, int $n = 1): Lddap
+    /** Add one LDDAP — For Signature, no check number yet. */
+    private function forSignatureLddap(?User $user = null, int $n = 1): Lddap
     {
-        $service = app(LddapService::class);
-        $user ??= $this->staff();
-
-        $lddap = $service->register($user, $this->details($n));
-        $lddap = $service->forward($user, $lddap, $this->forwardDetails());
-
-        return $service->receive($user, $lddap, $this->receiveDetails());
+        return app(LddapService::class)->register($user ?? $this->staff(), $this->details($n));
     }
 
-    /** Register, forward, receive and approve `$count` LDDAPs — ready for an ACIC, no numbers yet. */
-    private function approvedLddaps(int $count, int $offset = 0, ?User $staff = null): Collection
+    /** Add `$count` LDDAPs — For Signature, ready for an ACIC, no numbers yet. */
+    private function forSignatureLddaps(int $count, int $offset = 0, ?User $staff = null): Collection
     {
         $service = app(LddapService::class);
         $staff ??= $this->staff();
-        $admin = $this->admin();
-        $out = new Collection;
 
-        foreach ($this->rows($count, $offset) as $details) {
-            $lddap = $service->register($staff, $details);
-            $lddap = $service->forward($staff, $lddap, $this->forwardDetails());
-            $lddap = $service->receive($staff, $lddap, $this->receiveDetails());
-            $out->push($service->approve($admin, $lddap));
-        }
-
-        return $out;
+        return new Collection(array_map(fn ($details) => $service->register($staff, $details), $this->rows($count, $offset)));
     }
 
     /**
@@ -187,7 +156,7 @@ class LddapTest extends TestCase
     private function useChecks(int $count, ?User $user = null, int $offset = 0): Collection
     {
         $user ??= $this->staff();
-        $lddaps = $this->approvedLddaps($count, $offset, $user);
+        $lddaps = $this->forSignatureLddaps($count, $offset, $user);
         $acic = app(AcicService::class)->create($this->admin());
 
         app(LddapService::class)->assignToAcic($user, $acic, $lddaps->pluck('id')->all());
@@ -258,7 +227,7 @@ class LddapTest extends TestCase
     public function test_numbers_follow_the_order_the_records_were_listed_in(): void
     {
         $this->seedSeries(1, 10);
-        $lddaps = $this->approvedLddaps(3);
+        $lddaps = $this->forSignatureLddaps(3);
         [$a, $b, $c] = $lddaps->all();
         $acic = app(AcicService::class)->create($this->admin());
 
@@ -275,8 +244,8 @@ class LddapTest extends TestCase
     public function test_a_stale_preview_is_refused_naming_the_number_that_was_taken(): void
     {
         $this->seedSeries(1, 10);
-        $mine = $this->approvedLddaps(2);
-        $theirs = $this->approvedLddaps(1, offset: 10, staff: $other = $this->staff());
+        $mine = $this->forSignatureLddaps(2);
+        $theirs = $this->forSignatureLddaps(1, offset: 10, staff: $other = $this->staff());
 
         // I preview 1 and 2 …
         Sanctum::actingAs($this->staff());
@@ -322,8 +291,8 @@ class LddapTest extends TestCase
         $this->seedSeries(1, 10);
         $alice = $this->staff();
         $bob = $this->staff();
-        $aliceRecords = $this->approvedLddaps(2, staff: $alice);
-        $bobRecords = $this->approvedLddaps(2, offset: 10, staff: $bob);
+        $aliceRecords = $this->forSignatureLddaps(2, staff: $alice);
+        $bobRecords = $this->forSignatureLddaps(2, offset: 10, staff: $bob);
         $service = app(LddapService::class);
 
         // Both see [1, 2].
@@ -482,7 +451,7 @@ class LddapTest extends TestCase
     public function test_the_block_is_handed_out_in_the_order_the_records_were_listed(): void
     {
         $this->seedSeries(1, 10);
-        $lddaps = $this->approvedLddaps(3);
+        $lddaps = $this->forSignatureLddaps(3);
         [$a, $b, $c] = $lddaps->all();
         $acic = app(AcicService::class)->create($this->admin());
 
@@ -501,8 +470,8 @@ class LddapTest extends TestCase
     public function test_a_number_taken_out_of_the_previewed_block_is_named_on_refusal(): void
     {
         $this->seedSeries(1, 10);
-        $mine = $this->approvedLddaps(3);
-        $theirs = $this->approvedLddaps(1, offset: 10, staff: $other = $this->staff());
+        $mine = $this->forSignatureLddaps(3);
+        $theirs = $this->forSignatureLddaps(1, offset: 10, staff: $other = $this->staff());
         $service = app(LddapService::class);
 
         $preview = $service->nextNumbers(3);
@@ -535,7 +504,7 @@ class LddapTest extends TestCase
     public function test_assignment_is_refused_whole_when_the_series_runs_short(): void
     {
         $this->seedSeries(1, 1);
-        $lddaps = $this->approvedLddaps(2);
+        $lddaps = $this->forSignatureLddaps(2);
         $acic = app(AcicService::class)->create($this->admin());
 
         Sanctum::actingAs($this->staff());
@@ -580,7 +549,7 @@ class LddapTest extends TestCase
     {
         $this->seedSeries(1, 10);
         $numbered = $this->useChecks(1)->first();
-        $another = $this->approvedLddaps(1, offset: 10)->first();
+        $another = $this->forSignatureLddaps(1, offset: 10)->first();
 
         $this->expectException(QueryException::class);
 
@@ -598,7 +567,7 @@ class LddapTest extends TestCase
             ->assertJsonValidationErrors('lddap_no')
             ->assertJsonPath(
                 'errors.lddap_no.0',
-                'LDDAP number LDDAP-0001 has already been registered. Each LDDAP number can be used only once.',
+                'LDDAP number 26-09-00001 has already been registered. Each LDDAP number can be used only once.',
             );
 
         $this->assertSame(1, Lddap::count());
@@ -612,9 +581,9 @@ class LddapTest extends TestCase
         $this->expectException(QueryException::class);
 
         Lddap::create([
-            'lddap_no' => 'LDDAP-0001',
+            'lddap_no' => '26-09-00001',
             'amount' => 1,
-            'status' => LddapStatus::Registered,
+            'status' => LddapStatus::ForSignature,
         ]);
     }
 
@@ -638,132 +607,68 @@ class LddapTest extends TestCase
         $this->assertSame(1, Lddap::count());
     }
 
-    // ---------------------------------------------------------------- routing
+    // ---------------------------------------------------------------- the flow
 
-    /** Registration gives the record no check number: it is routed first. */
-    public function test_a_registered_lddap_has_no_check_number_yet(): void
+    /** Added straight to For Signature — no status before it — with no check number yet. */
+    public function test_an_added_lddap_is_for_signature_with_no_check_number(): void
     {
         $this->seedSeries(1, 10);
         Sanctum::actingAs($this->staff());
 
         $this->postJson('/api/v1/lddaps', $this->details())
             ->assertCreated()
-            ->assertJsonPath('data.status', 'registered')
-            ->assertJsonPath('data.status_label', 'Registered')
-            ->assertJsonPath('data.can_forward', true)
+            ->assertJsonPath('data.status', 'for_signature')
+            ->assertJsonPath('data.status_label', 'For Signature')
+            ->assertJsonPath('data.awaits_action', true)
+            ->assertJsonPath('data.is_acic_eligible', true)
+            ->assertJsonPath('data.can_edit', true)
             ->assertJsonPath('data.check_no', null);
 
         // Nothing was taken from the series, and the trail has its first entry.
         $this->assertSame(10, LddapCheck::where('status', LddapCheckStatus::Available)->count());
-        $this->assertDatabaseHas('lddap_routing_history', ['action' => 'registered', 'to_status' => 'registered']);
+        $this->assertDatabaseHas('lddap_routing_history', ['action' => 'registered', 'to_status' => 'for_signature']);
+
+        // It is offered to "Assign LDDAP to ACIC" at once.
+        $this->assertCount(1, $this->getJson('/api/v1/lddaps/linkable')->json('data'));
     }
 
-    /** Forward: Registered → For Out, with who, where, when and why on the record and the trail. */
-    public function test_forward_moves_a_registered_record_to_for_out(): void
+    /** The retired steps are gone: no Forward, Receive back or Approve. */
+    public function test_forward_receive_and_approve_no_longer_exist(): void
     {
-        $lddap = app(LddapService::class)->register($this->staff(), $this->details());
-        $unit = $this->unit();
-        $staff = $this->staff();
-        Sanctum::actingAs($staff);
+        $lddap = $this->forSignatureLddap();
+        Sanctum::actingAs($this->admin());
 
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/forward", [
-            'forward_to' => 'Budget Office',
-            'unit_id' => $unit->id,
-            'date_forwarded' => '2026-09-22',
-            'note' => 'For obligation.',
-        ])
-            ->assertOk()
-            ->assertJsonPath('data.status', 'for_out')
-            ->assertJsonPath('data.status_label', 'For Out')
-            ->assertJsonPath('data.forward_to', 'Budget Office')
-            ->assertJsonPath('data.forward_unit_name', 'ACCOUNTING')
-            ->assertJsonPath('data.forwarded_by.id', $staff->id)
-            ->assertJsonPath('data.date_forwarded', '2026-09-22')
-            ->assertJsonPath('data.can_forward', false)
-            ->assertJsonPath('data.can_receive', true);
-
-        $this->assertDatabaseHas('lddap_routing_history', [
-            'lddap_id' => $lddap->id,
-            'action' => 'forwarded',
-            'from_status' => 'registered',
-            'to_status' => 'for_out',
-            'user_id' => $staff->id,
-            'unit_id' => $unit->id,
-            'counterparty' => 'Budget Office',
-            'note' => 'For obligation.',
-        ]);
-        $this->assertDatabaseHas('cheque_logs', ['action' => 'forwarded_lddap']);
+        $this->postJson("/api/v1/lddaps/{$lddap->id}/forward", [])->assertNotFound();
+        $this->postJson("/api/v1/lddaps/{$lddap->id}/receive-back", [])->assertNotFound();
+        $this->postJson("/api/v1/lddaps/{$lddap->id}/approve")->assertNotFound();
+        $this->assertSame(LddapStatus::ForSignature, $lddap->fresh()->status);
     }
 
-    public function test_forward_requires_its_fields(): void
+    /** Assigning it to an ACIC makes it Approved — on the ACIC — with a trail entry. */
+    public function test_assigning_to_an_acic_makes_it_approved(): void
     {
-        $lddap = app(LddapService::class)->register($this->staff(), $this->details());
+        $this->seedSeries(1, 10);
+        $lddap = $this->forSignatureLddap();
+        $acic = app(AcicService::class)->create($this->admin());
+
         Sanctum::actingAs($this->staff());
+        $this->postJson("/api/v1/acics/{$acic->id}/lddaps", ['lddap_ids' => [$lddap->id], 'expected_check_nos' => [1]])->assertOk();
 
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/forward", [])
-            ->assertStatus(422)
-            ->assertJsonValidationErrors(['forward_to', 'unit_id', 'date_forwarded']);
-
-        $this->assertSame(LddapStatus::Registered, $lddap->fresh()->status);
-    }
-
-    /** Receive: For Out → Returned for ACIC. */
-    public function test_receive_moves_a_for_out_record_to_returned_for_acic(): void
-    {
-        $service = app(LddapService::class);
-        $staff = $this->staff();
-        $lddap = $service->forward($staff, $service->register($staff, $this->details()), $this->forwardDetails());
-        $unit = $this->unit();
-        Sanctum::actingAs($staff);
-
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/receive-back", [
-            'unit_id' => $unit->id,
-            'date_received' => '2026-09-23',
-            'note' => 'Signed and returned.',
-        ])
-            ->assertOk()
-            ->assertJsonPath('data.status', 'returned_for_acic')
-            ->assertJsonPath('data.status_label', 'Returned for ACIC')
-            ->assertJsonPath('data.return_unit_name', 'ACCOUNTING')
-            ->assertJsonPath('data.returned_by.id', $staff->id)
-            ->assertJsonPath('data.date_returned', '2026-09-23')
-            ->assertJsonPath('data.can_receive', false)
-            ->assertJsonPath('data.awaits_action', true);
-
+        $lddap->refresh();
+        $this->assertSame(LddapStatus::Approved, $lddap->status);
+        $this->assertSame($acic->id, $lddap->acic_id);
         $this->assertDatabaseHas('lddap_routing_history', [
-            'lddap_id' => $lddap->id,
-            'action' => 'received',
-            'from_status' => 'for_out',
-            'to_status' => 'returned_for_acic',
-            'note' => 'Signed and returned.',
-        ]);
-    }
-
-    /** Approve: Returned for ACIC → Approved, and now offered to "Assign LDDAP to ACIC". */
-    public function test_approve_signs_a_returned_record_off(): void
-    {
-        $lddap = $this->returnedLddap();
-        $admin = $this->admin();
-        Sanctum::actingAs($admin);
-
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/approve", ['note' => 'All in order.'])
-            ->assertOk()
-            ->assertJsonPath('data.status', 'approved')
-            ->assertJsonPath('data.reviewed_by.id', $admin->id)
-            ->assertJsonPath('data.check_no', null);
-
-        $this->assertDatabaseHas('lddap_routing_history', [
-            'lddap_id' => $lddap->id, 'action' => 'approved', 'to_status' => 'approved', 'note' => 'All in order.',
+            'lddap_id' => $lddap->id, 'action' => 'assigned', 'from_status' => 'for_signature', 'to_status' => 'approved',
         ]);
 
-        $offered = $this->getJson('/api/v1/lddaps/linkable')->assertOk()->json('data');
-        $this->assertSame([$lddap->id], array_column($offered, 'id'));
+        // On an ACIC: no RTS, no Cancel, no Edit.
+        $this->getJson('/api/v1/lddaps')->assertJsonPath('data.0.awaits_action', false)->assertJsonPath('data.0.can_edit', false);
     }
 
-    /** RTS: Returned for ACIC → RTS, with every field saved on its own history entry. */
+    /** RTS: For Signature → RTS, with every field saved on its own history entry. */
     public function test_rts_saves_all_of_its_fields_and_sets_the_status_to_rts(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
         $unit = $this->unit();
         $admin = $this->admin();
         Sanctum::actingAs($admin);
@@ -772,54 +677,52 @@ class LddapTest extends TestCase
             ->assertOk()
             ->assertJsonPath('data.status', 'rts')
             ->assertJsonPath('data.status_label', 'RTS')
-            ->assertJsonPath('data.can_forward', true)
+            ->assertJsonPath('data.can_resubmit', true)
             ->assertJsonPath('data.awaits_action', false);
 
         $this->assertDatabaseHas('lddap_routing_history', [
             'lddap_id' => $lddap->id,
             'action' => 'rts',
-            'from_status' => 'returned_for_acic',
+            'from_status' => 'for_signature',
             'to_status' => 'rts',
             'user_id' => $admin->id,
             'received_by_name' => 'M. Santos',
-            'unit_id' => $unit->id,
+            'unit_name' => $unit,
             'note' => 'Wrong OBJ code — please correct and resend.',
         ]);
         $entry = $lddap->routingHistory()->where('action', 'rts')->first();
         $this->assertSame('2026-09-23', $entry->received_on->toDateString());
         $this->assertSame('2026-09-24', $entry->acted_on->toDateString());
 
-        // Not a verdict: nothing is stamped as reviewed, and it is not offered for an ACIC.
-        $lddap->refresh();
-        $this->assertNull($lddap->reviewed_at);
+        // Not offered for an ACIC while it is out for correction.
         $this->assertSame([], $this->getJson('/api/v1/lddaps/linkable')->json('data'));
     }
 
     public function test_rts_requires_every_field_and_a_comment(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
         Sanctum::actingAs($this->admin());
 
         $this->postJson("/api/v1/lddaps/{$lddap->id}/rts", [])
             ->assertStatus(422)
-            ->assertJsonValidationErrors(['received_on', 'received_by', 'unit_id', 'rts_date', 'note']);
+            ->assertJsonValidationErrors(['received_on', 'received_by', 'unit_name', 'rts_date', 'note']);
 
         $this->postJson("/api/v1/lddaps/{$lddap->id}/rts", $this->rtsDetails(['note' => '']))
             ->assertStatus(422)
             ->assertJsonValidationErrors('note');
 
-        $this->assertSame(LddapStatus::ReturnedForAcic, $lddap->fresh()->status);
+        $this->assertSame(LddapStatus::ForSignature, $lddap->fresh()->status);
     }
 
     /** An RTS record can have its details corrected — by staff request or admin edit. */
     public function test_an_rts_record_is_editable(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
         app(LddapService::class)->rts($this->admin(), $lddap, $this->rtsDetails());
 
         Sanctum::actingAs($this->staff());
         $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", [
-            'lddap_no' => 'LDDAP-0001', 'obj_no' => 'OBJ-FIXED', 'payee_name' => 'ACME SUPPLIES INC.',
+            'lddap_no' => '26-09-00001', 'obj_no' => 'OBJ-FIXED', 'payee_name' => 'ACME SUPPLIES INC.',
             'amount' => 100, 'reason' => 'Corrected the OBJ code as asked.',
         ])->assertCreated();
 
@@ -829,48 +732,57 @@ class LddapTest extends TestCase
 
         $lddap->refresh();
         $this->assertSame('OBJ-FIXED', $lddap->obj_no);
-        // Still RTS — a correction changes details, not the routing.
+        // Still RTS — a correction changes details, not the status.
         $this->assertSame(LddapStatus::Rts, $lddap->status);
     }
 
-    /** RTS → Forward → For Out, with the same fields as the first forward. */
-    public function test_an_rts_record_is_forwarded_again_to_for_out(): void
+    /** Resubmit: RTS → For Signature, with a required comment and optional notes on the trail. */
+    public function test_an_rts_record_is_resubmitted_to_for_signature(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
         app(LddapService::class)->rts($this->admin(), $lddap, $this->rtsDetails());
         $staff = $this->staff();
         Sanctum::actingAs($staff);
 
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/forward", [
-            'forward_to' => 'Budget Office',
-            'unit_id' => $this->unit()->id,
-            'date_forwarded' => '2026-09-25',
-            'note' => 'Corrected and resent.',
+        $this->postJson("/api/v1/lddaps/{$lddap->id}/resubmit", ['comment' => ''])
+            ->assertStatus(422)->assertJsonValidationErrors('comment');
+
+        $this->postJson("/api/v1/lddaps/{$lddap->id}/resubmit", [
+            'comment' => 'Corrected the OBJ code.',
+            'notes' => 'Checked against the DV.',
         ])
             ->assertOk()
-            ->assertJsonPath('data.status', 'for_out')
-            ->assertJsonPath('data.forward_to', 'Budget Office')
-            ->assertJsonPath('data.forwarded_by.id', $staff->id)
-            ->assertJsonPath('data.date_forwarded', '2026-09-25');
+            ->assertJsonPath('data.status', 'for_signature')
+            ->assertJsonPath('data.can_resubmit', false)
+            ->assertJsonPath('data.is_acic_eligible', true);
 
-        // The trail says where it came from.
         $this->assertDatabaseHas('lddap_routing_history', [
-            'lddap_id' => $lddap->id, 'action' => 'forwarded', 'from_status' => 'rts', 'to_status' => 'for_out',
+            'lddap_id' => $lddap->id, 'action' => 'resubmitted', 'from_status' => 'rts', 'to_status' => 'for_signature',
+            'user_id' => $staff->id, 'note' => 'Corrected the OBJ code.', 'notes' => 'Checked against the DV.',
         ]);
+        $this->assertDatabaseHas('cheque_logs', ['action' => 'resubmitted_lddap']);
+
+        // Only an RTS record can be resubmitted.
+        $this->postJson("/api/v1/lddaps/{$lddap->id}/resubmit", ['comment' => 'Again.'])->assertStatus(422);
+
+        // Tellers do not resubmit.
+        $other = $this->forSignatureLddap(n: 2);
+        app(LddapService::class)->rts($this->admin(), $other, $this->rtsDetails());
+        Sanctum::actingAs($this->teller());
+        $this->postJson("/api/v1/lddaps/{$other->id}/resubmit", ['comment' => 'Fixed.'])->assertForbidden();
     }
 
     /** Every return is kept: a record RTS'd twice has two entries, each with its own details. */
     public function test_multiple_rts_entries_are_kept(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
         $service = app(LddapService::class);
         $staff = $this->staff();
         $admin = $this->admin();
 
         // Round one.
         $service->rts($admin, $lddap, $this->rtsDetails(['note' => 'First return: wrong OBJ.', 'rts_date' => '2026-09-24']));
-        $lddap = $service->forward($staff, $lddap->fresh(), $this->forwardDetails());
-        $lddap = $service->receive($staff, $lddap, $this->receiveDetails());
+        $lddap = $service->resubmit($staff, $lddap->fresh(), 'Fixed the OBJ.');
 
         // Round two.
         $service->rts($admin, $lddap, $this->rtsDetails(['note' => 'Second return: wrong amount.', 'rts_date' => '2026-09-28', 'received_by' => 'J. Cruz']));
@@ -888,26 +800,24 @@ class LddapTest extends TestCase
         Sanctum::actingAs($staff);
         $this->getJson('/api/v1/lddaps')->assertOk()->assertJsonPath('data.0.rts_count', 2);
 
-        // And round two ends in approval, with the whole trail intact.
-        $lddap = $service->forward($staff, $lddap->fresh(), $this->forwardDetails());
-        $lddap = $service->receive($staff, $lddap, $this->receiveDetails());
-        $this->assertSame(LddapStatus::Approved, $service->approve($admin, $lddap)->status);
+        // And round two is resubmitted, with the whole trail intact.
+        $this->assertSame(LddapStatus::ForSignature, $service->resubmit($staff, $lddap->fresh(), 'Fixed the amount.')->status);
         $this->assertSame(
-            ['registered', 'forwarded', 'received', 'rts', 'forwarded', 'received', 'rts', 'forwarded', 'received', 'approved'],
+            ['registered', 'rts', 'resubmitted', 'rts', 'resubmitted'],
             $lddap->routingHistory()->pluck('action')->map(fn ($a) => $a->value)->all(),
         );
     }
 
-    /** The view's RTS history: every entry with all five fields, newest first. */
+    /** The view's RTS history: every entry with all five fields. */
     public function test_the_routing_trail_carries_every_rts_with_its_fields(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
         $service = app(LddapService::class);
         $staff = $this->staff();
         $admin = $this->admin();
 
         $service->rts($admin, $lddap, $this->rtsDetails(['note' => 'First.', 'rts_date' => '2026-09-24']));
-        $lddap = $service->receive($staff, $service->forward($staff, $lddap->fresh(), $this->forwardDetails()), $this->receiveDetails());
+        $lddap = $service->resubmit($staff, $lddap->fresh(), 'Fixed.');
         $service->rts($admin, $lddap, $this->rtsDetails(['note' => 'Second.', 'rts_date' => '2026-09-28', 'received_on' => '2026-09-27', 'received_by' => 'J. Cruz']));
 
         Sanctum::actingAs($staff);
@@ -915,11 +825,10 @@ class LddapTest extends TestCase
         $rts = array_values(array_filter($trail, fn ($step) => $step['action'] === 'rts'));
 
         $this->assertCount(2, $rts);
-        // Oldest first on the wire; the view reverses it.
         $this->assertSame('First.', $rts[0]['note']);
         $this->assertSame('2026-09-23', $rts[0]['received_on']);
         $this->assertSame('M. Santos', $rts[0]['received_by_name']);
-        $this->assertSame('ACCOUNTING', $rts[0]['unit_name']);
+        $this->assertSame('CG-8 Comptrollership', $rts[0]['unit_name']);
         $this->assertSame('2026-09-24', $rts[0]['acted_on']);
         $this->assertSame('Second.', $rts[1]['note']);
         $this->assertSame('2026-09-27', $rts[1]['received_on']);
@@ -927,16 +836,16 @@ class LddapTest extends TestCase
         $this->assertSame('2026-09-28', $rts[1]['acted_on']);
     }
 
-    /** Cancel: Returned for ACIC → Canceled, with who, when and why on the record. */
+    /** Cancel: For Signature → Canceled, with who, when and why on the record. */
     public function test_cancel_sets_the_status_to_canceled_with_its_details(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
         $admin = $this->admin();
         Sanctum::actingAs($admin);
 
         $this->postJson("/api/v1/lddaps/{$lddap->id}/cancel", [
             'date_canceled' => '2026-09-25',
-            'note' => 'Duplicate of LDDAP-0009.',
+            'note' => 'Duplicate of 26-09-00009.',
         ])
             ->assertOk()
             ->assertJsonPath('data.status', 'canceled')
@@ -944,20 +853,20 @@ class LddapTest extends TestCase
             ->assertJsonPath('data.is_final', true)
             ->assertJsonPath('data.canceled_by.id', $admin->id)
             ->assertJsonPath('data.date_canceled', '2026-09-25')
-            ->assertJsonPath('data.cancel_reason', 'Duplicate of LDDAP-0009.')
+            ->assertJsonPath('data.cancel_reason', 'Duplicate of 26-09-00009.')
             // Nothing further is offered.
-            ->assertJsonPath('data.can_forward', false)
-            ->assertJsonPath('data.can_receive', false)
-            ->assertJsonPath('data.awaits_action', false);
+            ->assertJsonPath('data.awaits_action', false)
+            ->assertJsonPath('data.can_resubmit', false)
+            ->assertJsonPath('data.is_acic_eligible', false);
 
         $this->assertDatabaseHas('lddap_routing_history', [
-            'lddap_id' => $lddap->id, 'action' => 'canceled', 'from_status' => 'returned_for_acic',
-            'to_status' => 'canceled', 'user_id' => $admin->id, 'note' => 'Duplicate of LDDAP-0009.',
+            'lddap_id' => $lddap->id, 'action' => 'canceled', 'from_status' => 'for_signature',
+            'to_status' => 'canceled', 'user_id' => $admin->id, 'note' => 'Duplicate of 26-09-00009.',
         ]);
         $this->assertSame('2026-09-25', $lddap->routingHistory()->where('action', 'canceled')->first()->acted_on->toDateString());
 
         // The date defaults to today when the dialog leaves it out.
-        $other = $this->returnedLddap(n: 2);
+        $other = $this->forSignatureLddap(n: 2);
         $this->postJson("/api/v1/lddaps/{$other->id}/cancel", ['note' => 'Withdrawn by the requesting unit.'])
             ->assertOk()
             ->assertJsonPath('data.date_canceled', now()->toDateString());
@@ -965,7 +874,7 @@ class LddapTest extends TestCase
 
     public function test_cancel_requires_a_reason(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
         Sanctum::actingAs($this->admin());
 
         $this->postJson("/api/v1/lddaps/{$lddap->id}/cancel", [])
@@ -975,14 +884,14 @@ class LddapTest extends TestCase
             ->assertStatus(422)
             ->assertJsonValidationErrors('note');
 
-        $this->assertSame(LddapStatus::ReturnedForAcic, $lddap->fresh()->status);
+        $this->assertSame(LddapStatus::ForSignature, $lddap->fresh()->status);
         $this->assertNull($lddap->fresh()->canceled_by);
     }
 
     /** Once canceled, the LDDAP number is still taken: it can never be registered again. */
     public function test_a_canceled_records_lddap_number_stays_used(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
         app(LddapService::class)->cancel($this->admin(), $lddap, ['note' => 'Withdrawn.']);
         Sanctum::actingAs($this->staff());
 
@@ -991,36 +900,34 @@ class LddapTest extends TestCase
             ->assertJsonValidationErrors('lddap_no')
             ->assertJsonPath(
                 'errors.lddap_no.0',
-                'LDDAP number LDDAP-0001 has already been registered. Each LDDAP number can be used only once.',
+                'LDDAP number 26-09-00001 has already been registered. Each LDDAP number can be used only once.',
             );
 
-        $this->assertSame(1, Lddap::where('lddap_no', 'LDDAP-0001')->count());
-        $this->assertSame(LddapStatus::Canceled, Lddap::where('lddap_no', 'LDDAP-0001')->first()->status);
+        $this->assertSame(1, Lddap::where('lddap_no', '26-09-00001')->count());
+        $this->assertSame(LddapStatus::Canceled, Lddap::where('lddap_no', '26-09-00001')->first()->status);
     }
 
     public function test_a_canceled_record_is_read_only(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
         $service = app(LddapService::class);
         $service->cancel($this->admin(), $lddap, ['note' => 'Withdrawn.']);
         $lddap->refresh();
 
-        // Not forwarded, not received, not acted on again.
+        // Not returned, resubmitted or canceled again.
         Sanctum::actingAs($this->admin());
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/forward", $this->forwardDetails())->assertStatus(422);
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/receive-back", $this->receiveDetails())->assertStatus(422);
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/approve")->assertStatus(422);
         $this->postJson("/api/v1/lddaps/{$lddap->id}/rts", $this->rtsDetails())->assertStatus(422);
+        $this->postJson("/api/v1/lddaps/{$lddap->id}/resubmit", ['comment' => 'Nope.'])->assertStatus(422);
         $this->postJson("/api/v1/lddaps/{$lddap->id}/cancel", ['note' => 'Again.'])->assertStatus(422);
 
         // Not edited — a correction is refused, by staff or directly by an admin.
         Sanctum::actingAs($this->staff());
         $this->postJson("/api/v1/lddaps/{$lddap->id}/update-requests", [
-            'lddap_no' => 'LDDAP-0001', 'obj_no' => 'X', 'payee_name' => 'Y', 'amount' => 5, 'reason' => 'Trying anyway.',
+            'lddap_no' => '26-09-00001', 'obj_no' => 'X', 'payee_name' => 'Y', 'amount' => 5, 'reason' => 'Trying anyway.',
         ])->assertStatus(422);
         Sanctum::actingAs($this->admin());
         $this->patchJson("/api/v1/lddaps/{$lddap->id}", [
-            'lddap_no' => 'LDDAP-0001', 'obj_no' => 'X', 'payee_name' => 'Y', 'amount' => 5, 'reason' => 'Trying anyway.',
+            'lddap_no' => '26-09-00001', 'obj_no' => 'X', 'payee_name' => 'Y', 'amount' => 5, 'reason' => 'Trying anyway.',
         ])->assertStatus(422);
 
         // Not assigned — never offered by "Assign LDDAP to ACIC", and forcing it is refused on
@@ -1038,113 +945,100 @@ class LddapTest extends TestCase
         $this->assertSame(LddapStatus::Canceled, $lddap->fresh()->status);
     }
 
-    /** A canceled record sits beside approved ones and is still left out of the assign dialog. */
+    /** A canceled record sits beside For Signature ones and is left out of the assign dialog. */
     public function test_canceled_records_are_excluded_from_acic_assignment(): void
     {
         $this->seedSeries(1, 10);
-        $approved = $this->approvedLddaps(2);
-        $canceled = $this->returnedLddap(n: 5);
+        $ready = $this->forSignatureLddaps(2);
+        $canceled = $this->forSignatureLddap(n: 5);
         app(LddapService::class)->cancel($this->admin(), $canceled, ['note' => 'Withdrawn.']);
 
         Sanctum::actingAs($this->staff());
         $offered = $this->getJson('/api/v1/lddaps/linkable')->assertOk()->json('data');
 
-        $this->assertSame($approved->pluck('id')->all(), array_column($offered, 'id'));
+        $this->assertSame($ready->pluck('id')->all(), array_column($offered, 'id'));
         $this->assertNotContains($canceled->id, array_column($offered, 'id'));
     }
 
-    /** Every status allows exactly one next step; every other step is refused. */
+    /** Each status allows only its own next steps; every other step is refused. */
     public function test_only_the_next_valid_step_is_allowed_for_each_status(): void
     {
+        $this->seedSeries(1, 10);
         $service = app(LddapService::class);
-        $staff = $this->staff();
         $admin = $this->admin();
 
-        $registered = $service->register($staff, $this->details(1));
-        $forOut = $service->forward($staff, $service->register($staff, $this->details(2)), $this->forwardDetails());
-        $returned = $this->returnedLddap(n: 3);
-        $approved = $service->approve($admin, $this->returnedLddap(n: 4));
+        $forSignature = $this->forSignatureLddap(n: 1);
+        $rts = $service->rts($admin, $this->forSignatureLddap(n: 2), $this->rtsDetails());
+        $onAcic = $this->forSignatureLddap(n: 3);
+        $service->assignToAcic($admin, app(AcicService::class)->create($admin), [$onAcic->id]);
 
         Sanctum::actingAs($admin);
 
-        // Registered: only Forward.
-        $this->postJson("/api/v1/lddaps/{$registered->id}/receive-back", $this->receiveDetails())->assertStatus(422);
-        $this->postJson("/api/v1/lddaps/{$registered->id}/approve")->assertStatus(422);
-        $this->postJson("/api/v1/lddaps/{$registered->id}/rts", $this->rtsDetails())->assertStatus(422);
-        $this->postJson("/api/v1/lddaps/{$registered->id}/cancel", ['note' => 'xyz'])->assertStatus(422);
+        // For Signature: RTS, Cancel or an ACIC — not Resubmit.
+        $this->postJson("/api/v1/lddaps/{$forSignature->id}/resubmit", ['comment' => 'Fixed.'])->assertStatus(422);
 
-        // For Out: only Receive.
-        $this->postJson("/api/v1/lddaps/{$forOut->id}/forward", $this->forwardDetails())->assertStatus(422);
-        $this->postJson("/api/v1/lddaps/{$forOut->id}/approve")->assertStatus(422);
-        $this->postJson("/api/v1/lddaps/{$forOut->id}/rts", $this->rtsDetails())->assertStatus(422);
-
-        // Returned for ACIC: only Approve / RTS / Cancel.
-        $this->postJson("/api/v1/lddaps/{$returned->id}/forward", $this->forwardDetails())->assertStatus(422);
-        $this->postJson("/api/v1/lddaps/{$returned->id}/receive-back", $this->receiveDetails())->assertStatus(422);
-
-        // RTS: only Forward.
-        $rts = app(LddapService::class)->rts($admin, $this->returnedLddap(n: 5), $this->rtsDetails());
-        $this->postJson("/api/v1/lddaps/{$rts->id}/receive-back", $this->receiveDetails())->assertStatus(422);
-        $this->postJson("/api/v1/lddaps/{$rts->id}/approve")->assertStatus(422);
+        // RTS: only Resubmit (and editing).
         $this->postJson("/api/v1/lddaps/{$rts->id}/rts", $this->rtsDetails())->assertStatus(422);
         $this->postJson("/api/v1/lddaps/{$rts->id}/cancel", ['note' => 'xyz'])->assertStatus(422);
+        $acic = app(AcicService::class)->create($admin);
+        $this->postJson("/api/v1/acics/{$acic->id}/lddaps", ['lddap_ids' => [$rts->id]])->assertStatus(422);
+
+        // On an ACIC (Approved): nothing before the teller's half.
+        $this->postJson("/api/v1/lddaps/{$onAcic->id}/rts", $this->rtsDetails())->assertStatus(422);
+        $this->postJson("/api/v1/lddaps/{$onAcic->id}/cancel", ['note' => 'xyz'])->assertStatus(422);
+        $this->postJson("/api/v1/lddaps/{$onAcic->id}/resubmit", ['comment' => 'Fixed.'])->assertStatus(422);
+
+        $this->assertSame(LddapStatus::ForSignature, $forSignature->fresh()->status);
         $this->assertSame(LddapStatus::Rts, $rts->fresh()->status);
-
-        // Approved: nothing further in the routing.
-        foreach (['forward', 'receive-back', 'approve'] as $step) {
-            $body = $step === 'forward' ? $this->forwardDetails() : ($step === 'receive-back' ? $this->receiveDetails() : []);
-            $this->postJson("/api/v1/lddaps/{$approved->id}/{$step}", $body)->assertStatus(422);
-        }
-        $this->postJson("/api/v1/lddaps/{$approved->id}/rts", $this->rtsDetails())->assertStatus(422);
-        $this->postJson("/api/v1/lddaps/{$approved->id}/cancel", ['note' => 'xyz'])->assertStatus(422);
-
-        $this->assertSame(LddapStatus::Registered, $registered->fresh()->status);
-        $this->assertSame(LddapStatus::ForOut, $forOut->fresh()->status);
-        $this->assertSame(LddapStatus::ReturnedForAcic, $returned->fresh()->status);
-        $this->assertSame(LddapStatus::Approved, $approved->fresh()->status);
+        $this->assertSame(LddapStatus::Approved, $onAcic->fresh()->status);
     }
 
-    public function test_the_admin_actions_are_admin_only_and_the_routing_steps_are_not_for_tellers(): void
+    public function test_rts_and_cancel_are_admin_only_and_tellers_do_not_add_lddaps(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
 
         Sanctum::actingAs($this->staff());
-        $this->postJson("/api/v1/lddaps/{$lddap->id}/approve")->assertForbidden();
         $this->postJson("/api/v1/lddaps/{$lddap->id}/rts", $this->rtsDetails())->assertForbidden();
         $this->postJson("/api/v1/lddaps/{$lddap->id}/cancel", ['note' => 'xyz'])->assertForbidden();
 
-        $fresh = app(LddapService::class)->register($this->staff(), $this->details(2));
         Sanctum::actingAs($this->teller());
-        $this->postJson("/api/v1/lddaps/{$fresh->id}/forward", $this->forwardDetails())->assertForbidden();
         $this->postJson('/api/v1/lddaps', $this->details(3))->assertForbidden();
     }
 
-    /** The trail reads back with user, date and note on every step. */
+    /** The trail reads back with user, date and note — and never the retired forward/receive rows. */
     public function test_the_routing_trail_is_readable_on_the_record(): void
     {
-        $lddap = $this->returnedLddap();
-        app(LddapService::class)->approve($this->admin(), $lddap, 'OK.');
-        Sanctum::actingAs($this->teller());
+        $lddap = $this->forSignatureLddap();
+        $service = app(LddapService::class);
+        $service->rts($this->admin(), $lddap, $this->rtsDetails());
+        $service->resubmit($this->staff(), $lddap->fresh(), 'Fixed.', 'Double-checked.');
 
+        // A forward row from before the change: kept in the table, never shown.
+        LddapRoutingHistory::create([
+            'lddap_id' => $lddap->id, 'action' => 'forwarded', 'from_status' => 'registered', 'to_status' => 'for_out',
+            'user_id' => $this->admin()->id, 'counterparty' => 'Old Office',
+        ]);
+
+        Sanctum::actingAs($this->teller());
         $trail = $this->getJson("/api/v1/lddaps/{$lddap->id}/routing-history")->assertOk()->json('data');
 
-        $this->assertSame(['registered', 'forwarded', 'received', 'approved'], array_column($trail, 'action'));
-        $this->assertSame('Accounting Division', $trail[1]['counterparty']);
-        $this->assertSame('ACCOUNTING', $trail[1]['unit_name']);
-        $this->assertSame('2026-09-22', $trail[1]['acted_on']);
-        $this->assertSame('For signature.', $trail[1]['note']);
-        $this->assertSame('Signed.', $trail[2]['note']);
-        $this->assertSame('OK.', $trail[3]['note']);
+        $this->assertSame(['registered', 'rts', 'resubmitted'], array_column($trail, 'action'));
+        $this->assertSame('Fixed.', $trail[2]['note']);
+        $this->assertSame('Double-checked.', $trail[2]['notes']);
         foreach ($trail as $step) {
             $this->assertNotNull($step['user']['name']);
         }
+        $this->assertSame(4, $lddap->routingHistory()->count());
+
+        // And the record itself carries no forward / return fields.
+        $this->assertArrayNotHasKey('forward_to', $this->getJson('/api/v1/lddaps')->json('data.0'));
     }
 
     /** The check number arrives with the ACIC assignment, and only then. */
     public function test_a_record_takes_its_check_number_when_it_goes_on_an_acic(): void
     {
         $this->seedSeries(1, 10);
-        $lddap = $this->approvedLddaps(1)->first();
+        $lddap = $this->forSignatureLddaps(1)->first();
         $this->assertNull($lddap->lddap_check_id);
         $acic = app(AcicService::class)->create($this->admin());
 
@@ -1163,7 +1057,7 @@ class LddapTest extends TestCase
     /** Receipt presupposes a check number, i.e. an ACIC. */
     public function test_a_record_without_a_check_number_cannot_be_received(): void
     {
-        $lddap = $this->approvedLddaps(1)->first();
+        $lddap = $this->forSignatureLddaps(1)->first();
 
         Sanctum::actingAs($this->teller());
         $this->postJson("/api/v1/lddaps/{$lddap->id}/receive")->assertStatus(422);
@@ -1195,19 +1089,22 @@ class LddapTest extends TestCase
             $this->assertSame(LddapStatus::ReturnedForAcic, $row->status, "{$old} → returned_for_acic");
             $this->assertNotNull($row->lddap_check_id, "{$old} keeps its check number");
         }
-        $this->assertSame(LddapStatus::Registered, $untouched->fresh()->status);
+        $this->assertSame(LddapStatus::ForSignature, $untouched->fresh()->status);
 
-        // And the migrated records take the admin's action like any other returned record.
-        $this->assertSame(
-            LddapStatus::Approved,
-            $service->approve($this->admin(), Lddap::find($ids['compliance']))->status,
-        );
+        // And today's flow takes them on to For Signature, numbers still intact.
+        $latest = require database_path('migrations/2026_09_28_000200_lddaps_start_at_for_signature.php');
+        DB::table('lddaps')->whereIn('status', ['registered', 'for_out', 'returned_for_acic'])->update(['status' => 'for_signature']);
+        foreach ($ids as $old => $id) {
+            $this->assertSame(LddapStatus::ForSignature, Lddap::find($id)->status, "{$old} → for_signature");
+            $this->assertNotNull(Lddap::find($id)->lddap_check_id);
+        }
+        $this->assertInstanceOf(Migration::class, $latest);
     }
 
     /** Records canceled under the old spelling come across with their details backfilled. */
     public function test_records_canceled_under_the_old_spelling_are_remapped(): void
     {
-        $lddap = $this->returnedLddap();
+        $lddap = $this->forSignatureLddap();
         $admin = $this->admin();
         // As the old Cancel left them: status "cancelled", stamped as a review, no details.
         DB::table('lddaps')->where('id', $lddap->id)->update([
@@ -1245,62 +1142,157 @@ class LddapTest extends TestCase
         Sanctum::actingAs($this->staff());
 
         $this->postJson('/api/v1/lddaps', [
-            'lddap_no' => 'LDDAP-0001',
-            'nca_no' => 'NCA-2026-09-001',
-            'orb_no' => 'ORB-2026-09-044',
-            'dv_no' => 'DV-2026-09-0187',
+            'lddap_no' => '26-09-00001',
+            'nca_no' => '0123456',
+            'obr_no' => 'OBR-2026-09-044',
+            'dv_no' => '26-09-00187',
             'nature_of_payment' => 'local_travel',
             'obj_no' => '5021304001',
-            'unit_id' => $unit->id,
+            'unit_name' => $unit,
             'check_date' => '2026-09-15',
-            'payee_id' => $payee->id,
+            'payee_type' => 'creditor',
+            'payee_ref' => $payee->id,
             'gross_amount' => 1591049.00,
         ])->assertCreated();
 
         $row = $this->getJson('/api/v1/lddaps')->assertOk()->json('data.0');
 
-        $this->assertSame('NCA-2026-09-001', $row['nca_no']);
-        $this->assertSame('ORB-2026-09-044', $row['orb_no']);
-        $this->assertSame('DV-2026-09-0187', $row['dv_no']);
+        // Stored as text: the leading zero survives.
+        $this->assertSame('0123456', $row['nca_no']);
+        $this->assertSame('OBR-2026-09-044', $row['obr_no']);
+        $this->assertSame('26-09-00187', $row['dv_no']);
         $this->assertSame('local_travel', $row['nature_of_payment']);
         $this->assertSame('LOCAL TRAVEL', $row['nature_of_payment_label']);
         $this->assertSame('5021304001', $row['obj_no']);
-        $this->assertSame($unit->id, $row['unit_id']);
-        $this->assertSame('ACCOUNTING', $row['unit_name']);
+        $this->assertSame('CG-8 Comptrollership', $row['unit_name']);
         // The date of issue is the one entered, not the day of registration.
         $this->assertSame('2026-09-15', $row['check_date']);
         // Registered, out for routing, no check number yet.
-        $this->assertSame('registered', $row['status']);
+        $this->assertSame('for_signature', $row['status']);
         $this->assertNull($row['check_no']);
     }
 
     /**
-     * The payee is chosen from the register, and its name and account are copied onto the
-     * record — so the LDDAP reads the same even if the payee is edited later.
+     * The payee comes from the Creditors or PCG Personnel list, and its name, type and account
+     * number are copied onto the record — nothing links back, so the LDDAP reads the same even
+     * if the entry is edited later.
      */
-    public function test_a_registration_copies_the_payee_name_and_account(): void
+    public function test_a_registration_copies_the_payee_name_type_and_account(): void
     {
         $this->seedSeries();
         $payee = $this->payee();
         Sanctum::actingAs($this->staff());
 
-        $this->postJson('/api/v1/lddaps', $this->details())->assertCreated();
+        $this->postJson('/api/v1/lddaps', $this->details())
+            ->assertCreated()
+            ->assertJsonPath('data.payee_type', 'creditor')
+            ->assertJsonPath('data.payee_type_label', 'Creditor');
 
         $lddap = Lddap::first();
-        $this->assertSame($payee->id, $lddap->payee_id);
         $this->assertSame('ACME SUPPLIES INC.', $lddap->payee_name);
-        // The lone account was picked without being named.
-        $this->assertSame($payee->accounts->first()->id, $lddap->payee_account_id);
-        $this->assertSame('2028-9010-11', $lddap->payee_account_no);
-        $this->assertSame('LBP', $lddap->payee_bank);
+        $this->assertSame('creditor', $lddap->payee_type);
+        $this->assertSame('0028901011', $lddap->payee_account_no);
+        $this->assertNull($lddap->payee_id);
 
-        // Editing the payee or the account afterwards does not rewrite history.
-        $payee->update(['name' => 'ACME SUPPLIES CORP.']);
-        $payee->accounts->first()->update(['account_no' => '9999-0000-00', 'bank' => 'DBP']);
+        // Editing the creditor afterwards does not rewrite history.
+        $payee->update(['name' => 'ACME SUPPLIES CORP.', 'account_no' => '9999000000']);
         $lddap->refresh();
         $this->assertSame('ACME SUPPLIES INC.', $lddap->payee_name);
-        $this->assertSame('2028-9010-11', $lddap->payee_account_no);
-        $this->assertSame('LBP', $lddap->payee_bank);
+        $this->assertSame('0028901011', $lddap->payee_account_no);
+    }
+
+    public function test_a_pcg_personnel_payee_is_saved_with_its_type(): void
+    {
+        $this->seedSeries();
+        $person = $this->personnelPayee();
+        Sanctum::actingAs($this->staff());
+
+        $this->postJson('/api/v1/lddaps', array_merge($this->details(), [
+            'payee_type' => 'pcg_personnel', 'payee_ref' => $person->id, 'unit_name' => 'CG-4 Logistics',
+        ]))
+            ->assertCreated()
+            ->assertJsonPath('data.payee_name', 'JUAN DELA CRUZ')
+            ->assertJsonPath('data.payee_type', 'pcg_personnel')
+            ->assertJsonPath('data.payee_type_label', 'PCG Personnel')
+            ->assertJsonPath('data.payee_account_no', '0451221007')
+            ->assertJsonPath('data.unit_name', 'CG-4 Logistics');
+
+        // An id from the other list is refused: the type names where to look.
+        $this->postJson('/api/v1/lddaps', array_merge($this->details(2), [
+            'payee_type' => 'creditor', 'payee_ref' => $person->id + 100,
+        ]))->assertStatus(422)->assertJsonValidationErrors('payee_ref');
+    }
+
+    /** NCA Code: 0000000 — exactly 7 digits, numbers only, kept as text. */
+    public function test_the_nca_code_is_exactly_seven_digits(): void
+    {
+        $this->seedSeries();
+        Sanctum::actingAs($this->staff());
+
+        foreach (['123456', '12345678', '12a4567', '01-00-0000001', 'NCA-001'] as $n => $bad) {
+            $this->postJson('/api/v1/lddaps', array_merge($this->details($n + 1), ['nca_no' => $bad]))
+                ->assertStatus(422)
+                ->assertJsonPath('errors.nca_no.0', 'NCA Code must be exactly 7 digits.');
+        }
+
+        // Trimmed, and the leading zeros survive.
+        $this->postJson('/api/v1/lddaps', array_merge($this->details(9), ['nca_no' => ' 0000007 ']))
+            ->assertCreated()->assertJsonPath('data.nca_no', '0000007');
+    }
+
+    /** LDDAP Number: 00-00-00000 — two digits, two digits, five digits. */
+    public function test_the_lddap_number_follows_the_00_00_00000_format(): void
+    {
+        $this->seedSeries();
+        Sanctum::actingAs($this->staff());
+
+        foreach (['LDDAP-0001', '26-9-00001', '260900001', '26-09-0001', '26-09-000011', 'ab-cd-efghi'] as $n => $bad) {
+            $this->postJson('/api/v1/lddaps', array_merge($this->details($n + 1), ['lddap_no' => $bad]))
+                ->assertStatus(422)
+                ->assertJsonPath('errors.lddap_no.0', 'LDDAP Number must be in the format 00-00-00000.');
+        }
+
+        $created = $this->postJson('/api/v1/lddaps', array_merge($this->details(9), ['lddap_no' => ' 26-09-00123 ']))
+            ->assertCreated()->assertJsonPath('data.lddap_no', '26-09-00123');
+
+        // A correction must propose a number in the same format.
+        $this->postJson("/api/v1/lddaps/{$created->json('data.id')}/update-requests", [
+            'lddap_no' => 'LDDAP-0123', 'obj_no' => 'OBJ-9', 'payee_name' => 'ACME', 'amount' => 900, 'reason' => 'Typo in the number.',
+        ])->assertStatus(422)->assertJsonPath('errors.lddap_no.0', 'LDDAP Number must be in the format 00-00-00000.');
+    }
+
+    /** DV Number: 00-00-00000, like the LDDAP Number. */
+    public function test_the_dv_number_follows_the_00_00_00000_format(): void
+    {
+        $this->seedSeries();
+        Sanctum::actingAs($this->staff());
+
+        foreach (['DV-2026-001', '10-0-00001', '100000001', '10-00-0001'] as $n => $bad) {
+            $this->postJson('/api/v1/lddaps', array_merge($this->details($n + 1), ['dv_no' => $bad]))
+                ->assertStatus(422)
+                ->assertJsonPath('errors.dv_no.0', 'DV Number must be in the format 00-00-00000.');
+        }
+
+        $this->postJson('/api/v1/lddaps', array_merge($this->details(9), ['dv_no' => '10-00-00123']))
+            ->assertCreated()->assertJsonPath('data.dv_no', '10-00-00123');
+    }
+
+    /** DV Number is unique, compared trimmed — by the form, the service and the database. */
+    public function test_a_dv_number_cannot_be_used_twice(): void
+    {
+        $this->seedSeries();
+        Sanctum::actingAs($this->staff());
+
+        $this->postJson('/api/v1/lddaps', array_merge($this->details(1), ['dv_no' => '26-00-00001']))->assertCreated();
+
+        $this->postJson('/api/v1/lddaps', array_merge($this->details(2), ['dv_no' => '  26-00-00001 ']))
+            ->assertStatus(422)
+            ->assertJsonPath('errors.dv_no.0', 'DV Number already exists.');
+        $this->assertSame(1, Lddap::count());
+
+        // The index refuses it too, whatever the route.
+        $this->expectException(UniqueConstraintViolationException::class);
+        Lddap::query()->first()->replicate(['lddap_no'])->fill(['lddap_no' => '26-09-88888'])->save();
     }
 
     public function test_a_registration_requires_each_new_detail(): void
@@ -1309,18 +1301,19 @@ class LddapTest extends TestCase
         Sanctum::actingAs($this->staff());
 
         $row = $this->details();
-        unset($row['nca_no'], $row['orb_no'], $row['dv_no'], $row['nature_of_payment'], $row['unit_id'], $row['check_date'], $row['payee_id']);
+        unset($row['nca_no'], $row['obr_no'], $row['dv_no'], $row['nature_of_payment'], $row['unit_name'], $row['check_date'], $row['payee_type'], $row['payee_ref']);
 
         $this->postJson('/api/v1/lddaps', $row)
             ->assertStatus(422)
             ->assertJsonValidationErrors([
                 'nca_no',
-                'orb_no',
+                'obr_no',
                 'dv_no',
                 'nature_of_payment',
-                'unit_id',
+                'unit_name',
                 'check_date',
-                'payee_id',
+                'payee_type',
+                'payee_ref',
             ]);
 
         // The UACS object code stays optional, as OBJ No. always was.
@@ -1334,20 +1327,19 @@ class LddapTest extends TestCase
 
         $row = $this->details();
         $row['nature_of_payment'] = 'bribery';
-        $row['unit_id'] = 9999;
-        $row['payee_id'] = 9999;
+        // Spelled differently from the list — the dropdown sends the exact name, so this is refused.
+        $row['unit_name'] = 'cg-8 comptrollership';
+        $row['payee_ref'] = 9999;
 
         $this->postJson('/api/v1/lddaps', $row)
             ->assertStatus(422)
-            ->assertJsonValidationErrors(['nature_of_payment', 'unit_id', 'payee_id']);
+            ->assertJsonValidationErrors(['nature_of_payment', 'unit_name', 'payee_ref']);
     }
 
     // ------------------------------------------------------ the reference lists
 
-    public function test_the_options_endpoint_lists_every_nature_and_unit(): void
+    public function test_the_options_endpoint_lists_every_nature(): void
     {
-        Unit::create(['name' => 'BUDGET']);
-        Unit::create(['name' => 'ACCOUNTING']);
         Sanctum::actingAs($this->staff());
 
         $data = $this->getJson('/api/v1/lddaps/options')->assertOk()->json('data');
@@ -1360,89 +1352,31 @@ class LddapTest extends TestCase
             $this->assertSame(strtoupper($nature['label']), $nature['label']);
         }
 
-        $this->assertSame(['ACCOUNTING', 'BUDGET'], array_column($data['units'], 'name'));
+        // Units are the shared PCG list, which the app imports rather than fetches.
+        $this->assertArrayNotHasKey('units', $data);
     }
 
-    public function test_a_payee_can_be_fetched_with_its_accounts_for_the_edit_form(): void
-    {
-        $payee = $this->multiAccountPayee();
-        Sanctum::actingAs($this->staff());
-
-        $this->getJson("/api/v1/payees/{$payee->id}")
-            ->assertOk()
-            ->assertJsonPath('data.id', $payee->id)
-            ->assertJsonPath('data.name', 'BLUEOCEAN LOGISTICS')
-            ->assertJsonCount(2, 'data.accounts')
-            ->assertJsonPath('data.accounts.1.account_no', '0451-2210-07');
-        $this->getJson('/api/v1/payees/999999')->assertNotFound();
-    }
-
-    public function test_payees_are_searched_by_name_or_account_number(): void
+    /** The payee search: Creditors and PCG Personnel in one list, by name or account number. */
+    public function test_the_payee_search_lists_creditors_and_pcg_personnel_together(): void
     {
         $this->payee();
-        $this->multiAccountPayee();
-        Payee::create(['name' => 'METRO RENTALS'])->accounts()->create(['account_no' => '3001-0000-55', 'bank' => 'LBP']);
+        $this->personnelPayee();
+        Creditor::create(['name' => 'METRO RENTALS', 'account_no' => '0030010000']);
         Sanctum::actingAs($this->staff());
 
-        // By name, case-insensitively — with every account the payee holds, labelled.
-        $this->getJson('/api/v1/payees?search=blueocean')
-            ->assertOk()
-            ->assertJsonCount(1, 'data')
-            ->assertJsonPath('data.0.name', 'BLUEOCEAN LOGISTICS')
-            ->assertJsonCount(2, 'data.0.accounts')
-            ->assertJsonPath('data.0.accounts.0.account_no', '1701-0426-18')
-            ->assertJsonPath('data.0.accounts.0.bank', 'LBP')
-            ->assertJsonPath('data.0.accounts.0.label', '1701-0426-18 – LBP')
-            ->assertJsonPath('data.0.accounts.1.label', '0451-2210-07 – DBP');
+        $all = $this->getJson('/api/v1/lddaps/payee-options')->assertOk()->json('data');
+        // Name order, both lists, each saying where it is from.
+        $this->assertSame(['ACME SUPPLIES INC.', 'JUAN DELA CRUZ', 'METRO RENTALS'], array_column($all, 'name'));
+        $this->assertSame(['Creditor', 'PCG Personnel', 'Creditor'], array_column($all, 'type_label'));
+        $this->assertSame(['type' => 'pcg_personnel', 'type_label' => 'PCG Personnel', 'name' => 'JUAN DELA CRUZ', 'account_no' => '0451221007', 'unit' => 'CG-4 Logistics'],
+            array_diff_key($all[1], ['id' => 0]));
 
-        // By any of a payee's account numbers.
-        $this->getJson('/api/v1/payees?search=0451-2210')
-            ->assertOk()
-            ->assertJsonCount(1, 'data')
-            ->assertJsonPath('data.0.name', 'BLUEOCEAN LOGISTICS');
+        $this->getJson('/api/v1/lddaps/payee-options?search=juan')->assertOk()->assertJsonCount(1, 'data');
+        $this->getJson('/api/v1/lddaps/payee-options?search=00300')
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.name', 'METRO RENTALS');
 
-        // No term lists them all, name order.
-        $this->getJson('/api/v1/payees')->assertOk()->assertJsonCount(3, 'data');
-    }
-
-    // ---------------------------------------------------------- payee accounts
-
-    /** With several accounts on file, the one the payment goes to must be chosen. */
-    public function test_a_payee_with_several_accounts_needs_one_chosen(): void
-    {
-        $payee = $this->multiAccountPayee();
-        Sanctum::actingAs($this->staff());
-
-        $details = array_merge($this->details(), ['payee_id' => $payee->id]);
-
-        // No choice: refused, and told why.
-        $this->postJson('/api/v1/lddaps', $details)
-            ->assertStatus(422)
-            ->assertJsonValidationErrors('payee_account_id');
-
-        // Choosing the second account records that account and its bank.
-        $dbp = $payee->accounts->firstWhere('bank', 'DBP');
-        $this->postJson('/api/v1/lddaps', $details + ['payee_account_id' => $dbp->id])
-            ->assertCreated()
-            ->assertJsonPath('data.payee_account_no', '0451-2210-07')
-            ->assertJsonPath('data.payee_bank', 'DBP');
-    }
-
-    /** An account has to be the chosen payee's own. */
-    public function test_another_payees_account_is_refused(): void
-    {
-        $acme = $this->payee();
-        $other = $this->multiAccountPayee();
-        Sanctum::actingAs($this->staff());
-
-        $this->postJson('/api/v1/lddaps', array_merge($this->details(), [
-            'payee_id' => $acme->id,
-            'payee_account_id' => $other->accounts->first()->id,
-        ]))
-            ->assertStatus(422)
-            ->assertJsonValidationErrors('payee_account_id');
-
-        $this->assertSame(0, Lddap::count());
+        Sanctum::actingAs(User::factory()->teller()->create());
+        $this->getJson('/api/v1/lddaps/payee-options')->assertForbidden();
     }
 
     // ------------------------------------------------------- the payment breakdown
@@ -1592,14 +1526,13 @@ class LddapTest extends TestCase
         return array_merge([
             'lddap_no' => $lddap->lddap_no,
             'nca_no' => $lddap->nca_no,
-            'orb_no' => $lddap->orb_no,
+            'obr_no' => $lddap->obr_no,
             'dv_no' => $lddap->dv_no,
             'nature_of_payment' => $lddap->nature_of_payment->value,
             'obj_no' => $lddap->obj_no,
-            'unit_id' => $lddap->unit_id,
+            'unit_name' => $lddap->unit_name,
             'check_date' => $lddap->check_date->toDateString(),
-            'payee_id' => $lddap->payee_id,
-            'payee_account_id' => $lddap->payee_account_id,
+            // The payee is left out: an edit that does not re-pick it keeps the one saved.
             'acic_ref' => $lddap->acic_ref,
             'gross_amount' => $lddap->gross_amount,
             'wtax_1' => $lddap->wtax_1, 'wtax_2' => $lddap->wtax_2, 'wtax_3' => $lddap->wtax_3, 'wtax_5' => $lddap->wtax_5,
@@ -1620,11 +1553,11 @@ class LddapTest extends TestCase
     {
         $this->seedSeries(1, 10);
         $staff = $this->staff();
-        $payee = $this->multiAccountPayee();
+        $person = $this->personnelPayee();
 
         app(LddapService::class)->register($staff, [
-            'payee_id' => $payee->id,
-            'payee_account_id' => $payee->accounts[1]->id,
+            'payee_type' => 'pcg_personnel',
+            'payee_ref' => $person->id,
             'acic_ref' => 'ACIC-77',
             'gross_amount' => '11200.00',
             'wtax_2' => '200.00',
@@ -1643,11 +1576,11 @@ class LddapTest extends TestCase
         $row = $this->getJson('/api/v1/lddaps')->assertOk()->json('data.0');
 
         foreach ([
-            'lddap_no' => 'LDDAP-0001', 'nca_no' => 'NCA-1', 'orb_no' => 'ORB-1', 'dv_no' => 'DV-1',
-            'nature_of_payment' => 'commercial_claims', 'obj_no' => 'OBJ-1', 'unit_id' => $this->unit()->id,
+            'lddap_no' => '26-09-00001', 'nca_no' => '0000001', 'obr_no' => 'OBR-1', 'dv_no' => '10-00-00001',
+            'nature_of_payment' => 'commercial_claims', 'obj_no' => 'OBJ-1', 'unit_name' => $this->unit(),
             'check_date' => '2026-09-21',
-            'payee_id' => $payee->id, 'payee_account_id' => $payee->accounts[1]->id,
-            'payee_name' => 'BLUEOCEAN LOGISTICS', 'payee_account_no' => '0451-2210-07', 'payee_bank' => 'DBP',
+            'payee_name' => 'JUAN DELA CRUZ', 'payee_type' => 'pcg_personnel', 'payee_type_label' => 'PCG Personnel',
+            'payee_account_no' => '0451221007',
             'acic_ref' => 'ACIC-77',
             'gross_amount' => '11200.00',
             'retention' => '100.00', 'liquidated_damages' => '50.00', 'advance_payment' => '25.00',
@@ -1669,18 +1602,19 @@ class LddapTest extends TestCase
     {
         $this->seedSeries(1, 10);
         $staff = $this->staff();
-        $payee = $this->multiAccountPayee();
+        $person = $this->personnelPayee();
         $lddap = app(LddapService::class)->register($staff, $this->details(1));
 
         Sanctum::actingAs($staff);
 
         $response = $this->putJson("/api/v1/lddaps/{$lddap->id}", $this->edited($lddap, [
-            'lddap_no' => 'LDDAP-0001-A',
-            'dv_no' => 'DV-1-REV',
+            'lddap_no' => '26-09-10001',
+            'dv_no' => '10-00-10001',
             'nature_of_payment' => 'rental',
             'obj_no' => '5029905003',
-            'payee_id' => $payee->id,
-            'payee_account_id' => $payee->accounts[0]->id,
+            // Re-picked: the new payee's name, type and account replace the old copy.
+            'payee_type' => 'pcg_personnel',
+            'payee_ref' => $person->id,
             'gross_amount' => '11200.00',
             'wtax_2' => '200.00',
             'vat_12' => '1200.00',
@@ -1689,20 +1623,20 @@ class LddapTest extends TestCase
             'note' => 'Corrected after RTS.',
         ]))
             ->assertOk()
-            ->assertJsonPath('data.lddap_no', 'LDDAP-0001-A')
-            ->assertJsonPath('data.dv_no', 'DV-1-REV')
+            ->assertJsonPath('data.lddap_no', '26-09-10001')
+            ->assertJsonPath('data.dv_no', '10-00-10001')
             ->assertJsonPath('data.nature_of_payment', 'rental')
             ->assertJsonPath('data.obj_no', '5029905003')
-            ->assertJsonPath('data.payee_name', 'BLUEOCEAN LOGISTICS')
-            ->assertJsonPath('data.payee_account_no', '1701-0426-18')
-            ->assertJsonPath('data.payee_bank', 'LBP')
+            ->assertJsonPath('data.payee_name', 'JUAN DELA CRUZ')
+            ->assertJsonPath('data.payee_type', 'pcg_personnel')
+            ->assertJsonPath('data.payee_account_no', '0451221007')
             ->assertJsonPath('data.gross_amount', '11200.00')
             // Net payable is re-derived: 11200 − 200 − 1200 − 100.
             ->assertJsonPath('data.amount', '9700.00')
             ->assertJsonPath('data.fwd_to_lbp_at', '2026-09-25')
             ->assertJsonPath('data.note', 'Corrected after RTS.')
             // Untouched by the edit.
-            ->assertJsonPath('data.status', 'registered')
+            ->assertJsonPath('data.status', 'for_signature')
             ->assertJsonPath('data.check_no', null)
             ->assertJsonPath('data.used_by.id', $staff->id);
         // The rate maps are keyed by rate, which dot-notation would split.
@@ -1713,19 +1647,20 @@ class LddapTest extends TestCase
         $entry = $lddap->editHistory()->sole();
         $this->assertSame($staff->id, $entry->user_id);
         $this->assertNotNull($entry->created_at);
-        $this->assertSame(['from' => 'LDDAP-0001', 'to' => 'LDDAP-0001-A'], $entry->changes['lddap_no']);
+        $this->assertSame(['from' => '26-09-00001', 'to' => '26-09-10001'], $entry->changes['lddap_no']);
         $this->assertSame(['from' => 'commercial_claims', 'to' => 'rental'], $entry->changes['nature_of_payment']);
         $this->assertSame(['from' => '100.00', 'to' => '9700.00'], $entry->changes['amount']);
         $this->assertSame(['from' => null, 'to' => '2026-09-25'], $entry->changes['fwd_to_lbp_at']);
         $this->assertArrayNotHasKey('nca_no', $entry->changes);
-        $this->assertArrayNotHasKey('orb_no', $entry->changes);
+        $this->assertArrayNotHasKey('obr_no', $entry->changes);
+        $this->assertSame(['from' => 'creditor', 'to' => 'pcg_personnel'], $entry->changes['payee_type']);
         $this->assertDatabaseHas('cheque_logs', ['username' => $staff->username, 'action' => 'updated_lddap']);
 
         $this->getJson("/api/v1/lddaps/{$lddap->id}/edit-history")
             ->assertOk()
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.user.id', $staff->id)
-            ->assertJsonPath('data.0.changes.dv_no.to', 'DV-1-REV');
+            ->assertJsonPath('data.0.changes.dv_no.to', '10-00-10001');
     }
 
     public function test_an_edit_keeps_the_records_own_lddap_number(): void
@@ -1737,10 +1672,10 @@ class LddapTest extends TestCase
         Sanctum::actingAs($staff);
 
         // Same number, only the DV changes — its own number is not a duplicate of itself.
-        $this->putJson("/api/v1/lddaps/{$lddap->id}", $this->edited($lddap, ['dv_no' => 'DV-1-REV']))
+        $this->putJson("/api/v1/lddaps/{$lddap->id}", $this->edited($lddap, ['dv_no' => '10-00-10001']))
             ->assertOk()
-            ->assertJsonPath('data.lddap_no', 'LDDAP-0001')
-            ->assertJsonPath('data.dv_no', 'DV-1-REV');
+            ->assertJsonPath('data.lddap_no', '26-09-00001')
+            ->assertJsonPath('data.dv_no', '10-00-10001');
 
         $this->assertSame(['dv_no'], array_keys($lddap->editHistory()->sole()->changes));
     }
@@ -1751,15 +1686,15 @@ class LddapTest extends TestCase
         $staff = $this->staff();
         $service = app(LddapService::class);
         $mine = $service->register($staff, $this->details(1));
-        $service->register($staff, $this->details(2));   // LDDAP-0002
+        $service->register($staff, $this->details(2));   // 26-09-00002
 
         Sanctum::actingAs($staff);
 
-        $this->putJson("/api/v1/lddaps/{$mine->id}", $this->edited($mine, ['lddap_no' => 'LDDAP-0002']))
+        $this->putJson("/api/v1/lddaps/{$mine->id}", $this->edited($mine, ['lddap_no' => '26-09-00002']))
             ->assertStatus(422)
             ->assertJsonValidationErrors(['lddap_no' => 'already been registered']);
 
-        $this->assertSame('LDDAP-0001', $mine->fresh()->lddap_no);
+        $this->assertSame('26-09-00001', $mine->fresh()->lddap_no);
         $this->assertSame(0, $mine->editHistory()->count());
     }
 
@@ -1774,46 +1709,51 @@ class LddapTest extends TestCase
         Sanctum::actingAs($staff);
 
         $this->putJson("/api/v1/lddaps/{$lddap->id}", $this->edited($lddap, [
-            'dv_no' => 'DV-1-REV',
+            'dv_no' => '10-00-10001',
             'lddap_check_id' => $check->id,
             'check_no' => 3,
             'status' => 'approved',
         ]))
             ->assertOk()
             ->assertJsonPath('data.check_no', null)
-            ->assertJsonPath('data.status', 'registered');
+            ->assertJsonPath('data.status', 'for_signature');
 
         $this->assertNull($lddap->fresh()->lddap_check_id);
         $this->assertSame(LddapCheckStatus::Available, $check->fresh()->status);
     }
 
-    public function test_only_registered_and_rts_records_can_be_edited(): void
+    public function test_only_for_signature_and_rts_records_can_be_edited(): void
     {
         $this->seedSeries(1, 10);
         $service = app(LddapService::class);
         $staff = $this->staff();
         $admin = $this->admin();
 
-        $forOut = $service->forward($staff, $service->register($staff, $this->details(2)), $this->forwardDetails());
-        $returned = $this->returnedLddap($staff, 3);
-        $approved = $service->approve($admin, $this->returnedLddap($staff, 4));
-        $canceled = $service->cancel($admin, $this->returnedLddap($staff, 5), ['note' => 'Withdrawn.']);
-        $rts = $service->rts($admin, $this->returnedLddap($staff, 6), $this->rtsDetails());
+        $onAcic = $this->forSignatureLddap($staff, 4);
+        $service->assignToAcic($admin, app(AcicService::class)->create($admin), [$onAcic->id]);
+        $onAcic = $onAcic->fresh();
+        $canceled = $service->cancel($admin, $this->forSignatureLddap($staff, 5), ['note' => 'Withdrawn.']);
+        $rts = $service->rts($admin, $this->forSignatureLddap($staff, 6), $this->rtsDetails());
+        $forSignature = $this->forSignatureLddap($staff, 7);
 
         Sanctum::actingAs($staff);
 
-        foreach ([$forOut, $returned, $approved, $canceled] as $fixed) {
-            $this->putJson("/api/v1/lddaps/{$fixed->id}", $this->edited($fixed, ['dv_no' => 'CHANGED']))
+        foreach ([$onAcic, $canceled] as $fixed) {
+            $this->putJson("/api/v1/lddaps/{$fixed->id}", $this->edited($fixed, ['dv_no' => '10-00-99999']))
                 ->assertStatus(422)
                 ->assertJsonValidationErrors(['lddap' => 'cannot be edited']);
             $this->assertNotSame('CHANGED', $fixed->fresh()->dv_no);
             $this->assertFalse($this->getJson("/api/v1/lddaps?search={$fixed->lddap_no}")->json('data.0.can_edit'));
         }
 
+        // A For Signature record is editable, and stays For Signature.
+        $this->putJson("/api/v1/lddaps/{$forSignature->id}", $this->edited($forSignature, ['obj_no' => 'OBJ-7B']))
+            ->assertOk()->assertJsonPath('data.status', 'for_signature')->assertJsonPath('data.can_edit', true);
+
         // An RTS record is back in the registrant's hands: editable, and its status stays RTS.
-        $this->putJson("/api/v1/lddaps/{$rts->id}", $this->edited($rts, ['dv_no' => 'DV-6-REV']))
+        $this->putJson("/api/v1/lddaps/{$rts->id}", $this->edited($rts, ['dv_no' => '10-00-10006']))
             ->assertOk()
-            ->assertJsonPath('data.dv_no', 'DV-6-REV')
+            ->assertJsonPath('data.dv_no', '10-00-10006')
             ->assertJsonPath('data.status', 'rts')
             ->assertJsonPath('data.can_edit', true);
     }
@@ -1823,11 +1763,11 @@ class LddapTest extends TestCase
         $this->seedSeries(1, 10);
         $staff = $this->staff();
         $lddap = app(LddapService::class)->register($staff, $this->details(1));
-        app(LddapUpdateRequestService::class)->create($staff, $lddap, ['lddap_no' => 'LDDAP-0001', 'obj_no' => null, 'payee_name' => 'X', 'amount' => '100.00'], 'Wrong payee.');
+        app(LddapUpdateRequestService::class)->create($staff, $lddap, ['lddap_no' => '26-09-00001', 'obj_no' => null, 'payee_name' => 'X', 'amount' => '100.00'], 'Wrong payee.');
 
         Sanctum::actingAs($staff);
 
-        $this->putJson("/api/v1/lddaps/{$lddap->id}", $this->edited($lddap, ['dv_no' => 'CHANGED']))
+        $this->putJson("/api/v1/lddaps/{$lddap->id}", $this->edited($lddap, ['dv_no' => '10-00-99999']))
             ->assertStatus(422)
             ->assertJsonValidationErrors(['lddap' => 'on hold']);
     }
@@ -1853,7 +1793,7 @@ class LddapTest extends TestCase
 
         Sanctum::actingAs($this->teller());
 
-        $this->putJson("/api/v1/lddaps/{$lddap->id}", $this->edited($lddap, ['dv_no' => 'CHANGED']))->assertForbidden();
+        $this->putJson("/api/v1/lddaps/{$lddap->id}", $this->edited($lddap, ['dv_no' => '10-00-99999']))->assertForbidden();
     }
 
     // -------------------------------------------------------------- the filter bar
@@ -1869,11 +1809,11 @@ class LddapTest extends TestCase
         $staff = $this->staff();
 
         $this->useChecks(1);                                                          // approved, on an ACIC
-        $service->register($staff, $this->details(2));                                // registered
-        $service->forward($staff, $service->register($staff, $this->details(3)), $this->forwardDetails()); // for out
-        $this->returnedLddap(n: 4);                                                   // returned for ACIC
-        $service->cancel($this->admin(), $this->returnedLddap(n: 5), ['note' => 'Withdrawn.']); // canceled
-        $service->rts($this->admin(), $this->returnedLddap(n: 6), $this->rtsDetails()); // rts
+        $service->register($staff, $this->details(2));                                // for signature
+        $service->register($staff, $this->details(3));                                // for signature
+        $this->forSignatureLddap(n: 4);                                               // for signature
+        $service->cancel($this->admin(), $this->forSignatureLddap(n: 5), ['note' => 'Withdrawn.']); // canceled
+        $service->rts($this->admin(), $this->forSignatureLddap(n: 6), $this->rtsDetails()); // rts
 
         return $staff;
     }
@@ -1884,18 +1824,18 @@ class LddapTest extends TestCase
         Sanctum::actingAs($this->oneOfEachStatus());
 
         foreach ([
-            'registered' => 'Registered',
-            'for_out' => 'For Out',
-            'returned_for_acic' => 'Returned for ACIC',
-            'rts' => 'RTS',
-            'approved' => 'Approved',
-            'canceled' => 'Canceled',
-        ] as $status => $label) {
+            'for_signature' => ['For Signature', 3],
+            'rts' => ['RTS', 1],
+            'approved' => ['Approved', 1],
+            'canceled' => ['Canceled', 1],
+        ] as $status => [$label, $count]) {
             $this->getJson("/api/v1/lddaps?status={$status}")
                 ->assertOk()
-                ->assertJsonCount(1, 'data')
+                ->assertJsonCount($count, 'data')
                 ->assertJsonPath('data.0.status_label', $label);
         }
+        // The retired statuses match nothing now.
+        $this->getJson('/api/v1/lddaps?status=for_out')->assertOk()->assertJsonCount(0, 'data');
 
         $this->getJson('/api/v1/lddaps?status=all')->assertOk()->assertJsonCount(6, 'data');
         $this->getJson('/api/v1/lddaps?status=bogus')->assertStatus(422)->assertJsonValidationErrors('status');
@@ -1917,7 +1857,7 @@ class LddapTest extends TestCase
         $this->getJson('/api/v1/lddaps?nature=commercial_claims')
             ->assertOk()
             ->assertJsonCount(1, 'data')
-            ->assertJsonPath('data.0.lddap_no', 'LDDAP-0001');
+            ->assertJsonPath('data.0.lddap_no', '26-09-00001');
         $this->getJson('/api/v1/lddaps?nature=honoraria')->assertOk()->assertJsonCount(0, 'data');
         $this->getJson('/api/v1/lddaps?nature=all')->assertOk()->assertJsonCount(3, 'data');
         $this->getJson('/api/v1/lddaps?nature=bogus')->assertStatus(422)->assertJsonValidationErrors('nature');
@@ -1930,17 +1870,17 @@ class LddapTest extends TestCase
         $service = app(LddapService::class);
         $staff = $this->staff();
 
-        $service->register($staff, ['lddap_no' => 'LDDAP-2026-0001'] + $this->details(1));
-        $service->register($staff, ['lddap_no' => 'LDDAP-2026-0002'] + $this->details(2));
-        $service->register($staff, ['lddap_no' => 'LDDAP-2025-0003'] + $this->details(3));
+        $service->register($staff, ['lddap_no' => '26-00-00001'] + $this->details(1));
+        $service->register($staff, ['lddap_no' => '26-00-00002'] + $this->details(2));
+        $service->register($staff, ['lddap_no' => '25-00-00003'] + $this->details(3));
 
         Sanctum::actingAs($staff);
 
-        $this->getJson('/api/v1/lddaps?search=2026')->assertOk()->assertJsonCount(2, 'data');
-        $this->getJson('/api/v1/lddaps?search=LDDAP-2025-0003')
+        $this->getJson('/api/v1/lddaps?search=26-00')->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson('/api/v1/lddaps?search=25-00-00003')
             ->assertOk()
             ->assertJsonCount(1, 'data')
-            ->assertJsonPath('data.0.lddap_no', 'LDDAP-2025-0003');
+            ->assertJsonPath('data.0.lddap_no', '25-00-00003');
         $this->getJson('/api/v1/lddaps?search=nothing-like-this')->assertOk()->assertJsonCount(0, 'data');
     }
 
@@ -1980,13 +1920,13 @@ class LddapTest extends TestCase
             $this->getJson('/api/v1/lddaps?'.http_build_query(['search' => $typed]))
                 ->assertOk()
                 ->assertJsonCount(1, 'data')
-                ->assertJsonPath('data.0.lddap_no', 'LDDAP-0001');
+                ->assertJsonPath('data.0.lddap_no', '26-09-00001');
         }
 
         $this->getJson('/api/v1/lddaps?'.http_build_query(['search' => '₱194,032.50']))
             ->assertOk()
             ->assertJsonCount(1, 'data')
-            ->assertJsonPath('data.0.lddap_no', 'LDDAP-0002');
+            ->assertJsonPath('data.0.lddap_no', '26-09-00002');
 
         // The amount must match exactly — 194032 is not "part of" 1940320.
         $this->getJson('/api/v1/lddaps?search=194032.01')->assertOk()->assertJsonCount(0, 'data');
@@ -2000,13 +1940,36 @@ class LddapTest extends TestCase
         $this->assertSame('194032.00', Money::parse('₱194,032'));
         $this->assertSame('194032.50', Money::parse(' ₱ 194,032.5 '));
         $this->assertSame('1500.00', Money::parse('PHP 1,500'));
-        $this->assertNull(Money::parse('LDDAP-0001'));
+        $this->assertNull(Money::parse('26-09-00001'));
         $this->assertNull(Money::parse('2026-0001'));
         $this->assertNull(Money::parse(''));
         $this->assertNull(Money::parse(null));
     }
 
     /** The filters combine: search AND status AND nature. */
+    public function test_the_table_filters_on_payee_type(): void
+    {
+        $this->seedSeries(1, 10);
+        $service = app(LddapService::class);
+        $staff = $this->staff();
+
+        $service->register($staff, $this->details(1));                                        // a creditor
+        $service->register($staff, ['payee_type' => 'pcg_personnel', 'payee_ref' => $this->personnelPayee()->id] + $this->details(2));
+        // An older record, from before payee types: it matches only "all".
+        Lddap::whereKey($service->register($staff, $this->details(3))->id)->update(['payee_type' => null]);
+
+        Sanctum::actingAs($staff);
+
+        $this->getJson('/api/v1/lddaps?payee_type=creditor')
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.lddap_no', '26-09-00001');
+        $this->getJson('/api/v1/lddaps?payee_type=pcg_personnel')
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.lddap_no', '26-09-00002');
+        $this->getJson('/api/v1/lddaps?payee_type=all')->assertOk()->assertJsonCount(3, 'data');
+        $this->getJson('/api/v1/lddaps')->assertOk()->assertJsonCount(3, 'data');
+        $this->getJson('/api/v1/lddaps?payee_type=pcg_personnel&nature=rental')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/v1/lddaps?payee_type=bogus')->assertStatus(422)->assertJsonValidationErrors('payee_type');
+    }
+
     public function test_the_filters_combine(): void
     {
         $this->seedSeries(1, 10);
@@ -2014,24 +1977,22 @@ class LddapTest extends TestCase
         $staff = $this->staff();
         $admin = $this->admin();
 
-        // Two records numbered 2026-…, one approved and one still registered; one numbered 2025-….
-        $approved = $service->register($staff, ['lddap_no' => 'LDDAP-2026-0001', 'nature_of_payment' => 'rental'] + $this->details(1));
-        $approved = $service->forward($staff, $approved, $this->forwardDetails());
-        $approved = $service->receive($staff, $approved, $this->receiveDetails());
-        $service->approve($admin, $approved);
-        $service->register($staff, ['lddap_no' => 'LDDAP-2026-0002', 'nature_of_payment' => 'rental'] + $this->details(2));
-        $service->register($staff, ['lddap_no' => 'LDDAP-2025-0003', 'nature_of_payment' => 'rental'] + $this->details(3));
+        // Two records numbered 26-00-…, one on an ACIC (approved) and one For Signature; one 25-00-….
+        $approved = $service->register($staff, ['lddap_no' => '26-00-00001', 'nature_of_payment' => 'rental'] + $this->details(1));
+        $service->assignToAcic($admin, app(AcicService::class)->create($admin), [$approved->id]);
+        $service->register($staff, ['lddap_no' => '26-00-00002', 'nature_of_payment' => 'rental'] + $this->details(2));
+        $service->register($staff, ['lddap_no' => '25-00-00003', 'nature_of_payment' => 'rental'] + $this->details(3));
 
         Sanctum::actingAs($staff);
 
-        $this->getJson('/api/v1/lddaps?search=2026')->assertOk()->assertJsonCount(2, 'data');
-        $this->getJson('/api/v1/lddaps?search=2026&status=approved')
+        $this->getJson('/api/v1/lddaps?search=26-00')->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson('/api/v1/lddaps?search=26-00&status=approved')
             ->assertOk()
             ->assertJsonCount(1, 'data')
-            ->assertJsonPath('data.0.lddap_no', 'LDDAP-2026-0001');
-        $this->getJson('/api/v1/lddaps?search=2026&status=approved&nature=rental')->assertOk()->assertJsonCount(1, 'data');
-        $this->getJson('/api/v1/lddaps?search=2026&status=approved&nature=honoraria')->assertOk()->assertJsonCount(0, 'data');
-        $this->getJson('/api/v1/lddaps?status=registered&nature=rental')->assertOk()->assertJsonCount(2, 'data');
+            ->assertJsonPath('data.0.lddap_no', '26-00-00001');
+        $this->getJson('/api/v1/lddaps?search=26-00&status=approved&nature=rental')->assertOk()->assertJsonCount(1, 'data');
+        $this->getJson('/api/v1/lddaps?search=26-00&status=approved&nature=honoraria')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/v1/lddaps?status=for_signature&nature=rental')->assertOk()->assertJsonCount(2, 'data');
     }
 
     /** Clearing the filters — no parameters, or every one set to "all" / empty — shows everything. */
@@ -2039,7 +2000,7 @@ class LddapTest extends TestCase
     {
         Sanctum::actingAs($this->oneOfEachStatus());
 
-        $this->getJson('/api/v1/lddaps?search=LDDAP-0002&status=registered')->assertOk()->assertJsonCount(1, 'data');
+        $this->getJson('/api/v1/lddaps?search=26-09-00002&status=for_signature')->assertOk()->assertJsonCount(1, 'data');
 
         $this->getJson('/api/v1/lddaps')->assertOk()->assertJsonCount(6, 'data')->assertJsonPath('meta.total', 6);
         $this->getJson('/api/v1/lddaps?search=&status=all&nature=all')->assertOk()->assertJsonCount(6, 'data');
@@ -2053,23 +2014,23 @@ class LddapTest extends TestCase
         $staff = $this->staff();
 
         foreach (range(1, 5) as $n) {
-            $service->register($staff, ['lddap_no' => "LDDAP-2026-000{$n}"] + $this->details($n));
+            $service->register($staff, ['lddap_no' => "26-00-0000{$n}"] + $this->details($n));
         }
-        $service->register($staff, ['lddap_no' => 'LDDAP-2025-0006'] + $this->details(6));
+        $service->register($staff, ['lddap_no' => '25-00-00006'] + $this->details(6));
 
         Sanctum::actingAs($staff);
 
-        $first = $this->getJson('/api/v1/lddaps?search=2026&per_page=2')->assertOk();
+        $first = $this->getJson('/api/v1/lddaps?search=26-00&per_page=2')->assertOk();
         $first->assertJsonCount(2, 'data')
             ->assertJsonPath('meta.total', 5)
             ->assertJsonPath('meta.last_page', 3);
-        $this->assertStringContainsString('search=2026', (string) $first->json('links.next'));
+        $this->assertStringContainsString('search=26-00', (string) $first->json('links.next'));
 
-        $last = $this->getJson('/api/v1/lddaps?search=2026&per_page=2&page=3')
+        $last = $this->getJson('/api/v1/lddaps?search=26-00&per_page=2&page=3')
             ->assertOk()
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('meta.current_page', 3);
-        $this->assertStringContainsString('2026', (string) $last->json('data.0.lddap_no'));
+        $this->assertStringStartsWith('26-00', (string) $last->json('data.0.lddap_no'));
     }
 
     // -------------------------------------------------------------- ACIC linking
@@ -2078,14 +2039,14 @@ class LddapTest extends TestCase
     private function acicAndCompletedLddaps(): array
     {
         $this->seedSeries(1, 10);
-        // Three signed off and waiting for an ACIC, one returned but not yet acted on.
-        $this->approvedLddaps(3);
-        $this->returnedLddap(n: 4);
+        // Three For Signature and waiting for an ACIC, one RTS'd (not eligible until resubmitted).
+        $this->forSignatureLddaps(3);
+        app(LddapService::class)->rts($this->admin(), $this->forSignatureLddap(n: 4), $this->rtsDetails());
 
         return [app(AcicService::class)->create($this->admin()), Lddap::orderBy('id')->get()];
     }
 
-    public function test_linkable_lists_only_approved_lddaps_not_yet_on_an_acic(): void
+    public function test_linkable_lists_only_for_signature_lddaps_not_yet_on_an_acic(): void
     {
         [, $lddaps] = $this->acicAndCompletedLddaps();
         Sanctum::actingAs($this->staff());
@@ -2109,12 +2070,12 @@ class LddapTest extends TestCase
         $this->assertSame(4, Lddap::count());
         $this->assertSame(3, Lddap::whereNotNull('acic_id')->count());
 
-        $this->getJson('/api/v1/lddaps?search=LDDAP-0001')
+        $this->getJson('/api/v1/lddaps?search=26-09-00001')
             ->assertOk()
             ->assertJsonPath('data.0.acic_number', $acic->acic_number);
     }
 
-    public function test_an_lddap_that_is_not_approved_cannot_be_linked(): void
+    public function test_an_lddap_that_is_not_for_signature_cannot_be_linked(): void
     {
         [$acic, $lddaps] = $this->acicAndCompletedLddaps();
         Sanctum::actingAs($this->staff());
@@ -2159,7 +2120,7 @@ class LddapTest extends TestCase
     public function test_several_records_are_assigned_to_one_typed_acic_number(): void
     {
         $this->seedSeries(1, 10);
-        $lddaps = $this->approvedLddaps(3);
+        $lddaps = $this->forSignatureLddaps(3);
         $ids = $lddaps->pluck('id')->all();
         $next = app(AcicService::class)->nextNumber();
 
@@ -2189,8 +2150,8 @@ class LddapTest extends TestCase
     public function test_more_records_can_share_an_existing_acic_number(): void
     {
         $this->seedSeries(1, 10);
-        $first = $this->approvedLddaps(2);
-        $later = $this->approvedLddaps(2, offset: 10);
+        $first = $this->forSignatureLddaps(2);
+        $later = $this->forSignatureLddaps(2, offset: 10);
         $number = app(AcicService::class)->nextNumber();
 
         Sanctum::actingAs($this->staff());
@@ -2208,7 +2169,7 @@ class LddapTest extends TestCase
     public function test_a_typed_acic_number_must_be_open_or_next_in_the_series(): void
     {
         $this->seedSeries(1, 10);
-        $lddap = $this->approvedLddaps(1)->first();
+        $lddap = $this->forSignatureLddaps(1)->first();
         $next = app(AcicService::class)->nextNumber();
 
         Sanctum::actingAs($this->staff());
@@ -2221,17 +2182,17 @@ class LddapTest extends TestCase
     }
 
     /** Only approved records with no ACIC are offered — and the endpoint holds to that too. */
-    public function test_linkable_offers_only_approved_records_without_an_acic(): void
+    public function test_linkable_offers_only_for_signature_records_without_an_acic(): void
     {
         $this->seedSeries(1, 10);
-        $this->approvedLddaps(2);
+        $this->forSignatureLddaps(2);
         $this->useChecks(1, offset: 10);           // approved, already on an ACIC
-        $this->returnedLddap(n: 20);               // not approved
+        app(LddapService::class)->rts($this->admin(), $this->forSignatureLddap(n: 20), $this->rtsDetails()); // RTS'd — not eligible
 
         Sanctum::actingAs($this->staff());
         $offered = $this->getJson('/api/v1/lddaps/linkable')->assertOk()->json('data');
 
-        $this->assertSame(['LDDAP-0001', 'LDDAP-0002'], array_column($offered, 'lddap_no'));
+        $this->assertSame(['26-09-00001', '26-09-00002'], array_column($offered, 'lddap_no'));
         // No check numbers yet — they arrive with the assignment.
         $this->assertSame([null, null], array_column($offered, 'check_no'));
     }
@@ -2274,58 +2235,6 @@ class LddapTest extends TestCase
         $this->assertCount(1, $numbers);
     }
 
-    public function test_an_acic_carrying_only_lddaps_can_be_forwarded(): void
-    {
-        $acic = $this->loadedAcic();
-        $teller = $this->teller();
-        Sanctum::actingAs($this->admin());
-
-        $this->postJson("/api/v1/acics/{$acic->id}/forward", ['received_by' => $teller->id])
-            ->assertOk()
-            ->assertJsonPath('data.status', 'forwarded')
-            ->assertJsonPath('data.forwarded_to', $teller->name);
-
-        Sanctum::actingAs($this->staff());
-        $row = $this->getJson('/api/v1/lddaps?search=LDDAP-0001')->assertOk()->json('data.0');
-
-        $this->assertSame($teller->name, $row['forwarded_to']);
-        $this->assertNotNull($row['forwarded_at']);
-    }
-
-    public function test_forwarding_records_a_typed_in_name_when_the_recipient_is_not_a_user(): void
-    {
-        $acic = $this->loadedAcic();
-        Sanctum::actingAs($this->admin());
-
-        $this->postJson("/api/v1/acics/{$acic->id}/forward", ['received_name' => 'J. Dela Cruz'])
-            ->assertOk()
-            ->assertJsonPath('data.received_by', null)
-            ->assertJsonPath('data.forwarded_to', 'J. Dela Cruz');
-    }
-
-    public function test_an_empty_acic_cannot_be_forwarded(): void
-    {
-        $acic = app(AcicService::class)->create($this->admin());
-        Sanctum::actingAs($this->admin());
-
-        $this->postJson("/api/v1/acics/{$acic->id}/forward", ['received_name' => 'J. Dela Cruz'])
-            ->assertStatus(422);
-    }
-
-    public function test_completing_an_acic_stamps_receipt_on_its_lddaps(): void
-    {
-        $acic = $this->loadedAcic();
-        Sanctum::actingAs($this->admin());
-        $this->postJson("/api/v1/acics/{$acic->id}/forward", ['received_name' => 'J. Dela Cruz'])->assertOk();
-
-        $teller = $this->teller();
-        Sanctum::actingAs($teller);
-        $this->postJson("/api/v1/acics/{$acic->id}/complete")->assertOk();
-
-        $this->assertSame(3, Lddap::where('acic_id', $acic->id)->whereNotNull('received_at')->count());
-        $this->assertSame(3, Lddap::where('received_by', $teller->id)->count());
-    }
-
     // ------------------------------------------------------------------ audit trail
 
     public function test_the_series_and_its_use_are_audited(): void
@@ -2339,6 +2248,6 @@ class LddapTest extends TestCase
 
         $this->assertCount(2, $logs);
         $this->assertStringContainsString('check number 1', $logs->first()->description);
-        $this->assertStringContainsString('LDDAP-0001', $logs->first()->description);
+        $this->assertStringContainsString('26-09-00001', $logs->first()->description);
     }
 }

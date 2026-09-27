@@ -615,6 +615,22 @@
 .cheque-rule-words { top: calc(var(--pos-words-top) + 8.5mm); left: var(--pos-words-left); width: var(--pos-words-w); }
 .cheque-rule-sign  { top: var(--pos-rule-sign-top); left: var(--pos-rule-sign-left); width: var(--pos-rule-sign-w); }
 
+/* A draft — before the admin in charge approves it — carries a watermark, on screen and on paper,
+   so it can never pass for the real cheque. */
+.cheque-draft-mark {
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 22mm;
+    font-weight: 700;
+    letter-spacing: 0.3em;
+    color: rgb(200 40 40 / 0.18);
+    transform: rotate(-12deg);
+    pointer-events: none;
+}
+
 /* The print target: hidden on screen, the only thing on paper. */
 .cheque-print {
     display: none;

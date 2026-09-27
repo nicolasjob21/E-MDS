@@ -1,57 +1,55 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
-    Lock, BadgeCheck, CheckCircle2, Clock, Eye, ListChecks, Search, X,
-    AlertTriangle, ArrowDownWideNarrow, Send, Inbox, RefreshCw, Undo2, Ban, Slash, Printer,
+    Lock, BadgeCheck, CheckCircle2, Eye, Filter, ListChecks, Search, X,
+    AlertTriangle, ArrowDownWideNarrow, RefreshCw, Undo2, Ban, Slash, Printer, Pencil, FileText,
 } from 'lucide-react';
-import { AcicApi, ChequeApi, toApiError } from '../lib/api';
+import { ChequeApi, toApiError } from '../lib/api';
 import type { Cheque, ChequeTab, ChequeValiditySummary, Paginated, Summary } from '../lib/types';
 import { PageHeader, Spinner, Alert, StatusBadge, EmptyState, ValidityBadge } from '../components/ui';
 import NextChequePanel from '../components/NextChequePanel';
 import ChequeStepModal, { type ChequeStep } from '../components/ChequeStepModal';
 import ChequeDetailModal from '../components/ChequeDetailModal';
-import AcicUseModal from '../components/AcicUseModal';
+import ChequeAssignModal from '../components/ChequeAssignModal';
 import ChequeUseModal from '../components/ChequeUseModal';
-import ChequeViewModal from '../components/ChequeViewModal';
+import ChequeViewModal, { type ChequePrintMode } from '../components/ChequeViewModal';
+import ChequeEditModal from '../components/ChequeEditModal';
+import UnitSelect from '../components/UnitSelect';
 import { useAuth } from '../auth/AuthContext';
 import { formatDate, formatMoney } from '../lib/format';
 
-/** The validity tabs, in the order the page shows them. */
-/** The tabs the page shows. */
-const VALIDITY_TABS: { key: ChequeTab; label: string }[] = [
-    { key: 'all', label: 'All' },
-    { key: 'available', label: 'Available' },
-    { key: 'registered', label: 'Registered' },
-    { key: 'released_to_payee', label: 'Released' },
-    { key: 'completed', label: 'Completed' },
-    { key: 'expiring', label: 'Expiring Soon' },
-    { key: 'stale', label: 'Stale' },
-    { key: 'cancelled', label: 'Cancelled' },
-    { key: 'voided', label: 'Voided' },
-];
-
 /**
- * Filters that work but have no button of their own — the mid-flow statuses. The dashboard
- * links straight to them, so the page still has to honour them; it just shows the active one
- * as a chip beside the tabs rather than carrying a button for each.
+ * The Status filter: every status a cheque can hold today, in the order of the flow. The blank
+ * status (stored `registered`) is "No Status". The retired statuses — Out for Signature,
+ * Received, For ACIC — are left out; no cheque holds them any more.
  */
-const EXTRA_TABS: { key: ChequeTab; label: string }[] = [
-    { key: 'out_for_signature', label: 'Out for Signature' },
-    { key: 'for_acic', label: 'For ACIC' },
+const STATUS_OPTIONS: { key: ChequeTab; label: string }[] = [
+    { key: 'all', label: 'All' },
+    { key: 'registered', label: 'No Status' },
+    { key: 'available', label: 'Available' },
+    { key: 'for_checking', label: 'For Checking' },
+    { key: 'for_compliance', label: 'For Compliance' },
+    { key: 'for_final_print', label: 'For Final Print' },
+    { key: 'for_signature', label: 'For Signature' },
     { key: 'approved', label: 'Approved' },
+    { key: 'released_to_payee', label: 'Released to Payee' },
     { key: 'forwarded_to_teller', label: 'Forwarded to Teller' },
-    { key: 'returned_by_bank', label: 'Returned by Bank' },
-    { key: 'accepted_by_teller', label: 'Accepted by Teller' },
+    { key: 'accepted_by_teller', label: 'Accepted' },
+    { key: 'forwarded_to_land_bank', label: 'Forwarded to LBP' },
+    { key: 'forwarded_to_payee', label: 'Forwarded to Payee' },
+    { key: 'returned', label: 'Returned' },
+    { key: 'completed', label: 'Completed' },
+    { key: 'cancelled', label: 'Cancelled' },
+    { key: 'spoiled', label: 'Spoiled' },
+    { key: 'stale', label: 'Stale' },
 ];
 
+/** Expiring Soon is a view, not a status: offered in the dropdown only while it is on. */
+const EXPIRING: { key: ChequeTab; label: string } = { key: 'expiring', label: 'Expiring Soon' };
 
-function validityTabFrom(value: string | null): ChequeTab {
-    return [...VALIDITY_TABS, ...EXTRA_TABS].some((t) => t.key === value) ? (value as ChequeTab) : 'all';
-}
-
-/** The label for a filter that has no tab of its own, when one is active. */
-function extraTabLabel(tab: ChequeTab): string | null {
-    return EXTRA_TABS.find((t) => t.key === tab)?.label ?? null;
+/** `?tab=` from a dashboard link, when it is one the page knows. */
+function statusFrom(value: string | null): ChequeTab {
+    return [...STATUS_OPTIONS, EXPIRING].some((t) => t.key === value) ? (value as ChequeTab) : 'all';
 }
 
 /** " (2 pending signature, 1 with payee, 1 with teller)" — only the parts that apply. */
@@ -67,7 +65,7 @@ function expiringBreakdown(v: ChequeValiditySummary): string {
 
 export default function ChequesPage() {
     const { user } = useAuth();
-    const isAdmin = user?.role === 'admin';
+    const isAdmin = user?.role === 'admin' || user?.role === 'super_admin';
     const isStaff = user?.role === 'staff';
     // Admin and staff may both put an approved cheque on an ACIC, and both may use the
     // next-in-line number straight from its row. A teller does neither.
@@ -80,24 +78,38 @@ export default function ChequesPage() {
     const [query, setQuery] = useState('');
     const [data, setData] = useState<Paginated<Cheque> | null>(null);
     const [selected, setSelected] = useState<{ cheque: Cheque; mode: 'view' | 'action' } | null>(null);
-    const [assigning, setAssigning] = useState<Cheque | null>(null);
+    // Assign Cheque to ACIC: from the header (nothing ticked) or a row (that cheque ticked).
+    const [assigning, setAssigning] = useState<{ preselect: Cheque | null } | null>(null);
     // Admin-only row action on a freshly added (still available) cheque.
     const [usingCheque, setUsingCheque] = useState<Cheque | null>(null);
     // The cheque face, for an approved cheque only.
-    const [viewingCheque, setViewingCheque] = useState<Cheque | null>(null);
+    // The print view: reprint (view), Print Draft (draft) or Final Print (final).
+    const [printing, setPrinting] = useState<{ cheque: Cheque; mode: ChequePrintMode } | null>(null);
+    const [editing, setEditing] = useState<Cheque | null>(null);
     const [summary, setSummary] = useState<Summary | null>(null);
     // The validity axis: which tab, how it is sorted, and the banner's counts.
-    const [vTab, setVTab] = useState<ChequeTab>(() => validityTabFrom(params.get('tab')));
+    const [vTab, setVTab] = useState<ChequeTab>(() => statusFrom(params.get('tab')));
+    const [unit, setUnit] = useState('');
+    const [appliedFrom, setAppliedFrom] = useState('');
+    const [appliedTo, setAppliedTo] = useState('');
+    // What Status, Unit and the dates show — applied only by the Filter button.
+    const [draft, setDraft] = useState<{ tab: ChequeTab; unit: string; dateFrom: string; dateTo: string }>(() => ({
+        tab: statusFrom(params.get('tab')),
+        unit: '',
+        dateFrom: '',
+        dateTo: '',
+    }));
     const [byExpiry, setByExpiry] = useState(false);
     const [validity, setValidity] = useState<ChequeValiditySummary | null>(null);
     const [moving, setMoving] = useState<{ cheque: Cheque; step: ChequeStep } | null>(null);
-    // The number the ACIC opened by the Assign dialog will take.
-    const [acicNext, setAcicNext] = useState<number | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [notice, setNotice] = useState('');
 
     const nextNumber = summary?.next?.cheque_number ?? null;
+    // A start after the end is flagged, and Filter leaves the dates out rather than showing nothing.
+    const datesBackwards = draft.dateFrom !== '' && draft.dateTo !== '' && draft.dateFrom > draft.dateTo;
+    const isFiltered = query !== '' || vTab !== 'all' || unit !== '' || appliedFrom !== '' || appliedTo !== '';
 
     useEffect(() => {
         const timer = setTimeout(() => setQuery(search.trim()), 300);
@@ -105,37 +117,78 @@ export default function ChequesPage() {
     }, [search]);
 
     useEffect(() => {
-        setVTab(validityTabFrom(params.get('tab')));
+        const tab = statusFrom(params.get('tab'));
+        setVTab(tab);
+        setDraft((d) => ({ ...d, tab }));
         setPage(1);
     }, [params]);
 
-    // Any new query starts from the first page, or a match on page 3 would be invisible.
+    // Any new filter starts from the first page, or a match on page 3 would be invisible.
     useEffect(() => {
         setPage(1);
-    }, [query]);
+    }, [query, unit, appliedFrom, appliedTo]);
+
+    /**
+     * Filter / Enter: apply Status, Unit and the dates as chosen, take the search as typed now
+     * without waiting out the pause, and refetch.
+     */
+    function applyFilters(e: FormEvent<HTMLFormElement>) {
+        e.preventDefault();
+        const from = datesBackwards ? '' : draft.dateFrom;
+        const to = datesBackwards ? '' : draft.dateTo;
+        const term = search.trim();
+        const unchanged =
+            draft.tab === vTab && draft.unit === unit && from === appliedFrom && to === appliedTo && term === query && page === 1;
+        setVTab(draft.tab);
+        setUnit(draft.unit);
+        setAppliedFrom(from);
+        setAppliedTo(to);
+        setQuery(term);
+        setPage(1);
+        // Nothing new to apply: refetch anyway, so Filter always shows the latest.
+        if (unchanged) {
+            void loadList();
+        }
+    }
+
+    function clearFilters() {
+        setSearch('');
+        setQuery('');
+        setVTab('all');
+        setUnit('');
+        setAppliedFrom('');
+        setAppliedTo('');
+        setDraft({ tab: 'all', unit: '', dateFrom: '', dateTo: '' });
+        setPage(1);
+    }
 
     const loadList = useCallback(async () => {
         setLoading(true);
         try {
-            setData(await ChequeApi.list('all', page, 50, query, vTab, byExpiry ? 'expiry' : 'number'));
+            setData(
+                await ChequeApi.list({
+                    page,
+                    search: query,
+                    tab: vTab,
+                    sort: byExpiry ? 'expiry' : 'number',
+                    unit,
+                    dateFrom: appliedFrom,
+                    dateTo: appliedTo,
+                }),
+            );
             setError('');
         } catch (err) {
             setError(toApiError(err).message);
         } finally {
             setLoading(false);
         }
-    }, [page, query, vTab, byExpiry]);
+    }, [page, query, vTab, byExpiry, unit, appliedFrom, appliedTo]);
 
     const loadSummary = useCallback(async () => {
         try {
             setSummary(await ChequeApi.summary());
         } catch {
             /* non-fatal */
-        }
-        try {
-            setAcicNext(await AcicApi.next());
-        } catch {
-            /* non-fatal — the Assign dialog just won't preview the number */
         }
         try {
             setValidity(await ChequeApi.validitySummary());
@@ -169,7 +222,18 @@ export default function ChequesPage() {
 
     return (
         <div>
-            <PageHeader title="Cheques" subtitle="The full running sequence of cheque numbers." />
+            <PageHeader
+                title="Cheques"
+                subtitle="The full running sequence of cheque numbers."
+                action={
+                    canUse ? (
+                        <button className="btn btn-outline" onClick={() => setAssigning({ preselect: null })}>
+                            <ListChecks className="h-4 w-4" />
+                            Assign Cheque to ACIC
+                        </button>
+                    ) : undefined
+                }
+            />
 
             <div className="mb-6">
                 <NextChequePanel next={summary?.next ?? null} onUsed={refreshAll} compact />
@@ -182,6 +246,7 @@ export default function ChequesPage() {
                     className="mb-4 flex w-full items-start gap-3 rounded-xs border border-amber-400/50 bg-amber-400/10 p-4 text-left transition-colors hover:bg-amber-400/15"
                     onClick={() => {
                         setVTab('expiring');
+                        setDraft((d) => ({ ...d, tab: 'expiring' }));
                         setPage(1);
                     }}
                 >
@@ -198,45 +263,115 @@ export default function ChequesPage() {
                 </button>
             )}
 
-            {/* The flow's statuses — the page's one filter. */}
-            <div className="mb-4 flex flex-wrap items-center gap-2 border-b border-line pb-2">
-                <div className="flex flex-wrap gap-1">
-                    {VALIDITY_TABS.map(({ key, label }) => (
-                        <button
-                            key={key}
-                            onClick={() => {
-                                setVTab(key);
-                                setPage(1);
-                            }}
-                            className={`rounded-xs border px-3 py-1.5 font-display text-xs font-semibold uppercase tracking-wider transition-colors ${
-                                vTab === key
-                                    ? 'border-brand-400 bg-brand-500/15 text-brandink'
-                                    : 'border-line text-subtle hover:text-muted'
-                            }`}
-                        >
-                            {label}
-                            {key === 'expiring' && validity && validity.expiring_soon.total > 0 && (
-                                <span className="ml-1.5 text-amber-400">{validity.expiring_soon.total}</span>
-                            )}
-                            {key === 'stale' && validity && validity.stale > 0 && (
-                                <span className="ml-1.5 text-danger-fg">{validity.stale}</span>
-                            )}
-                        </button>
-                    ))}
+            {/* Filters — all applied on the server, together. Search waits for a pause in typing;
+                the rest apply as soon as they change. */}
+            <form
+                className="card mb-3 grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 lg:grid-cols-[minmax(10rem,1fr)_10rem_12rem_9.5rem_9.5rem] lg:items-end"
+                role="search"
+                aria-label="Filter cheques"
+                onSubmit={applyFilters}
+            >
+                <div className="sm:col-span-2 lg:col-span-1">
+                    <label className="label" htmlFor="cheque-search">
+                        Search
+                    </label>
+                    <div className="relative">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-subtle" />
+                        <input
+                            id="cheque-search"
+                            type="search"
+                            className="field !py-1.5 !pl-10"
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                            placeholder="Cheque no., payee, or account no."
+                            maxLength={100}
+                        />
+                    </div>
                 </div>
-                {extraTabLabel(vTab) && (
-                    <button
-                        type="button"
-                        onClick={() => {
-                            setVTab('all');
-                            setPage(1);
+                <div>
+                    <label className="label" htmlFor="cheque-filter-status">
+                        Status
+                    </label>
+                    <select
+                        id="cheque-filter-status"
+                        className="field !py-1.5"
+                        value={draft.tab}
+                        onChange={(e) => {
+                            const tab = statusFrom(e.target.value);
+                            setDraft((d) => ({ ...d, tab }));
                         }}
-                        className="inline-flex items-center gap-1.5 rounded-xs border border-brand-400 bg-brand-500/15 px-3 py-1.5 font-display text-xs font-semibold uppercase tracking-wider text-brandink"
-                        title="Clear this filter"
                     >
-                        {extraTabLabel(vTab)}
-                        <X className="h-3 w-3" />
+                        {STATUS_OPTIONS.map(({ key, label }) => (
+                            <option key={key} value={key}>
+                                {label}
+                            </option>
+                        ))}
+                        {draft.tab === EXPIRING.key && <option value={EXPIRING.key}>{EXPIRING.label}</option>}
+                    </select>
+                </div>
+                <div>
+                    <label className="label" htmlFor="cheque-filter-unit">
+                        Unit
+                    </label>
+                    <UnitSelect id="cheque-filter-unit" className="field !py-1.5" value={draft.unit} onChange={(u) => setDraft((d) => ({ ...d, unit: u }))} placeholder="All" />
+                </div>
+                <div>
+                    <label className="label" htmlFor="cheque-filter-from">
+                        Date Start
+                    </label>
+                    <input
+                        id="cheque-filter-from"
+                        type="date"
+                        className="field !py-1.5"
+                        value={draft.dateFrom}
+                        onChange={(e) => {
+                            const value = e.target.value;
+                            setDraft((d) => ({ ...d, dateFrom: value }));
+                        }}
+                        aria-invalid={datesBackwards}
+                        aria-describedby={datesBackwards ? 'cheque-filter-dates-error' : undefined}
+                    />
+                </div>
+                <div>
+                    <label className="label" htmlFor="cheque-filter-to">
+                        Date End
+                    </label>
+                    <input
+                        id="cheque-filter-to"
+                        type="date"
+                        className="field !py-1.5"
+                        value={draft.dateTo}
+                        onChange={(e) => {
+                            const value = e.target.value;
+                            setDraft((d) => ({ ...d, dateTo: value }));
+                        }}
+                        aria-invalid={datesBackwards}
+                        aria-describedby={datesBackwards ? 'cheque-filter-dates-error' : undefined}
+                    />
+                </div>
+                {datesBackwards && (
+                    <p id="cheque-filter-dates-error" role="alert" className="text-xs text-danger-fg sm:col-span-2 lg:col-span-5">
+                        Date Start is after Date End, so Filter will leave the dates out. Change one of them.
+                    </p>
+                )}
+                <div className="flex flex-col gap-2 sm:col-span-2 sm:flex-row sm:justify-end lg:col-span-5">
+                    <button type="submit" className="btn btn-primary !py-1.5">
+                        <Filter className="h-4 w-4" />
+                        Filter
                     </button>
+                    <button type="button" className="btn btn-ghost !py-1.5" onClick={clearFilters}>
+                        <X className="h-4 w-4" />
+                        Clear
+                    </button>
+                </div>
+            </form>
+
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+                {data && (
+                    <p className="text-xs uppercase tracking-wider text-subtle" aria-live="polite">
+                        Showing {data.meta.total.toLocaleString()} {data.meta.total === 1 ? 'cheque' : 'cheques'}
+                        {isFiltered ? ' · filtered' : ''}
+                    </p>
                 )}
                 <button
                     type="button"
@@ -252,39 +387,6 @@ export default function ChequesPage() {
                     <ArrowDownWideNarrow className="h-3.5 w-3.5" />
                     Nearest expiry first
                 </button>
-            </div>
-
-            {/* Search */}
-            <div className="mb-4">
-                <label htmlFor="cheque-search" className="sr-only">
-                    Search by cheque number or ACIC no.
-                </label>
-                <div className="relative">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-subtle" />
-                    <input
-                        id="cheque-search"
-                        type="search"
-                        className="field !pl-10 !pr-10"
-                        value={search}
-                        onChange={(e) => setSearch(e.target.value)}
-                        placeholder="Search by cheque number or ACIC no.…"
-                    />
-                    {search && (
-                        <button
-                            type="button"
-                            onClick={() => setSearch('')}
-                            aria-label="Clear search"
-                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-subtle hover:text-fg"
-                        >
-                            <X className="h-4 w-4" />
-                        </button>
-                    )}
-                </div>
-                {query && data && (
-                    <p className="mt-2 text-xs text-subtle" aria-live="polite">
-                        {data.meta.total.toLocaleString()} match{data.meta.total === 1 ? '' : 'es'} for “{query}”
-                    </p>
-                )}
             </div>
 
             {notice && (
@@ -303,9 +405,7 @@ export default function ChequesPage() {
                 <Spinner />
             ) : data && data.data.length === 0 ? (
                 <EmptyState>
-                    {query
-                        ? `No cheque matches “${query}” in this view.`
-                        : 'No cheques to show in this view.'}
+                    {isFiltered ? 'No cheque matches these filters.' : 'No cheques to show.'}
                 </EmptyState>
             ) : (
                 data && (
@@ -358,9 +458,14 @@ export default function ChequesPage() {
                                                 <td className="px-4 py-3">
                                                     <span className="inline-flex flex-col items-start gap-1">
                                                         <StatusBadge status={cheque.effective_status ?? cheque.status} />
-                                                        {cheque.has_pending_update && (
-                                                            <span className="rounded-xs border border-accent-400/50 bg-accent-400/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-accent-400">
-                                                                On hold
+                                                        {cheque.replaced_by && (
+                                                            <span className="text-[11px] text-muted">
+                                                                Replaced by Cheque #{cheque.replaced_by.cheque_number}
+                                                            </span>
+                                                        )}
+                                                        {cheque.replaces && (
+                                                            <span className="text-[11px] text-muted">
+                                                                Replaces Cheque #{cheque.replaces.cheque_number}
                                                             </span>
                                                         )}
                                                     </span>
@@ -400,14 +505,7 @@ export default function ChequesPage() {
                                                             {formatDate(cheque.received_at)}
                                                         </span>
                                                     ) : cheque.status === 'registered' ? (
-                                                        cheque.has_pending_update ? (
-                                                            <span className="inline-flex items-center gap-1 rounded-xs border border-accent-400/50 bg-accent-400/10 px-2 py-0.5 text-xs font-medium text-accent-400">
-                                                                <Clock className="h-3 w-3" />
-                                                                On hold
-                                                            </span>
-                                                        ) : (
-                                                            <span className="text-xs text-subtle">Pending</span>
-                                                        )
+                                                        <span className="text-xs text-subtle">Pending</span>
                                                     ) : (
                                                         <span className="text-muted">—</span>
                                                     )}
@@ -415,20 +513,43 @@ export default function ChequesPage() {
                                                 <td className="px-4 py-3 text-right whitespace-nowrap">
                                                     <div className="flex flex-wrap items-center justify-end gap-2">
                                                         {/* The one step this cheque is ready for, then the ways out. */}
-                                                        {cheque.can_route && (
-                                                            <button className="btn btn-primary !px-3 !py-1.5" onClick={() => setMoving({ cheque, step: 'route' })}>
-                                                                <Send className="h-3.5 w-3.5" />
-                                                                Route for Signature
+                                                        {cheque.can_edit && (
+                                                            <button className="btn btn-ghost !px-3 !py-1.5" onClick={() => setEditing(cheque)}>
+                                                                <Pencil className="h-3.5 w-3.5" />
+                                                                Edit
                                                             </button>
                                                         )}
-                                                        {cheque.can_receive && (
-                                                            <button className="btn btn-primary !px-3 !py-1.5" onClick={() => setMoving({ cheque, step: 'receive' })}>
-                                                                <Inbox className="h-3.5 w-3.5" />
-                                                                Mark as Received
+                                                        {cheque.can_print_draft && (
+                                                            <button className="btn btn-primary !px-3 !py-1.5" onClick={() => setPrinting({ cheque, mode: 'draft' })}>
+                                                                <FileText className="h-3.5 w-3.5" />
+                                                                Print Draft
+                                                            </button>
+                                                        )}
+                                                        {/* Both open the draft itself, so it is checked
+                                                            against the face as printed. */}
+                                                        {cheque.can_check_draft && (
+                                                            <>
+                                                                <button className="btn btn-primary !px-3 !py-1.5" onClick={() => setPrinting({ cheque, mode: 'check' })}>
+                                                                    <BadgeCheck className="h-3.5 w-3.5" />
+                                                                    Approve
+                                                                </button>
+                                                                <button className="btn btn-ghost !px-3 !py-1.5" onClick={() => setPrinting({ cheque, mode: 'check' })}>
+                                                                    <Undo2 className="h-3.5 w-3.5" />
+                                                                    Return
+                                                                </button>
+                                                            </>
+                                                        )}
+                                                        {cheque.effective_status === 'for_checking' && !cheque.can_check_draft && (
+                                                            <span className="text-xs text-subtle">With the admin in charge</span>
+                                                        )}
+                                                        {cheque.can_final_print && (
+                                                            <button className="btn btn-primary !px-3 !py-1.5" onClick={() => setPrinting({ cheque, mode: 'final' })}>
+                                                                <Printer className="h-3.5 w-3.5" />
+                                                                Final Print
                                                             </button>
                                                         )}
                                                         {cheque.can_assign && (
-                                                            <button className="btn btn-outline !px-3 !py-1.5" onClick={() => setAssigning(cheque)}>
+                                                            <button className="btn btn-outline !px-3 !py-1.5" onClick={() => setAssigning({ preselect: cheque })}>
                                                                 <ListChecks className="h-3.5 w-3.5" />
                                                                 Assign to ACIC
                                                             </button>
@@ -440,22 +561,16 @@ export default function ChequesPage() {
                                                                 Release from ACIC #{cheque.acic_number}
                                                             </span>
                                                         )}
-                                                        {cheque.can_rts && (
-                                                            <button className="btn btn-ghost !px-3 !py-1.5" onClick={() => setMoving({ cheque, step: 'rts' })}>
-                                                                <Undo2 className="h-3.5 w-3.5" />
-                                                                RTS
-                                                            </button>
-                                                        )}
                                                         {cheque.can_cancel && (
                                                             <button className="btn btn-ghost !px-3 !py-1.5 !text-danger" onClick={() => setMoving({ cheque, step: 'cancel' })}>
                                                                 <Ban className="h-3.5 w-3.5" />
                                                                 Cancel
                                                             </button>
                                                         )}
-                                                        {cheque.can_void && (
-                                                            <button className="btn btn-ghost !px-3 !py-1.5 !text-danger" onClick={() => setMoving({ cheque, step: 'void' })}>
+                                                        {cheque.can_spoil && (
+                                                            <button className="btn btn-ghost !px-3 !py-1.5 !text-danger" onClick={() => setMoving({ cheque, step: 'spoil' })}>
                                                                 <Slash className="h-3.5 w-3.5" />
-                                                                Void
+                                                                Spoiled
                                                             </button>
                                                         )}
                                                         {cheque.can_replace && (
@@ -468,12 +583,12 @@ export default function ChequesPage() {
                                                             isNext && canUse ? (
                                                                 <button className="btn btn-primary !px-3 !py-1.5" onClick={() => setUsingCheque(cheque)}>
                                                                     <CheckCircle2 className="h-3.5 w-3.5" />
-                                                                    Register
+                                                                    Use
                                                                 </button>
                                                             ) : (
                                                                 <span className="inline-flex items-center gap-1 text-xs text-subtle">
                                                                     <Lock className="h-3 w-3" />
-                                                                    {isNext ? 'Register from the panel above' : 'Locked'}
+                                                                    {isNext ? 'Use from the panel above' : 'Locked'}
                                                                 </span>
                                                             )
                                                         )}
@@ -491,7 +606,7 @@ export default function ChequesPage() {
                                                         {cheque.can_print && (
                                                             <button
                                                                 className="btn btn-ghost !px-3 !py-1.5"
-                                                                onClick={() => setViewingCheque(cheque)}
+                                                                onClick={() => setPrinting({ cheque, mode: 'view' })}
                                                                 title={`Print cheque #${cheque.cheque_number}`}
                                                             >
                                                                 <Printer className="h-3.5 w-3.5" />
@@ -556,8 +671,29 @@ export default function ChequesPage() {
                 />
             )}
 
-            {viewingCheque && (
-                <ChequeViewModal cheque={viewingCheque} onClose={() => setViewingCheque(null)} />
+            {printing && (
+                <ChequeViewModal
+                    cheque={printing.cheque}
+                    mode={printing.mode}
+                    onClose={() => setPrinting(null)}
+                    onDone={(cheque, what) => {
+                        setPrinting(null);
+                        setNotice(`Cheque #${cheque.cheque_number} ${what}.`);
+                        refreshAll();
+                    }}
+                />
+            )}
+
+            {editing && (
+                <ChequeEditModal
+                    cheque={editing}
+                    onClose={() => setEditing(null)}
+                    onSaved={(cheque) => {
+                        setEditing(null);
+                        setNotice(`Cheque #${cheque.cheque_number} updated.`);
+                        refreshAll();
+                    }}
+                />
             )}
 
             {usingCheque && (
@@ -572,15 +708,13 @@ export default function ChequesPage() {
             )}
 
             {assigning && (
-                /* The same dialog the ACIC page's "Assign cheque to ACIC" uses: one cheque, onto
-                   the next number in the sequence, which is opened on submit. */
-                <AcicUseModal
-                    nextNumber={acicNext}
-                    single
-                    preselect={assigning.id}
+                /* Many cheques may share one ACIC number: tick them, type the number. */
+                <ChequeAssignModal
+                    preselect={assigning.preselect}
                     onClose={() => setAssigning(null)}
-                    onAssigned={() => {
+                    onAssigned={(acic) => {
                         setAssigning(null);
+                        setNotice(`Cheques assigned to ACIC #${acic.acic_number}.`);
                         refreshAll();
                     }}
                 />

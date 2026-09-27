@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ListChecks, Search, Gavel, FilePlus2, Send, Inbox, Filter, X, Eye } from 'lucide-react';
+import { ListChecks, Search, FilePlus2, Filter, X, Eye, Undo2, Ban, RotateCcw } from 'lucide-react';
 import { LddapApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
-import type { Lddap, LddapOptions, LddapStatus, Paginated } from '../lib/types';
+import type { Lddap, LddapOptions, LddapStatus, Paginated, PayeeTypeFilter } from '../lib/types';
 import { PageHeader, Spinner, Alert, EmptyState, LddapStatusBadge } from '../components/ui';
 import LddapRegisterModal from '../components/LddapRegisterModal';
 import LddapAssignModal from '../components/LddapAssignModal';
@@ -15,42 +15,59 @@ type StatusFilter = 'all' | LddapStatus;
 
 const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
     { value: 'all', label: 'All' },
-    { value: 'registered', label: 'Registered' },
-    { value: 'for_out', label: 'For Out' },
-    { value: 'returned_for_acic', label: 'Returned for ACIC' },
-    { value: 'approved', label: 'Approved' },
+    { value: 'for_signature', label: 'For Signature' },
     { value: 'rts', label: 'RTS' },
+    { value: 'approved', label: 'Approved' },
+    { value: 'forwarded_to_teller', label: 'Forwarded to Teller' },
+    { value: 'accepted_by_teller', label: 'Accepted' },
+    { value: 'forwarded_to_land_bank', label: 'Forwarded to LBP' },
+    { value: 'forwarded_to_payee', label: 'Forwarded to Payee' },
+    { value: 'returned', label: 'Returned' },
+    { value: 'completed', label: 'Completed' },
     { value: 'canceled', label: 'Canceled' },
 ];
 
 const PER_PAGE = 50;
 
-/** The three filter fields, as typed into the bar. */
+/** The filter fields, as typed into the bar. */
 interface Filters {
     search: string;
     status: StatusFilter;
     nature: string;
+    payeeType: PayeeTypeFilter;
 }
 
-const NO_FILTERS: Filters = { search: '', status: 'all', nature: 'all' };
+const NO_FILTERS: Filters = { search: '', status: 'all', nature: 'all', payeeType: 'all' };
+
+const PAYEE_TYPE_OPTIONS: { value: PayeeTypeFilter; label: string }[] = [
+    { value: 'all', label: 'All' },
+    { value: 'creditor', label: 'Creditor' },
+    { value: 'pcg_personnel', label: 'PCG Personnel' },
+];
+
+function isPayeeTypeFilter(value: string | null): value is PayeeTypeFilter {
+    return PAYEE_TYPE_OPTIONS.some((o) => o.value === value);
+}
 
 function isStatusFilter(value: string | null): value is StatusFilter {
     return STATUS_OPTIONS.some((o) => o.value === value);
 }
 
 /**
- * The applied filters live in the URL (`?search=…&status=…&nature=…&page=…`), so a filtered
- * view survives a refresh and can be bookmarked; the bar's inputs are a draft of them until
- * Filter is pressed.
+ * The applied filters live in the URL (`?search=…&status=…&nature=…&payee_type=…&page=…`), so a filtered
+ * view survives a refresh and can be bookmarked. The search applies as the person types;
+ * Status and Nature are a draft until Filter is pressed.
  */
 function readFilters(params: URLSearchParams): Filters & { page: number } {
     const status = params.get('status');
+    const payeeType = params.get('payee_type');
     const page = Number(params.get('page') ?? '1');
 
     return {
         search: params.get('search') ?? '',
         status: isStatusFilter(status) ? status : 'all',
         nature: params.get('nature') || 'all',
+        payeeType: isPayeeTypeFilter(payeeType) ? payeeType : 'all',
         page: Number.isInteger(page) && page > 0 ? page : 1,
     };
 }
@@ -62,6 +79,7 @@ function writeFilters(filters: Filters, page: number): URLSearchParams {
     if (search) params.set('search', search);
     if (filters.status !== 'all') params.set('status', filters.status);
     if (filters.nature !== 'all') params.set('nature', filters.nature);
+    if (filters.payeeType !== 'all') params.set('payee_type', filters.payeeType);
     if (page > 1) params.set('page', String(page));
 
     return params;
@@ -69,16 +87,16 @@ function writeFilters(filters: Filters, page: number): URLSearchParams {
 
 export default function LddapsPage() {
     const { user } = useAuth();
-    const isAdmin = user?.role === 'admin';
+    const isAdmin = user?.role === 'admin' || user?.role === 'super_admin';
     const canManage = isAdmin || user?.role === 'staff';
 
     const [params, setParams] = useSearchParams();
     const applied = readFilters(params);
-    const { search, status, nature, page } = applied;
-    const isFiltered = search !== '' || status !== 'all' || nature !== 'all';
+    const { search, status, nature, payeeType, page } = applied;
+    const isFiltered = search !== '' || status !== 'all' || nature !== 'all' || payeeType !== 'all';
 
     // What the bar shows — the applied filters until the person edits them.
-    const [draft, setDraft] = useState<Filters>({ search, status, nature });
+    const [draft, setDraft] = useState<Filters>({ search, status, nature, payeeType });
     const [options, setOptions] = useState<LddapOptions | null>(null);
 
     const [data, setData] = useState<Paginated<Lddap> | null>(null);
@@ -101,10 +119,27 @@ export default function LddapsPage() {
         mode: 'view' | 'action';
     } | null>(null);
 
-    // Back/forward (or a pasted link) changes the URL under us: the bar follows it.
+    // Back/forward (or a pasted link) changes the URL under us: the bar follows it. The search
+    // box is synced on its own, so a search applied while typing never resets a Status or
+    // Nature the person has picked but not yet applied.
     useEffect(() => {
-        setDraft({ search, status, nature });
-    }, [search, status, nature]);
+        setDraft((d) => (d.search.trim() === search ? d : { ...d, search }));
+    }, [search]);
+
+    useEffect(() => {
+        setDraft((d) => ({ ...d, status, nature, payeeType }));
+    }, [status, nature, payeeType]);
+
+    // Search as you type: once typing pauses, the search is applied from page 1. Status and
+    // Nature of Payment still wait for Filter.
+    const typed = draft.search.trim();
+    useEffect(() => {
+        if (typed === search) return;
+        const timer = setTimeout(() => {
+            setParams(writeFilters({ search: typed, status, nature, payeeType }, 1), { replace: true });
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [typed, search, status, nature, payeeType, setParams]);
 
     // The Nature of Payment select offers the same list as the register form.
     useEffect(() => {
@@ -121,6 +156,7 @@ export default function LddapsPage() {
                     search,
                     status,
                     nature,
+                    payeeType,
                     page,
                     perPage: PER_PAGE,
                 }),
@@ -131,7 +167,7 @@ export default function LddapsPage() {
         } finally {
             setLoading(false);
         }
-    }, [search, status, nature, page]);
+    }, [search, status, nature, payeeType, page]);
 
     useEffect(() => {
         void load();
@@ -171,7 +207,7 @@ export default function LddapsPage() {
         <div>
             <PageHeader
                 title="LDDAP"
-                subtitle="LDDAP-ADA records — registered, routed, reviewed, then put on an ACIC, which is when each takes the next check number."
+                subtitle="LDDAP-ADA records — added For Signature, then put on an ACIC, which is when each takes the next check number."
                 action={
                     canManage ? (
                         <div className="flex flex-wrap gap-2">
@@ -190,12 +226,12 @@ export default function LddapsPage() {
 
             {/* Filter bar — applied on Filter / Enter, carried in the URL. */}
             <form
-                className="card mb-4 grid grid-cols-1 gap-3 p-4 md:grid-cols-[minmax(0,1fr)_minmax(0,14rem)_minmax(0,16rem)_auto] md:items-end"
+                className="card mb-4 grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 lg:grid-cols-[minmax(10rem,1fr)_12rem_14rem_11rem] lg:items-end"
                 onSubmit={applyFilters}
                 role="search"
                 aria-label="Filter LDDAP records"
             >
-                <div>
+                <div className="sm:col-span-2 lg:col-span-1">
                     <label className="label" htmlFor="lddap-filter-search">
                         Search
                     </label>
@@ -262,7 +298,27 @@ export default function LddapsPage() {
                         )}
                     </select>
                 </div>
-                <div className="flex flex-col gap-2 sm:flex-row">
+                <div>
+                    <label className="label" htmlFor="lddap-filter-payee-type">
+                        Payee Type
+                    </label>
+                    <select
+                        id="lddap-filter-payee-type"
+                        className="field !py-1.5"
+                        value={draft.payeeType}
+                        onChange={(e) => {
+                            const value = e.target.value;
+                            setDraft((d) => ({ ...d, payeeType: isPayeeTypeFilter(value) ? value : 'all' }));
+                        }}
+                    >
+                        {PAYEE_TYPE_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>
+                                {o.label}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+                <div className="flex flex-col gap-2 sm:col-span-2 sm:flex-row sm:justify-end lg:col-span-4">
                     <button type="submit" className="btn btn-primary !py-1.5">
                         <Filter className="h-4 w-4" />
                         Filter
@@ -390,7 +446,7 @@ export default function LddapsPage() {
                                             <td className="px-4 py-3 text-right font-mono text-muted">
                                                 {formatMoney(l.amount)}
                                             </td>
-                                            {/* NCA/ORB/DV, unit and UACS code live in the detail dialog. */}
+                                            {/* NCA/OBR/DV, unit and UACS code live in the detail dialog. */}
                                             <td className="px-4 py-3 text-xs text-muted">
                                                 {l.nature_of_payment_label ?? '—'}
                                             </td>
@@ -438,83 +494,56 @@ export default function LddapsPage() {
                                                         <span className="text-xs text-subtle">
                                                             On hold — resolve the update request first
                                                         </span>
-                                                    ) : l.status === 'registered' || l.status === 'rts' ? (
-                                                        /* Registered, or sent back to be corrected: Forward. */
+                                                    ) : l.status === 'for_signature' ? (
+                                                        /* For Signature: on to an ACIC — or, for an admin, RTS / Cancel. */
+                                                        <>
+                                                            {canManage && l.is_acic_eligible && (
+                                                                <button
+                                                                    className="btn btn-primary !px-3 !py-1.5"
+                                                                    onClick={() => setAssigning({ preselect: l })}
+                                                                >
+                                                                    <ListChecks className="h-3.5 w-3.5" />
+                                                                    Assign to ACIC
+                                                                </button>
+                                                            )}
+                                                            {isAdmin && (
+                                                                <>
+                                                                    <button
+                                                                        className="btn btn-ghost !px-3 !py-1.5"
+                                                                        onClick={() => setStepping({ lddap: l, step: 'rts' })}
+                                                                    >
+                                                                        <Undo2 className="h-3.5 w-3.5" />
+                                                                        RTS
+                                                                    </button>
+                                                                    <button
+                                                                        className="btn btn-ghost !px-3 !py-1.5 !text-danger"
+                                                                        onClick={() => setStepping({ lddap: l, step: 'cancel' })}
+                                                                    >
+                                                                        <Ban className="h-3.5 w-3.5" />
+                                                                        Cancel
+                                                                    </button>
+                                                                </>
+                                                            )}
+                                                            {!canManage && !isAdmin && (
+                                                                <span className="text-xs text-subtle">Awaiting an ACIC</span>
+                                                            )}
+                                                        </>
+                                                    ) : l.status === 'rts' ? (
+                                                        /* Sent back to be corrected: once it is, Resubmit. */
                                                         canManage ? (
                                                             <button
                                                                 className="btn btn-primary !px-3 !py-1.5"
-                                                                onClick={() =>
-                                                                    setStepping({
-                                                                        lddap: l,
-                                                                        step: 'forward',
-                                                                    })
-                                                                }
+                                                                onClick={() => setStepping({ lddap: l, step: 'resubmit' })}
                                                             >
-                                                                <Send className="h-3.5 w-3.5" />
-                                                                Forward
+                                                                <RotateCcw className="h-3.5 w-3.5" />
+                                                                Resubmit
                                                             </button>
                                                         ) : (
-                                                            <span className="text-xs text-subtle">
-                                                                Awaiting forwarding
-                                                            </span>
+                                                            <span className="text-xs text-subtle">Returned to sender</span>
                                                         )
-                                                    ) : l.status === 'for_out' ? (
-                                                        canManage ? (
-                                                            <button
-                                                                className="btn btn-primary !px-3 !py-1.5"
-                                                                onClick={() =>
-                                                                    setStepping({
-                                                                        lddap: l,
-                                                                        step: 'receive',
-                                                                    })
-                                                                }
-                                                            >
-                                                                <Inbox className="h-3.5 w-3.5" />
-                                                                Receive
-                                                            </button>
-                                                        ) : (
-                                                            <span className="text-xs text-subtle">
-                                                                Out
-                                                                {l.forward_to ? ` — ${l.forward_to}` : ''}
-                                                            </span>
-                                                        )
-                                                    ) : l.status === 'returned_for_acic' ? (
-                                                        isAdmin ? (
-                                                            <button
-                                                                className="btn btn-outline !px-3 !py-1.5"
-                                                                onClick={() =>
-                                                                    setStepping({
-                                                                        lddap: l,
-                                                                        step: 'action',
-                                                                    })
-                                                                }
-                                                            >
-                                                                <Gavel className="h-3.5 w-3.5" />
-                                                                Action
-                                                            </button>
-                                                        ) : (
-                                                            <span className="text-xs text-subtle">Awaiting action</span>
-                                                        )
-                                                    ) : l.status === 'approved' ? (
-                                                        /* Approved — the next step is going on an ACIC. Once
-                                                       it is on one, the ACIC No. column says so. */
-                                                        l.acic_number ? null : canManage ? (
-                                                            <button
-                                                                className="btn btn-outline !px-3 !py-1.5"
-                                                                onClick={() =>
-                                                                    setAssigning({
-                                                                        preselect: l,
-                                                                    })
-                                                                }
-                                                            >
-                                                                <ListChecks className="h-3.5 w-3.5" />
-                                                                Assign
-                                                            </button>
-                                                        ) : (
-                                                            <span className="text-xs text-subtle">
-                                                                Awaiting assignment
-                                                            </span>
-                                                        )
+                                                    ) : l.status !== 'canceled' ? (
+                                                        /* On an ACIC and beyond — the ACIC No. column says where. */
+                                                        null
                                                     ) : (
                                                         /* Canceled — read-only; nothing is offered. */
                                                         <span className="text-xs text-subtle">
@@ -561,7 +590,7 @@ export default function LddapsPage() {
                     onClose={() => setRegistering(false)}
                     onSaved={(lddap) => {
                         setRegistering(false);
-                        setNotice(`Registered ${lddap.lddap_no} — out for routing.`);
+                        setNotice(`Added ${lddap.lddap_no} — For Signature.`);
                         refreshFromFirstPage();
                     }}
                 />

@@ -6,9 +6,8 @@ use App\Enums\ChequeStatus;
 use App\Enums\NatureOfPayment;
 use App\Enums\UserRole;
 use App\Models\Cheque;
+use App\Models\Creditor;
 use App\Models\Lddap;
-use App\Models\Payee;
-use App\Models\Unit;
 use App\Models\User;
 use App\Services\AcicService;
 use App\Services\AcicTellerService;
@@ -45,33 +44,28 @@ class DashboardTest extends TestCase
     /** Full registration details for one LDDAP. */
     private function details(int $n): array
     {
-        $payee = Payee::firstOrCreate(['name' => 'ACME SUPPLIES INC.']);
-        $payee->accounts()->firstOrCreate(['account_no' => '2028-9010-11'], ['bank' => 'LBP']);
+        $payee = Creditor::firstOrCreate(['name' => 'ACME SUPPLIES INC.'], ['account_no' => '0028901011']);
 
         return [
-            'lddap_no' => sprintf('LDDAP-%04d', $n),
-            'nca_no' => "NCA-{$n}", 'orb_no' => "ORB-{$n}", 'dv_no' => "DV-{$n}",
+            'lddap_no' => sprintf('26-09-%05d', $n),
+            'nca_no' => sprintf('%07d', $n), 'obr_no' => "OBR-{$n}", 'dv_no' => sprintf('10-00-%05d', $n),
             'nature_of_payment' => NatureOfPayment::CommercialClaims->value,
-            'unit_id' => Unit::firstOrCreate(['name' => 'ACCOUNTING'])->id,
+            'unit_name' => 'CG-8 Comptrollership',
             'check_date' => '2026-09-21',
-            'payee_id' => $payee->id,
+            'payee_type' => 'creditor', 'payee_ref' => $payee->id,
             'gross_amount' => 1000 * $n,
         ];
     }
 
-    private function unit(): Unit
+    private function unit(): string
     {
-        return Unit::firstOrCreate(['name' => 'ACCOUNTING']);
+        return 'CG-8 Comptrollership';
     }
 
-    /** Register → forward → receive: a record back from routing, awaiting the admin's action. */
+    /** An added LDDAP — For Signature: RTS / Cancel / assign to an ACIC. */
     private function returned(User $staff, int $n): Lddap
     {
-        $service = app(LddapService::class);
-        $lddap = $service->register($staff, $this->details($n));
-        $lddap = $service->forward($staff, $lddap, ['forward_to' => 'Accounting', 'unit_id' => $this->unit()->id, 'date_forwarded' => '2026-09-22']);
-
-        return $service->receive($staff, $lddap, ['unit_id' => $this->unit()->id, 'date_received' => '2026-09-23']);
+        return app(LddapService::class)->register($staff, $this->details($n));
     }
 
     public function test_the_dashboard_requires_login(): void
@@ -87,7 +81,7 @@ class DashboardTest extends TestCase
         app(LddapService::class)->addRange($this->admin(), 1, 3);
         $service = app(LddapService::class);
         $service->register($staff, $this->details(1));
-        $service->approve($this->admin(), $this->returned($staff, 2));
+        $this->returned($staff, 2);
 
         Sanctum::actingAs($staff);
 
@@ -96,11 +90,11 @@ class DashboardTest extends TestCase
             ->assertJsonPath('data.cheques.counts.total', 5)
             ->assertJsonPath('data.cheques.counts.available', 4)
             ->assertJsonPath('data.cheques.counts.registered', 1)
-            ->assertJsonPath('data.cheques.next.cheque_number', 101)
+            ->assertJsonMissingPath('data.cheques.next')
             ->assertJsonPath('data.lddaps.counts.total', 2)
-            ->assertJsonPath('data.lddaps.counts.registered', 1)
-            ->assertJsonPath('data.lddaps.counts.approved', 1)
-            ->assertJsonPath('data.lddaps.awaiting_acic', 1)
+            ->assertJsonPath('data.lddaps.counts.for_signature', 2)
+            ->assertJsonPath('data.lddaps.counts.approved', 0)
+            ->assertJsonPath('data.lddaps.awaiting_acic', 2)
             ->assertJsonPath('data.lddaps.on_acic', 0)
             ->assertJsonPath('data.acics.counts.total', 0)
             ->assertJsonPath('data.series.cheques.available', 4)
@@ -121,9 +115,7 @@ class DashboardTest extends TestCase
         $staff = $this->staff();
         app(ChequeService::class)->addRange($admin, 100, 102);
         $cheque = app(ChequeService::class)->useNext($staff, 100, ['payee_name' => 'A', 'amount' => 10, 'cheque_date' => '2026-09-22']);
-        app(ChequeFlowService::class)->routeForSignature($admin, $cheque, [
-            'forward_to_name' => 'The Treasurer', 'date_forwarded' => '2026-09-22',
-        ]);
+        app(ChequeFlowService::class)->printDraft($staff, $cheque);
         $this->returned($staff, 1);
         $this->returned($staff, 2);
 
@@ -132,9 +124,10 @@ class DashboardTest extends TestCase
         $response = $this->getJson('/api/v1/dashboard')->assertOk();
         $attention = collect($response->json('data.attention'))->keyBy('key');
 
-        $this->assertSame(2, $attention['lddap_action']['count']);
-        $this->assertSame('/lddaps?status=returned_for_acic', $attention['lddap_action']['to']);
-        $this->assertSame(1, $attention['cheque_receive']['count']);
+        $this->assertSame(2, $attention['lddap_for_signature']['count']);
+        $this->assertSame('/lddaps?status=for_signature', $attention['lddap_for_signature']['to']);
+        // Administrators check drafts.
+        $this->assertSame(1, $attention['cheque_checking']['count']);
         // Nothing pending → not listed at all.
         $this->assertArrayNotHasKey('update_requests', $attention->all());
         $this->assertArrayNotHasKey('acic_signoff', $attention->all());
@@ -142,8 +135,14 @@ class DashboardTest extends TestCase
         // The admin's recent activity: newest first, labelled by action.
         $recent = $response->json('data.recent');
         $this->assertNotEmpty($recent);
-        $this->assertSame('received_lddap_back', $recent[0]['action']);
+        $this->assertSame('registered_lddap', $recent[0]['action']);
         $this->assertLessThanOrEqual(8, count($recent));
+
+        // So do Super Admins.
+        Sanctum::actingAs(User::factory()->superAdmin()->create());
+        $attention = collect($this->getJson('/api/v1/dashboard')->assertOk()->json('data.attention'))->keyBy('key');
+        $this->assertSame(1, $attention['cheque_checking']['count']);
+        $this->assertSame('/cheques?tab=for_checking', $attention['cheque_checking']['to']);
     }
 
     public function test_staff_see_only_what_was_returned_to_them(): void
@@ -154,17 +153,16 @@ class DashboardTest extends TestCase
         $service = app(LddapService::class);
 
         // One RTS'd record of mine, one of someone else's; one of mine still to forward.
-        $service->rts($admin, $this->returned($me, 1), ['received_on' => '2026-09-23', 'received_by' => 'M', 'unit_id' => $this->unit()->id, 'rts_date' => '2026-09-24', 'note' => 'Fix the OBJ code.']);
-        $service->rts($admin, $this->returned($other, 2), ['received_on' => '2026-09-23', 'received_by' => 'M', 'unit_id' => $this->unit()->id, 'rts_date' => '2026-09-24', 'note' => 'Fix the payee.']);
+        $service->rts($admin, $this->returned($me, 1), ['received_on' => '2026-09-23', 'received_by' => 'M', 'unit_name' => $this->unit(), 'rts_date' => '2026-09-24', 'note' => 'Fix the OBJ code.']);
+        $service->rts($admin, $this->returned($other, 2), ['received_on' => '2026-09-23', 'received_by' => 'M', 'unit_name' => $this->unit(), 'rts_date' => '2026-09-24', 'note' => 'Fix the payee.']);
         $service->register($me, $this->details(3));
-        // A cheque returned to me, and one returned to the other staff member.
+        // A cheque of mine, and one of the other staff member's.
         app(ChequeService::class)->addRange($admin, 100, 101);
         $cheques = app(ChequeService::class);
         $cheques->useNext($me, 100, ['payee_name' => 'A', 'amount' => 10, 'cheque_date' => '2026-09-22']);
         $cheques->useNext($other, 101, ['payee_name' => 'B', 'amount' => 10, 'cheque_date' => '2026-09-22']);
-        // Both come back RTS'd: one to me, one to the other staff member.
-        Cheque::where('cheque_number', 100)->update(['status' => ChequeStatus::Registered, 'rts_at' => now()]);
-        Cheque::where('cheque_number', 101)->update(['status' => ChequeStatus::Registered, 'rts_at' => now()]);
+        // Both drafts come back For Compliance: one mine, one the other staff member's.
+        Cheque::whereIn('cheque_number', [100, 101])->update(['status' => ChequeStatus::ForCompliance]);
 
         Sanctum::actingAs($me);
 
@@ -172,9 +170,12 @@ class DashboardTest extends TestCase
 
         $this->assertSame(1, $attention['my_rts']['count']);
         $this->assertSame('/lddaps?status=rts', $attention['my_rts']['to']);
-        $this->assertSame(1, $attention['cheques_rts']['count']);
-        $this->assertSame(1, $attention['my_registered']['count']);
-        $this->assertArrayNotHasKey('lddap_action', $attention->all());
+        $this->assertSame(1, $attention['cheques_compliance']['count']);
+        $this->assertSame('/cheques?tab=for_compliance', $attention['cheques_compliance']['to']);
+        // The one still For Signature, waiting for an ACIC.
+        $this->assertSame(1, $attention['awaiting_acic']['count']);
+        $this->assertSame('/lddaps?status=for_signature', $attention['awaiting_acic']['to']);
+        $this->assertArrayNotHasKey('lddap_for_signature', $attention->all());
     }
 
     public function test_a_teller_sees_what_is_waiting_to_be_received(): void
@@ -184,7 +185,7 @@ class DashboardTest extends TestCase
         app(ChequeService::class)->addRange($admin, 100, 101);
         $cheque = app(ChequeService::class)->useNext($staff, 100, ['payee_name' => 'A', 'amount' => 10, 'cheque_date' => '2026-09-22']);
         // Carry it through to an ACIC and forward that to the tellers.
-        $cheque->update(['status' => ChequeStatus::ForAcic]);
+        $cheque->update(['status' => ChequeStatus::ForSignature]);
         $acic = app(AcicService::class)->create($admin);
         app(AcicService::class)->assignCheques($admin, $acic, [$cheque->id]);
         app(AcicTellerService::class)->forwardToTeller($admin, $acic);
@@ -194,7 +195,7 @@ class DashboardTest extends TestCase
         $attention = collect($this->getJson('/api/v1/dashboard')->assertOk()->json('data.attention'))->keyBy('key');
 
         $this->assertSame(1, $attention['acics_to_accept']['count']);
-        $this->assertSame('/cheques?tab=forwarded_to_teller', $attention['acics_to_accept']['to']);
+        $this->assertSame('/acics?status=pending', $attention['acics_to_accept']['to']);
         $this->assertArrayNotHasKey('acics_to_deposit', $attention->all());
     }
 

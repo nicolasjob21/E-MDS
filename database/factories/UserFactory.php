@@ -38,6 +38,14 @@ class UserFactory extends Factory
         ]);
     }
 
+    /** The admin in charge — checks cheque drafts. */
+    public function superAdmin(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'role' => UserRole::SuperAdmin,
+        ]);
+    }
+
     public function teller(): static
     {
         return $this->state(fn (array $attributes) => [

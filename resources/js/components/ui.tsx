@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { AlertTriangle, Moon, Sun } from 'lucide-react';
-import type { AcicStatus, Cheque, ChequeStatus, LddapStatus } from '../lib/types';
+import type { AcicDisplayStatus, AcicStatus, Cheque, ChequeStatus, LddapStatus } from '../lib/types';
 import { chequeStatusLabel, formatDate } from '../lib/format';
 import { useTheme } from '../theme/ThemeContext';
 
@@ -54,9 +54,16 @@ export function PageHeader({ title, subtitle, action }: { title: string; subtitl
  * {@see LddapStatusBadge}, which does the same for the LDDAP table.
  */
 export function StatusBadge({ status }: { status: ChequeStatus }) {
+    // A used cheque with no draft printed yet has no status to show.
+    if (status === 'registered') return null;
+
     const config: Record<ChequeStatus, { styles: string; dot: string }> = {
         available: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300' },
         registered: { styles: 'border-line text-muted bg-well', dot: 'bg-slate-400' },
+        for_checking: { styles: 'border-accent-400/50 text-accent-400 bg-accent-400/10', dot: 'bg-accent-400' },
+        for_compliance: { styles: 'border-amber-400/50 text-amber-400 bg-amber-400/10', dot: 'bg-amber-400' },
+        for_final_print: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300' },
+        for_signature: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300' },
         out_for_signature: { styles: 'border-accent-400/50 text-accent-400 bg-accent-400/10', dot: 'bg-accent-400' },
         received: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300' },
         for_acic: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300' },
@@ -64,10 +71,13 @@ export function StatusBadge({ status }: { status: ChequeStatus }) {
         released_to_payee: { styles: 'border-teal-400/50 text-teal-300 bg-teal-400/10', dot: 'bg-teal-400' },
         forwarded_to_teller: { styles: 'border-purple-400/50 text-purple-300 bg-purple-400/10', dot: 'bg-purple-400' },
         accepted_by_teller: { styles: 'border-indigo-400/50 text-indigo-300 bg-indigo-400/10', dot: 'bg-indigo-400' },
+        forwarded_to_land_bank: { styles: 'border-blue-400/50 text-blue-300 bg-blue-400/10', dot: 'bg-blue-400' },
+        forwarded_to_payee: { styles: 'border-teal-400/50 text-teal-300 bg-teal-400/10', dot: 'bg-teal-400' },
+        returned: { styles: 'border-amber-400/50 text-amber-400 bg-amber-400/10', dot: 'bg-amber-400' },
         returned_by_bank: { styles: 'border-amber-400/50 text-amber-400 bg-amber-400/10', dot: 'bg-amber-400' },
         completed: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success' },
         cancelled: { styles: 'border-danger/40 text-danger-fg bg-danger/10', dot: 'bg-danger' },
-        voided: { styles: 'border-danger/40 text-danger-fg bg-danger/10', dot: 'bg-danger' },
+        spoiled: { styles: 'border-danger/40 text-danger-fg bg-danger/10', dot: 'bg-danger' },
         stale: { styles: 'border-danger/60 text-danger-fg bg-danger/15', dot: 'bg-danger' },
         replaced: { styles: 'border-line text-subtle bg-well', dot: 'bg-slate-500' },
     };
@@ -87,7 +97,7 @@ export function StatusBadge({ status }: { status: ChequeStatus }) {
  * (with a tag saying who is holding it up), red once it has gone stale.
  */
 export function ValidityBadge({ cheque }: { cheque: Cheque }) {
-    const settled: ChequeStatus[] = ['available', 'cancelled', 'voided', 'replaced', 'completed'];
+    const settled: ChequeStatus[] = ['available', 'cancelled', 'spoiled', 'replaced', 'completed'];
     const status = cheque.effective_status;
 
     if (!status || settled.includes(status)) {
@@ -147,21 +157,54 @@ export function AcicStatusBadge({ status }: { status: AcicStatus }) {
     );
 }
 
+/** The status the ACIC tables show — its own, or the teller's once it is with the tellers. */
+export function AcicDisplayStatusBadge({ status, label }: { status: AcicDisplayStatus; label: string }) {
+    const styles: Record<AcicDisplayStatus, { styles: string; dot: string }> = {
+        open: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300' },
+        used: { styles: 'border-slate-600/50 text-muted bg-slate-500/10', dot: 'bg-slate-400' },
+        approved: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success' },
+        forwarded: { styles: 'border-accent-400/50 text-accent-400 bg-accent-400/10', dot: 'bg-accent-400' },
+        pending: { styles: 'border-accent-400/50 text-accent-400 bg-accent-400/10', dot: 'bg-accent-400' },
+        accepted_by_teller: { styles: 'border-indigo-400/50 text-indigo-300 bg-indigo-400/10', dot: 'bg-indigo-400' },
+        forwarded_to_land_bank: { styles: 'border-blue-400/50 text-blue-300 bg-blue-400/10', dot: 'bg-blue-400' },
+        forwarded_to_payee: { styles: 'border-teal-400/50 text-teal-300 bg-teal-400/10', dot: 'bg-teal-400' },
+        rts: { styles: 'border-amber-400/50 text-amber-400 bg-amber-400/10', dot: 'bg-amber-400' },
+        completed: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success' },
+    };
+    const config = styles[status] ?? styles.open;
+
+    return (
+        <span className={`inline-flex items-center gap-1.5 rounded-xs border px-2 py-0.5 text-xs font-medium whitespace-nowrap ${config.styles}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${config.dot}`} />
+            {label}
+        </span>
+    );
+}
+
 /**
- * The LDDAP's place in its routing: Registered → For Out → Returned for ACIC → Approved | RTS |
- * Canceled. Coral marks the one state that is waiting on the admin's action; amber, a record
- * sent back to be corrected.
+ * The LDDAP's status: For Signature (coral — waiting to go on an ACIC, or for RTS / Cancel) →
+ * Approved (on the ACIC) → the teller's half; amber RTS, a record sent back to be corrected.
  */
 export function LddapStatusBadge({ status }: { status: LddapStatus }) {
-    const config = {
-        registered: { styles: 'border-line text-muted bg-well', dot: 'bg-slate-500', label: 'Registered' },
-        for_out: { styles: 'border-brand-400/40 text-brandink bg-brand-500/10', dot: 'bg-brand-300', label: 'For Out' },
-        returned_for_acic: { styles: 'border-accent-400/50 text-accent-400 bg-accent-400/10', dot: 'bg-accent-400', label: 'Returned for ACIC' },
+    const all: Record<LddapStatus, { styles: string; dot: string; label: string }> = {
+        for_signature: { styles: 'border-accent-400/50 text-accent-400 bg-accent-400/10', dot: 'bg-accent-400', label: 'For Signature' },
         // Sent back to be corrected — amber, so it reads as neither the coral "act on me" nor a verdict.
         rts: { styles: 'border-amber-400/50 text-amber-400 bg-amber-400/10', dot: 'bg-amber-400', label: 'RTS' },
         approved: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success', label: 'Approved' },
+        forwarded_to_teller: { styles: 'border-purple-400/50 text-purple-300 bg-purple-400/10', dot: 'bg-purple-400', label: 'Forwarded to Teller' },
+        accepted_by_teller: { styles: 'border-indigo-400/50 text-indigo-300 bg-indigo-400/10', dot: 'bg-indigo-400', label: 'Accepted' },
+        forwarded_to_land_bank: { styles: 'border-blue-400/50 text-blue-300 bg-blue-400/10', dot: 'bg-blue-400', label: 'Forwarded to LBP' },
+        forwarded_to_payee: { styles: 'border-teal-400/50 text-teal-300 bg-teal-400/10', dot: 'bg-teal-400', label: 'Forwarded to Payee' },
+        returned: { styles: 'border-amber-400/50 text-amber-400 bg-amber-400/10', dot: 'bg-amber-400', label: 'Returned' },
+        returned_by_bank: { styles: 'border-amber-400/50 text-amber-400 bg-amber-400/10', dot: 'bg-amber-400', label: 'Returned by Bank' },
+        completed: { styles: 'border-success/40 text-success-fg bg-success/10', dot: 'bg-success', label: 'Completed' },
         canceled: { styles: 'border-danger/40 text-danger-fg bg-danger/10', dot: 'bg-danger', label: 'Canceled' },
-    }[status];
+        // Retired — only on records from before the change, until they are moved on.
+        registered: { styles: 'border-line text-muted bg-well', dot: 'bg-slate-500', label: 'Registered' },
+        for_out: { styles: 'border-line text-muted bg-well', dot: 'bg-slate-500', label: 'For Out' },
+        returned_for_acic: { styles: 'border-line text-muted bg-well', dot: 'bg-slate-500', label: 'Returned for ACIC' },
+    };
+    const config = all[status] ?? all.for_signature;
 
     return (
         <span className={`inline-flex items-center gap-1.5 rounded-xs border px-2 py-0.5 text-xs font-medium ${config.styles}`}>

@@ -4,7 +4,7 @@
 > workflows, routes, or data model), update this document and its flow-charts in the **same change**.
 > See [Maintaining this document](#maintaining-this-document).
 
-_Last reviewed against the code: 2026-09-24._
+_Last reviewed against the code: 2026-09-27._
 
 ---
 
@@ -115,8 +115,9 @@ flowchart LR
     LDS["LddapService<br/>LDDAP records + check series"]
     ACS["AcicService<br/>ACIC numbers + linking"]
     ALC["LddapCheckAllocator<br/>consecutive check blocks"]
-    URS["UpdateRequestService<br/>cheque corrections"]
+    CFS["ChequeFlowService<br/>drafts · checking · every cheque step"]
     LUR["LddapUpdateRequestService<br/>LDDAP corrections"]
+    AHS["AccountHolderService<br/>creditors · PCG personnel"]
     LOG["ActivityLogger"]
 
     DSH --> CHS
@@ -128,8 +129,9 @@ flowchart LR
     CHS --> LOG
     LDS --> LOG
     ACS --> LOG
-    URS --> LOG
+    CFS --> LOG
     LUR --> LOG
+    AHS --> LOG
 ```
 
 **Three independent number series**, each registered in blocks by an admin, each handing out the
@@ -162,8 +164,9 @@ flowchart TB
 
     subgraph REF["Reference data"]
         F1["users"]
-        F2["units"]
-        F3["payees · payee_accounts"]
+        F2["PCG unit list<br/>config/pcg-units.json"]
+        F3["payees · payee_accounts<br/>(legacy)"]
+        F4["creditors · pcg_personnel"]
     end
 
     subgraph TRL["Trails — append-only"]
@@ -179,7 +182,9 @@ flowchart TB
     S3 -->|"acic_number"| R3
     R1 -->|"acic_id"| R3
     R2 -->|"acic_id"| R3
-    F2 --> R2
+    F2 -.->|"unit names"| R1
+    F2 -.->|"unit names"| R2
+    F2 -.->|"unit names"| F4
     F3 --> R2
     R1 --> T4
     R2 --> T2
@@ -204,7 +209,7 @@ Full column-level detail is in [§ 10 Data model](#10-data-model).
 - `app/Services/LddapCheckAllocator.php` — claims a run of consecutive check numbers under a lock
 - `app/Services/AcicService.php` — the ACIC number series, membership, sign-off and forwarding
 - `app/Services/DashboardService.php` — what awaits the signed-in user, and every register's counts
-- `app/Services/UpdateRequestService.php`, `LddapUpdateRequestService.php` — the correction workflows
+- `app/Services/LddapUpdateRequestService.php` — the LDDAP correction workflow (cheques are edited directly)
 - `app/Services/ActivityLogger.php` — the append-only audit log
 - `app/Support/` — `Money` (bcmath decimals), `Tax` (the W/TAX–VAT rule), `AmountInWords`
 - `app/Http/Controllers/` — thin controllers; validation lives in `app/Http/Requests/`
@@ -216,33 +221,39 @@ Full column-level detail is in [§ 10 Data model](#10-data-model).
 
 ## 3. Roles & permissions
 
-| Capability | Admin | Staff | Teller |
-|---|:---:|:---:|:---:|
-| Sign in / view cheques & dashboard | ✓ | ✓ | ✓ |
-| **Route** · **receive** · **assign** · **release** a cheque | ✓ | | |
-| **Forward an ACIC** to the tellers | ✓ | | |
-| **Accept** · **deposit** · **return** an ACIC | | | ✓ *(the one who accepted it)* |
-| **RTS** · **cancel** · **void** a cheque · **replace** a stale one | ✓ | | |
-| Edit **own profile** (full name, email) / **change own password** | ✓ | ✓ | ✓ |
-| Use the next cheque | ✓ | ✓ | ✓ |
-| Confirm a used cheque as **received** | | | ✓ |
-| Request a **detail correction** (with reason) | | ✓ | |
-| Approve / reject correction requests | ✓ | | |
-| **Review** an issued cheque (approve / return / disapprove) | ✓ | | |
-| Register a cheque book (serial range) | ✓ | | |
-| Register the **LDDAP check series** (range) | ✓ | | |
-| Propose an **LDDAP correction** (with reason) | | ✓ | |
-| Approve / reject LDDAP corrections | ✓ | | |
-| **Correct an LDDAP directly** (reason required) | ✓ | | |
-| **Use a check number** for LDDAP records | ✓ | ✓ | |
-| Confirm an LDDAP as **received** | | | ✓ |
-| **Act** on an LDDAP (approved / RTS / cancel) | ✓ | | |
-| Assign approved LDDAPs to an ACIC | ✓ | ✓ | |
-| Open an ACIC / assign cheques to it | ✓ | ✓ | |
-| **Forward** an ACIC | ✓ | | |
-| **Complete** a forwarded ACIC | | | ✓ |
-| Manage users | ✓ | | |
-| View the audit log | ✓ | | |
+The **admins in charge** of cheque drafts are the **Administrators and Super Admins**: either may
+approve or return a draft, and both are notified when one is submitted. **Super Admin** has every
+admin power (the Admin column below applies to it too), and only a Super Admin can grant, change
+or remove the role — the first one is made with `php artisan users:make-super-admin {username}`.
+
+| Capability | Super Admin | Admin | Staff | Teller |
+|---|:---:|:---:|:---:|:---:|
+| Sign in / view cheques & dashboard | ✓ | ✓ | ✓ | ✓ |
+| Use the next cheque | ✓ | ✓ | ✓ | ✓ |
+| **Edit** a cheque's details (no status yet, or For Compliance) · **Print Draft** · **Final Print** | ✓ | ✓ | ✓ | |
+| **Approve** / **Return** a cheque draft — notified when one is submitted | ✓ | ✓ | | |
+| **Assign** · **release** a cheque | ✓ | ✓ | | |
+| **Forward an ACIC** to the tellers | ✓ | ✓ | | |
+| **Accept** · **deposit** · **return** an ACIC | | | | ✓ *(the one who accepted it)* |
+| **Cancel** · mark **spoiled** · **replace** a stale one | ✓ | ✓ | | |
+| Edit **own profile** (full name, email) / **change own password** | ✓ | ✓ | ✓ | ✓ |
+| Confirm a used cheque as **received** | | | | ✓ |
+| Register a cheque book (serial range) | ✓ | ✓ | | |
+| Grant / change / remove the **Super Admin** role | ✓ | | | |
+| Register the **LDDAP check series** (range) | ✓ | ✓ | | |
+| Propose an **LDDAP correction** (with reason) | | | ✓ | |
+| Approve / reject LDDAP corrections | ✓ | ✓ | | |
+| **Correct an LDDAP directly** (reason required) | ✓ | ✓ | | |
+| **Use a check number** for LDDAP records | ✓ | ✓ | ✓ | |
+| Confirm an LDDAP as **received** | | | | ✓ |
+| **Act** on an LDDAP (approved / RTS / cancel) | ✓ | ✓ | | |
+| Assign approved LDDAPs to an ACIC | ✓ | ✓ | ✓ | |
+| Open an ACIC / assign cheques to it | ✓ | ✓ | ✓ | |
+| **Forward** an ACIC | ✓ | ✓ | | |
+| **Complete** a forwarded ACIC | | | | ✓ |
+| View / **add** / **batch upload** creditors and PCG personnel | ✓ | ✓ | ✓ | |
+| Manage users | ✓ | ✓ | | |
+| View the audit log | ✓ | ✓ | | |
 
 Roles are defined in `app/Enums/UserRole.php` and enforced by the `admin` and `teller`
 middleware plus per-request authorization (e.g. staff-only requests).
@@ -280,33 +291,45 @@ a number the bank printed and an admin registered as part of a book, waiting to 
 ```mermaid
 stateDiagram-v2
     state "Available" as AV
-    state "Registered" as R
-    state "Out for Signature" as OS
-    state "For ACIC" as FA
+    state "(no status)" as U
+    state "For Checking" as FC
+    state "For Compliance" as CO
+    state "For Final Print" as FP
+    state "For Signature" as FS
     state "Approved" as AA
     state "Released to Payee" as RP
     state "Forwarded to Teller" as FT
     state "Accepted by Teller" as AT
-    state "Deposited" as D
+    state "Forwarded to LBP / Payee" as FO
+    state "Returned (RTS)" as RT
+    state "Completed" as D
 
     [*] --> AV: admin registers a cheque book
-    AV --> R: Register — claims the lowest available number
-    R --> OS: Route for Signature
-    OS --> FA: Mark as Received (passes through Received)
-    FA --> AA: Assign Cheque to ACIC
+    AV --> U: Use — claims the lowest available number
+    U --> FC: Print Draft (preparer)
+    FC --> FP: Approve (Administrator / Super Admin)
+    FC --> CO: Return + comment (Administrator / Super Admin)
+    CO --> FC: edit, then Print Draft again
+    FP --> FS: Final Print, confirmed
+    FS --> AA: Assign Cheque to ACIC
     AA --> RP: Release to Payee
     AA --> FT: Forward to Teller (whole ACIC)
     FT --> AT: a teller accepts — first wins
-    AT --> D: Mark as Deposited
+    AT --> FO: Forward to LBP (any ACIC) or to Payee (cheque ACIC) — accepting teller
+    FO --> D: Action → Completed
+    FO --> RT: Action → RTS (this check Returned)
+    RT --> FO: Forward again
     FT --> AA: Return to Admin
     AT --> AA: Return to Admin
-    OS --> R: RTS
-    FA --> R: RTS
-    R --> Cancelled
-    AA --> Voided
+    RT --> AA: Return to Admin
+    U --> Cancelled
+    AA --> Spoiled: Spoil (payment moves to a replacement on the next number)
     RP --> [*]: final
     D --> [*]: final
 ```
+
+Cancel is open at every status before an ACIC (no status, For Checking, For Compliance, For
+Final Print, For Signature); the diagram shows one arrow for it.
 
 **The two branches after Approved.** A cheque goes **either** to the payee **or** to the
 bank, never both:
@@ -314,24 +337,42 @@ bank, never both:
 | Branch | Steps | Unit | Who |
 |---|---|---|---|
 | **A — to the payee** | Approved → **Release to Payee** | one cheque | Admin |
-| **B — to the bank** | Approved → **Forward to Teller** → Accepted → **Deposited** | the **whole ACIC** | Admin, then a teller |
+| **B — to the bank** | Approved → **Forward to Teller** → Accepted → **Forward** (to LBP; a cheque ACIC also to the Payee) → **Action** (Completed / RTS) | the **whole ACIC** | Admin, then the accepting teller |
 
 ### The steps
 
-1. **Registered** — set automatically when a cheque is claimed from the book. The number is the
-   **lowest available**, exactly as it always was; a cheque number is never allocated at ACIC
-   time (that rule belongs to LDDAP check numbers).
-2. **Route for Signature** (`POST /cheques/{cheque}/route`) — *Forward to*, *Unit name*, *Date
-   forwarded*, *Note*. Forwarded by is the signed-in user.
-3. **Mark as Received** (`POST /cheques/{cheque}/receive`) — *Received by* (defaults to the
-   signed-in user, editable), *Date received*, *From unit name*, *Note*. **Received is a
-   pass-through**: the step carries the cheque straight on to **For ACIC**, and the history
-   records both moves.
-4. **For ACIC** — the only status *Assign Cheque to ACIC* offers. Several cheques share one ACIC
-   number. Assigning sets **Approved**.
-5. **Release to Payee** (`POST /cheques/{cheque}/release`) — *Received by* (payee or authorised
+1. **Use** — claims the lowest available number (see §5). The cheque then has **no status**
+   (stored `registered`; the badge is blank, and the filter tab is *Used*). Its details —
+   payee, account no., unit, amount, date — can be **edited** now (`PUT /cheques/{cheque}`).
+   A **Print Draft** button shows.
+2. **Print Draft** (`POST /cheques/{cheque}/print-draft`, the preparer — staff, admin or Super
+   Admin) — the draft prints with a **DRAFT** watermark and the cheque becomes **For
+   Checking**. It is submitted to the **admins in charge**: every active **Administrator and
+   Super Admin** is notified. Submitting comes first and printing second, so a draft is never printed without
+   being submitted.
+3. **An admin in charge checks it** (Administrators and Super Admins). **Approve** and **Return**
+   on the row both open the **draft itself** — the watermarked face as printed — with a comment
+   box and the two buttons beneath it, so the check is made against the cheque, not from
+   memory:
+   - **Approve** (`POST /cheques/{cheque}/approve-draft`, comment optional) → **For Final
+     Print**. The preparer — whoever printed the latest draft — is notified.
+   - **Return** (`POST /cheques/{cheque}/return-draft`, **comment required**: what to change) →
+     **For Compliance**. The preparer is notified with the comment, which also shows at the top
+     of the cheque's detail view. They edit the cheque and **Print Draft** again, back to For
+     Checking. This can repeat as often as needed.
+4. **Final Print** — the button shows **only when the cheque is For Final Print**. The cheque
+   prints clean; the dialog then asks *"Did cheque #N print successfully?"* **Yes**
+   (`POST /cheques/{cheque}/final-print`) → **For Signature**; *No — print again* leaves it as it is.
+5. **For Signature** — the **only** status *Assign Cheque to ACIC* offers. **Many cheques may
+   share one ACIC number**: tick several in one go, or type the same number again later. Assigning sets **Approved**; everything after that is unchanged, and a cheque
+   taken off an ACIC goes back to For Signature.
+6. **Release to Payee** (`POST /cheques/{cheque}/release`) — *Received by* (payee or authorised
    representative), *Date received*, *Note*. Refused without an ACIC or without a cheque number.
    Final.
+
+**Editing** is allowed **only** with no status yet or while For Compliance, and only by a
+preparer. Every save is a timeline entry of its own (`edited`, with each changed field's from and
+to). Cheques take **no correction requests** any more — that queue is LDDAP-only.
 
 ### Branch B — the ACIC goes to the tellers
 
@@ -344,25 +385,159 @@ The ACIC is the unit here, not the cheque:
   through a conditional write (`accepted_by` is set only where it is still null), so two tellers
   clicking at the same instant cannot both succeed. The second is told *"Already accepted by
   {name}."* and the ACIC leaves every other teller's Pending list.
-- **Mark as Deposited** (`POST /acics/{acic}/deposit`) — *Deposit date* (one date for the whole
-  ACIC, not in the future, not before the date accepted), the bank read-only as **Land Bank of
-  the Philippines**, *Deposit slip / reference no.*, *Note*. Every cheque becomes **Deposited**.
-- **Return to Admin** (`POST /acics/{acic}/return-to-admin`) — reason required. Every cheque goes
-  back to **Approved**, the claim is released and the admin is notified, who can forward it
-  again or release the cheques individually.
+- **Forward** (`POST /acics/{acic}/teller-forward`, `to` = `land_bank` | `payee`) — on an
+  ACIC the teller has accepted (or RTS'd), separate buttons, each asking for confirmation:
+  an **LDDAP ACIC** gets **Forward to LBP** only (the server refuses `payee` for it); a **cheque
+  ACIC** gets **Forward to LBP** and **Forward to Payee** (`teller_forward_options` on the row
+  says which). The ACIC becomes **Forwarded to LBP** or **Forwarded to Payee**, saving who
+  (`teller_forwarded_by`) and when (`teller_forwarded_at`); every check still in play moves with
+  it (after an RTS, only those it Returned). The Forward buttons are then replaced by **Action**.
+  (Stored values stay `forwarded_to_land_bank`; "LBP" and "Accepted" are the labels.)
+- **Forward to LBP opens a confirmation modal first** — nothing is forwarded until the teller
+  confirms. It shows, built only from what is already on the ACIC: the **ACIC #** and **ACIC
+  date** (the date it was prepared), the **number of items**, a table of them (**LDDAP No. /
+  Check No.**, Payee, Amount) and the **total amount**; and **Forwarded to Bank** — now, in
+  Philippine time (Asia/Manila), e.g. *Sep 28, 2026 12:45 AM*. Buttons: **Cancel** (closes, no
+  change) and **Confirm Forward to LBP**, disabled while it saves.
+- On confirm the existing forward runs unchanged. **Forwarded to Bank** is stored in
+  `acics.forwarded_to_land_bank_at` from the **server's clock at that moment** (inside the
+  locked transaction), not the time the modal showed. A second forward — a double click, another
+  tab — is refused under the lock: *"ACIC #N has already been forwarded to LBP."*
+- **Forwarded to Bank** shows on the ACIC list (its own column), the admin's View
+  (*Forwarding*), the read-only View, and the Deposit Queue's *Forwarded out* column, as
+  *Sep 28, 2026 12:45 AM* in Philippine time; ACICs forwarded before it was recorded show "—".
+- **Forward to Payee** (cheque ACICs; `POST /acics/{acic}/forward-to-payee`,
+  `ForwardChequesToPayeeRequest`, `AcicTellerService::forwardChequesToPayee()`) — the accepting
+  teller hands **one, several or all** cheques to their payees. The modal shows the ACIC summary
+  (ACIC date, number of cheques, how many are forwarded, total amount) and the cheques (check
+  no., payee, amount) with checkboxes and **Select All**; **stale** cheques, and those already
+  forwarded, are shown but cannot be ticked. **Received By**, **Date Received** (today in Manila
+  by default, never later, not before the ACIC was accepted) and **Unit** (the shared PCG list)
+  are required, once for the batch.
+  - Each ticked cheque becomes **Forwarded to Payee**, storing Received By / Date Received in
+    the release-to-payee columns (`received_by_name`, `date_received`), the unit in
+    `payee_unit_name`, and the teller and time in `released_by` / `released_at`; its timeline
+    reads *"Received by X (unit) on date."*, and the ACIC history gets one
+    `cheques_forwarded_to_payee` row per batch.
+  - The row shows progress — *3/5 forwarded to payee* (of the cheques that can go: not stale,
+    not settled). When every one has gone, the **ACIC** becomes **Forwarded to Payee**
+    (`forwarded_to_payee` in its history) and gets the **Action**; Completed asks for nothing more.
+  - Once **any** cheque has gone to its payee, **Forward to LBP** and **Return to Admin** are
+    refused (an ACIC is never split between LBP and payees, nor taken back half-delivered).
+  - Received By, Date Received and Unit show on the cheque's details (*Forwarded to payee*)
+    and on each cheque in the ACIC's details.
+  - The whole-ACIC "to payee" forward is retired (`teller-forward` refuses `payee`).
+- **Action** — once forwarded, the Forward button is replaced by **Action**, a modal with two
+  choices, saving who (`teller_action_by`) and when (`teller_action_at`):
+  - **Completed** (`POST /acics/{acic}/teller-complete`) — the ACIC and every check out become
+    **Completed**. **Final.** (Who received each cheque forwarded to a payee was recorded at
+    Forward to Payee; `payee_received_by` / `payee_received_on` are no longer written.)
+  - **RTS** (`POST /acics/{acic}/teller-rts`) — the ACIC becomes **RTS**, with a **required
+    Reason** (`rts_reason`) and a **status dropdown per check** (`rts_status`):
 
-Only the teller who accepted an ACIC (or an admin) may deposit or return it. The teller
-dashboard is **Deposit queue** (`/deposit-queue`), with Pending and Accepted lists.
+    | Option | The check becomes |
+    |---|---|
+    | **Completed** | Completed — nothing was wrong with it |
+    | **Returned** | Returned — to be put right; goes out again with the next Forward |
+    | **Cancelled** | Cancelled (LDDAP: Canceled); the number stays used; the reason is kept |
+    | **Stale** (cheques only) | Stale — an admin may then Replace it |
 
-### The three ways out
+    From RTS the teller may **Forward** again or **Return to Admin**.
+- **Return to Admin** (`POST /acics/{acic}/return-to-admin`) — reason required, from Accepted or
+  RTS (not while it is out, nor once completed). Every check still in play goes back to
+  **Approved**, the claim is released and the admin is notified, who can forward it again or
+  release the cheques individually. Checks an RTS completed, cancelled or staled stay as they are.
+
+**Only the teller who accepted an ACIC may Forward it or take the Action** — no admin
+override (Return to Admin keeps its old rule: that teller, or an admin). Every step is a row in
+the ACIC's **history** (`GET /acics/{acic}/history`, with the per-check receipts and RTS
+statuses in its details) and a timeline entry on each cheque and LDDAP.
+
+The retired **Confirm and Complete** and **Returned by Bank** steps are gone; an older ACIC
+left *Returned by Bank* is listed under RTS and may be forwarded again or returned to the admin.
+
+The teller dashboard is **Deposit Queue** (`/deposit-queue`), shown in the **sidebar for
+tellers only** (admins and staff reach it by its address), with the lists **Pending · My
+Accepted · Forwarded · RTS · Completed**, and a **Forwarded out** column (To LBP / To Payee and
+when). The buttons on each row:
+
+| ACIC | Buttons |
+|---|---|
+| Pending | **Accept** · **View** — the first teller to accept takes it; it becomes **Accepted** |
+| Accepted — LDDAP ACIC | **Forward to LBP** · Return to Admin · **View** |
+| Accepted — cheque ACIC | **Forward to LBP** · **Forward to Payee** · Return to Admin · **View** (once any cheque has gone to its payee: Forward to Payee · View only, with *n/m forwarded to payee* under the status) |
+| Forwarded (LBP / Payee) | **Action** (Completed / RTS) · **View** |
+| RTS | the Forward buttons again · Return to Admin · **View** |
+| Completed | **View** |
+
+The **ACIC page** gives a teller the same buttons, in its **Action** column (stacked, beside
+**View**): Accept on a Pending ACIC; Forward to LBP (and, for a cheque ACIC, Forward to Payee)
+on one they accepted; then Action. Return to Admin stays in the Deposit Queue.
+
+**View** (`AcicViewModal`, on every row, and the teller's View on the ACIC page) is
+**read-only**: ACIC number, type (LDDAP / Cheque), status, **total amount**; every LDDAP or
+cheque on it — number (with the LDDAP's check number), **DV number** (LDDAPs; "—" for a cheque),
+payee, amount; and its **history** — opened and used (from the ACIC), then every teller step
+(`GET /acics/{acic}/history`: who, when, note). A teller can read an ACIC and its history only
+once it has been forwarded to the tellers.
+
+### The ways out
 
 | Exception | Allowed at | Result |
 |---|---|---|
-| **RTS** | Out for Signature · Received · For ACIC | back to **Registered**, routing cleared, ready to go round again |
-| **Cancel** | before an ACIC — Registered · Out for Signature · Received · For ACIC | **Cancelled**, final |
-| **Void** | **Approved only** — never once a teller has it | **Voided**, final; the number stays used and is never reassigned |
+| **Cancel** | before an ACIC — no status · For Checking · For Compliance · For Final Print · For Signature | **Cancelled**, final |
+| **Spoil** | **Approved only** — never once a teller has it | **Spoiled**, final; the number stays used and is never reassigned, and the payment moves to a **replacement cheque** |
 
 Each needs a reason, kept on the cheque as `exception_reason`.
+
+**Spoil** (`POST /cheques/{cheque}/spoil`, admin; `ChequeSpoilService`, formerly *Void*). The
+dialog asks for a required **Reason**, shows the number the replacement will take, and confirms
+once more before saving. In one transaction:
+
+- the cheque becomes **Spoiled** and keeps its number, with the reason, **who** (`spoiled_by`)
+  and **when** (`spoiled_at`);
+- a **replacement** claims the **next available number** through `ChequeService::useNext()` —
+  the lowest available, locked, never reused. The dialog sends the number it showed
+  (`replacement_number`); if another user has taken it since, the whole step is refused
+  (*"Cheque number N is already used. Please refresh and try again."*) and the dialog shows the
+  new next number. With no number left, Spoil is refused;
+- the replacement copies the spoiled cheque's details — **payee, account no., unit and amount** — except the
+  number, status and cheque date: it is **dated the day it is created** and starts at
+  **no status** (a new draft is needed), off any ACIC, with a fresh 90 days;
+- the two are linked both ways: the spoiled cheque shows **Replaced by Cheque #N**, the
+  replacement **Replaces Cheque #N** (in the table's status cell and the detail view);
+- the spoiled cheque **comes off its ACIC** (`acic_id` cleared), so the ACIC is not held up by
+  a record that can never be forwarded or printed, and **remembers it** in
+  `spoiled_from_acic_id` — shown as *Was on ACIC #N* on the record, and in its timeline note
+  (*"… replaced by cheque #N; taken off ACIC #M."*);
+- active admins and the user who used the cheque are notified; the page reports the new number.
+
+**The replacement's ACIC.** When the replacement reaches **For Signature**, its row's **Assign to
+ACIC** opens `ChequeAssignModal` with two choices first:
+
+1. **Use previous ACIC (#M)** — the replacement takes the spoiled cheque's place on that ACIC
+   (`POST /cheques/{cheque}/use-previous-acic`, admin/staff, `ChequeSpoilService::usePreviousAcic()`),
+   becoming Approved there. Allowed **only while that ACIC is still with the admin**
+   (`Acic::notWithAdminBecause()`): not forwarded to a teller, not accepted, not returned by the
+   bank, not completed — an ACIC a teller returned to the admin counts as with the admin again.
+   Otherwise the choice is disabled with the reason, e.g. *"ACIC #M is with the teller
+   (Pending), so the replacement must go on a new ACIC."*, and the server refuses it the same way.
+2. **Assign to a new ACIC** — the usual form (type an ACIC #, tick cheques).
+
+The choice is written to the replacement's timeline on its *assigned* step: *"Used previous ACIC
+#M — in place of spoiled cheque #X."* or *"Assigned to a new ACIC #N — spoiled cheque #X was on
+ACIC #M[, which is with the teller (…)]."* A cheque that is not a replacement, or whose spoiled
+cheque was never on an ACIC, gets the usual form only. The page header's **Assign Cheque to
+ACIC** (several cheques at once) offers no choice, but still writes the note. Replacements of
+**stale** cheques (admin *Replace*) use the usual form.
+
+No assignment path adds a cheque to an ACIC that is **with a teller** (it keeps its Approved
+status while the teller has it, so `assignCheques()` checks `teller_status` too).
+
+A spoiled cheque is not perishable, so the 90-day stale rule and the 10-day alert skip it. Cheques
+voided before the rename were relabelled Spoiled (migration
+`2026_09_27_000200_rename_voided_cheques_to_spoiled`, with who and when taken from the history)
+— no replacement was issued for them.
 
 ### The rules behind every step
 
@@ -373,22 +548,36 @@ Everything funnels through `ChequeFlowService::move()`, so no step can forget a 
 - **Optimistic concurrency.** Each step may carry `expected_status` — the status the caller's
   page was showing. If the row has moved since, the step is refused with
   *"This record was updated by another user. Refresh to continue."*
-- **Dates.** Never in the future, and never before the previous step's date (routed ≥ cheque
-  date, received ≥ forwarded, released ≥ the date the ACIC was assigned, deposited ≥ accepted).
-- **The hold.** A pending correction request stops a cheque moving on; only the system's own
-  step (going stale) and the exceptions that close it are not held up.
+- **Dates.** Never in the future, and never before the previous step's date (released ≥ the
+  date the ACIC was assigned, deposited ≥ accepted). The draft steps are stamped with the time
+  they are taken.
+- **Who checks.** Approve and Return are refused for anyone but an Administrator or Super Admin,
+  in the Form Request and again in the service.
 - **Every change is written to `cheque_status_history`** — from/to status, the named action, the
   user, the timestamp and the step's own fields. **An ACIC-level action writes one row per
   cheque on that ACIC**, so each cheque's trail is complete on its own. Readable at
-  `GET /cheques/{cheque}/status-history`, and shown as the **Timeline** on the record.
-- **Roles.** Admins register, route, receive, assign, release, forward, cancel and void. Tellers
+  `GET /cheques/{cheque}/status-history`, and shown as the **Timeline** on the record. The
+  timeline **opens with the cheque being used** — *Cheque used*, by whom and when, built from
+  `used_by` / `used_at` (using a cheque writes no history row), and on a replacement *"Replaces
+  cheque #N."*
+- **Roles.** Preparers (staff, admin, Super Admin) edit, print drafts and final-print;
+  Administrators and Super Admins approve and return drafts; admins assign, release, forward, cancel and spoil; tellers
   accept, deposit and return. Enforced in the Form Requests and re-checked in the services.
 
 ### What this replaced
 
+**The draft-checking flow** (migration `2026_09_28_000000_move_cheques_onto_the_draft_checking_flow`)
+replaced *Route for Signature → Mark as Received → For ACIC*, RTS, and cheque correction requests.
+Cheques that were Out for Signature, Received or For ACIC moved to **For Signature**; their
+status history is kept as written, and those three statuses remain only so old timeline rows
+still read. The retired `review` route, which pointed at a method no longer in the code, was
+removed with them.
+
+Before that:
+
 The old `status` + `disposition` pair is folded into this one field — where a cheque *is* and
 how far it has *got* turned out to be the same question once the flow was written down. The
-admin **review** flow (Approved / Returned / Disapproved) retires with it: RTS, Cancel and Void
+admin **review** flow (Approved / Returned / Disapproved) retires with it: RTS, Cancel and Spoil (then Void)
 take its place, and **Mark as Received → For ACIC** is the sign-off. The migration
 `2026_09_24_000000_rework_cheque_status_flow` remaps every existing row — a settled disposition
 wins over the review beside it, `approved` + an ACIC becomes Approved, `complies` becomes
@@ -431,10 +620,11 @@ date on a piece of paper in a Philippine office, not an instant in UTC. `validit
 derived on save: set the cheque date and it follows, change the date and it moves (and the
 one-time alert reopens).
 
-**Eight statuses perish**: Registered, Out for Signature, Received, For ACIC, Approved,
-Forwarded to Teller, Accepted by Teller and Released to Payee. A cheque can go stale while it is
-waiting for signature, sitting with a teller, or held uncashed by the payee. Deposited,
-Cancelled, Voided, Stale and Replaced are never touched again.
+**These statuses perish**: no status (used, no draft yet), For Checking, For Compliance, For Final
+Print, For Signature, Approved, Forwarded to Teller, Accepted by Teller, Returned by Bank and
+Released to Payee. A cheque can go stale while its draft is being checked, while it waits for
+signature, sits with a teller, or is held uncashed by the payee. Deposited,
+Cancelled, Spoiled, Stale and Replaced are never touched again.
 
 | Path | Steps | Who |
 |---|---|---|
@@ -491,7 +681,7 @@ and the current status, and opens the Expiring Soon tab. What it says, and who e
 
 | Status | Message | Extra recipient |
 |---|---|---|
-| Registered · Out for Signature | *Pending signature — this cheque will become stale in N days if not released or forwarded.* | — (admins are the signatories, and are always notified) |
+| No status · For Checking · For Compliance · For Final Print · For Signature | *Pending signature — this cheque will become stale in N days if not released or forwarded.* | — (admins are the signatories, and are always notified) |
 | Released to Payee | *Released to {name} on {date} — … if not encashed. Please follow up with the payee.* | the user who released it |
 | Forwarded / Accepted by Teller | *Awaiting teller deposit — … if not deposited to Land Bank of the Philippines.* | the teller holding the ACIC |
 
@@ -515,9 +705,9 @@ replacement."*
 
 ### Editing, after the fact
 
-- **The cheque date is fixed once the cheque leaves.** It may only be changed while the
-  status is Registered; afterwards a correction naming a different date is refused, because
-  the 90-day clock runs from it.
+- **The cheque date is edited with the other details**, and only while the cheque has no status
+  or is For Compliance (§6). `validity_until` follows it, and a new date reopens the one-time
+  alert.
 - **Release details cannot be edited by the person who entered them.** Only an admin may correct
   `received_by_name` / `date_received` (`PATCH /cheques/{cheque}/release`), a reason is required,
   and the audit log records `field 'old' → 'new'` alongside it.
@@ -529,17 +719,16 @@ replacement."*
   Spoiled and Replaced read *—*.
 - **Received by column** — `received_by_name` and `date_received`, for released cheques.
 - **Badges** — one per status: teal *Released to Payee*, purple *Forwarded to Teller*, indigo
-  *Accepted by Teller*, blue *Deposited*, red *Stale* / *Cancelled* / *Voided*. The Validity
+  *Accepted by Teller*, blue *Deposited*, red *Stale* / *Cancelled* / *Spoiled*. The Validity
   column adds green (more than 10 days) / amber (10 or fewer, with an *Unsigned* / *With payee*
   / *With teller* tag) / red once stale.
 - **Banner** — *"4 cheques will become stale within 10 days (2 pending signature, 1 with payee,
   1 with teller)."* Clicking it filters to those cheques.
-- **Tabs** — All, then any status in the flow (Registered · Out for Signature · For ACIC ·
-  Approved · Released · Forwarded to Teller · Accepted by Teller · Deposited), plus
-  Expiring Soon and Stale (`GET /cheques?tab=`), and a **nearest expiry first** sort
-  (`&sort=expiry`).
+- **Filters** — the filter container above the table (see *Filtering the list*, §6), plus a
+  **nearest expiry first** sort (`&sort=expiry`). The banner's *Expiring Soon* view shows in
+  the Status dropdown while it is on.
 - **Row actions** — exactly the one step the cheque is ready for (Route for Signature · Mark as
-  Received · Assign to ACIC · Release to Payee), then the ways out (RTS · Cancel · Void) and
+  Received · Assign to ACIC · Release to Payee), then the ways out (RTS · Cancel · Spoiled) and
   Replace on a stale one. Every button is driven by a `can_*` flag the server computes, so the
   buttons and the endpoints can never disagree. The teller's actions live on the **Deposit
   queue**, not on the cheque row.
@@ -595,125 +784,55 @@ sequenceDiagram
     participant API as Laravel API
     participant DB as PostgreSQL
 
-    Staff->>API: POST /cheques/use (number + payee/amount/date)
+    Staff->>API: POST /cheques/use (number + payee/account/unit/amount/date)
     API->>DB: lock lowest available FOR UPDATE
     API-->>Staff: cheque marked USED (audit: used_cheque)
     API->>DB: notify admins (bell: kind "used", section 8)
 
-    Teller->>API: POST /cheques/{id}/receive
-    API->>API: reject if a request is pending (ON HOLD)
-    API->>DB: status → RECEIVED, record teller + time
-    API-->>Teller: cheque RECEIVED (audit: received_cheque)
+    Staff->>API: POST /cheques/{id}/print-draft
+    API->>DB: no status → FOR CHECKING (history: draft_printed)
+    API->>DB: notify every active Administrator and Super Admin (bell: kind "request")
 ```
 
 ---
 
-## 6. Workflow — detail correction (request → approval) & the hold
+## 6. Workflow — editing a cheque's details
 
-If a used/received cheque's details are wrong, **staff propose the corrected values with a
-reason**. Nothing changes until an **admin approves**. While a request is pending the cheque is
-**on hold**: neither teller receipt nor admin review (§6a) can proceed.
+A cheque's details — payee, account no., unit, amount, cheque date — are **edited directly**,
+and only while it has **no status** (used, no draft yet) or is **For Compliance** (a draft was
+returned). **Edit** on the row opens `ChequeEditModal`, pre-filled with what is saved;
+`PUT /cheques/{cheque}` (`UpdateChequeDetailsRequest`, preparers only) saves it through
+`ChequeFlowService::updateDetails()`, which refuses any other status. The number never changes.
 
-```mermaid
-flowchart TD
-    A["Staff opens a used / received cheque"] --> B["Propose corrected payee / amount / date<br/>/ ACIC no. (optional)<br/>+ required reason"]
-    B --> C["Pending request created"]
-    C --> D["Cheque is ON HOLD<br/>(teller receipt + admin review blocked)"]
-    D --> E{"Admin reviews"}
-    E -->|Approve| F["Apply proposed values to the cheque<br/>(audit: approved_update)"]
-    E -->|Reject| G["Cheque left unchanged<br/>(audit: rejected_update)"]
-    F --> H["Hold lifts"]
-    G --> H
-    H --> I["Teller can confirm receipt<br/>and an admin can review"]
-```
+Each save is a **timeline entry** (`edited`) listing every changed field's from → to, plus an
+`edited_cheque` audit entry. There is **no correction request and no hold** for cheques any
+more: a cheque that needs changing after its draft is checked is **Returned** by the admin in
+charge (§4), edited, and drafted again. Staff correction requests remain for **LDDAPs** only
+(§6c, *Update Requests*).
 
-**Rules enforced server-side** (`UpdateRequestService`)
+**Filtering the list**
 
-- Only **used or received** cheques can be requested (available ones have no details).
-- **ACIC no. is optional.** It is not captured on the use-cheque form; it is recorded later
-  through a detail-update request.
-- Only **staff** can create a request; only **admin** can approve/reject.
-- A cheque may have **one pending request at a time**.
-- A no-op request (proposed values identical to current) is rejected.
-- A request that's already approved/rejected cannot be reviewed again.
-- Approval applies the **staff-proposed** values exactly; rejection changes nothing.
-- The cheque modal shows the full **request history** with each outcome (who, when, note).
-- Creating a request notifies **admins**; approving/rejecting notifies the **requester** (section 8).
+A filter container sits above the cheque table. Every filter runs **on the server**
+(`GET /cheques`), so results cover all pages, and they all apply **together**:
 
----
+| Filter | Parameter | Matches |
+|---|---|---|
+| **Search** | `search` (max 100) | cheque number, **payee** or **account number** — a partial, case-insensitive match; `%` and `_` are taken literally. The ACIC no. is not searched. |
+| **Status** | `tab` | *All*, **No Status** (the blank status, stored `registered`), then every status in use: Available, For Checking, For Compliance, For Final Print, For Signature, Approved, Released to Payee, Forwarded to Teller, Accepted by Teller, Returned by Bank, Completed, Cancelled, Spoiled, Stale. Read through the *effective* status, so an overdue cheque is Stale. |
+| **Unit** | `unit` | *All*, or one unit from the shared PCG list (`PcgUnits::rule()`; anything else is a 422) against `cheques.unit_name` |
+| **Date Start / Date End** | `date_from`, `date_to` (`Y-m-d`) | the **cheque date**, both ends included; either may be empty. Cheques with no date (Available) drop out once a date is set. |
 
-## 6a. Workflow — admin review (approve / disapprove)
-
-Once a cheque has been issued, an **admin** signs off on it from the Action column of the cheques
-table. Two entry points, one decision:
-
-- **Approve** — a confirmation dialog only. On confirm the cheque becomes **approved**; no note
-  is required.
-- **Disapprove** — opens a dialog with a required **reason / notes** field and a **status** select
-  offering **Returned** or **Disapproved**. On confirm the chosen outcome and the note are
-  saved.
-  - **Returned** hands the cheque back to the staff member to fix what the note describes.
-    It is **not final** — once they comply, an admin reviews it again and can approve it.
-  - **Disapproved** rejects the cheque outright and is **final**.
-
-```mermaid
-flowchart TD
-    A["Admin opens an issued cheque row"] --> B{"Which button?"}
-    B -->|Approve| C["Confirm dialog"]
-    C --> D["status → APPROVED"]
-    B -->|Disapprove| E["Dialog: reason/notes + status select"]
-    E --> F{"Selected status"}
-    F -->|Returned| G["status → RETURNED<br/>note saved · returned to staff"]
-    F -->|Disapproved| H["status → DISAPPROVED<br/>note saved"]
-    D --> I["reviewed_by / reviewed_at recorded<br/>(audit: reviewed_cheque)"]
-    G --> I
-    H --> I
-    I --> J["The staff member who used it is notified"]
-    G --> K["Staff fix the deficiency"]
-    K --> A
-```
-
-**Rules enforced server-side** (`ChequeService::review()`)
-
-- Only **issued** cheques (used or received) can be reviewed — an available one has nothing to
-  check.
-- A cheque **on hold** (pending correction request) cannot be reviewed until the request is
-  resolved, the same rule that blocks teller receipt.
-- **Approved and Disapproved are terminal** — they cannot be reviewed again. A cheque sitting
-  at **Returned** stays reviewable, which is the whole point of that outcome.
-- The note is **required** for Returned and Disapproved, and not asked for on a plain
-  approval. Reviewing again **overwrites** `review_note`, `reviewed_by` and `reviewed_at` —
-  the superseded note remains in the audit log.
-- The outcome, reviewer and note are stored on the cheque (`status`, `reviewed_by`, `reviewed_at`,
-  `review_note`) and appended to the audit log as `reviewed_cheque`.
-- **Returned** is stored as the status value `complies` (and filtered as
-  `GET /cheques?status=complies`); "Returned" is its display label everywhere in the UI —
-  with one exception, below. The value was named before the label was, and is deliberately left
-  alone: it is in the API, the tab query string and the database.
-- **Once complied with, the Status badge reads differently on each side.** The stored status is
-  still `complies` — only the admin's approval of the correction moves it on — but leaving the
-  row reading "Returned" would suggest the staff member still owes work they have already
-  done. So while a correction is pending (`has_pending_update`), `StatusBadge` relabels it:
-  **staff see On Hold**, **admins (and tellers) see Complied**, and the badge drops its coral
-  "act on me" styling for cyan. The label is the only thing that changes — the status value, the
-  **Returned** tab it is filtered under, and the hold itself all stay as they are. The
-  LDDAP table does the same through `LddapStatusBadge` (section 6c).
-- Because the badge now carries the hold on a Returned cheque, `ChequeDetailModal` drops
-  its separate **On hold** chip for that status; the chip still appears on a Used or Received
-  cheque, where the badge says nothing about it.
-- The staff member who used the cheque is notified of the outcome (section 8) — and on a
-  Returned outcome that notification is also the hand-back: they are the only one who can act on
-  it afterwards. Returned arrives as a `request`-kind notification, since it is an action item rather than a verdict.
-
-**Searching the list**
-
-`GET /cheques` accepts a `search` term (max 100 chars) that matches **either the cheque number or
-the ACIC no.**, as a case-insensitive substring — so `1000` finds #10001–#10005, and `acic-2026`
-finds every cheque on that ACIC. It combines with `status` (both must match) and with pagination.
-`%` and `_` in the term are escaped and matched literally rather than acting as wildcards.
-
-On the cheques page the box sits above the table, debounced by 300 ms, and resets to page 1 on
-every new term so a match is never stranded on a later page.
+- Search filters as you type, after a 300 ms pause. **Status, Unit, Date Start and Date End apply
+  only when Filter is clicked** — changing them alone does nothing to the list. Applying goes
+  back to page 1.
+- **Date Start after Date End:** the page shows *"Date Start is after Date End, so Filter will
+  leave the dates out."*, and Filter applies the other filters without the dates. The server refuses the pair
+  anyway (`date_to` must be on or after `date_from`).
+- **Filter** (or Enter in any field) applies Status, Unit and the dates, takes the search at
+  once without waiting out the pause, and refetches the list. **Clear** resets every filter. A dashboard link's `?tab=`
+  pre-selects Status. The two buttons sit together, bottom-right; stacked full-width on phones.
+- The line under the container reads *Showing N cheques*, with *· filtered* when a filter is on.
+- At phone width the fields stack one per row; at tablet width, two per row.
 
 ---
 
@@ -776,11 +895,31 @@ opened but not filled — with the counts underneath. It is derived from `cheque
 `lddap_count` on `AcicResource`, so it always reflects membership rather than how the ACIC was
 opened.
 
-The table's tabs filter on both dimensions: **All · Cheque ACIC · LDDAP ACIC · Forwarded ·
-Completed**. The first three go to `GET /acics?category=cheques|lddaps` (a `has()` on the
-relation), the last two to `?status=`; the two parameters combine server-side, though the tab row
-lights only one at a time. A **Mixed** ACIC is listed under *both* category tabs, and an ACIC
-opened but not yet filled under neither.
+**Filtering the ACIC table.** A filter container sits above it (`IndexAcicsRequest`), in the
+Cheque page's style; everything runs **on the server** (`GET /acics`), covers all pages, and
+combines:
+
+- **Search** (`search`, max 100) — part of the **ACIC number**, or of the **cheque number**,
+  **LDDAP number**, **LDDAP check number** or **DV number** of anything on the ACIC; any case,
+  `%` / `_` literal (`Acic::scopeMatching()`). Applies as the user types (300 ms pause).
+- **Status** (`status`) — *All*, **Open · Used · Approved · Pending · Accepted by Teller ·
+  Forwarded to LBP · Forwarded to Payee · RTS · Completed** (the status the table shows —
+  see *What the ACIC tables show as Status*). Applies on
+  change. The dashboard's ACIC tiles and items link straight to it (`/acics?status=used`, …);
+  older `?tab=forwarded|completed` links still land on the right status.
+- **Clear** resets both. The line below reads *Showing N ACICs*, *· filtered* when filtered.
+
+Below it, the tabs pick what the ACIC carries: **All · Cheque ACIC · LDDAP ACIC**
+(`?category=cheques|lddaps`, a `has()` on the relation). A **Mixed** ACIC is listed under *both*
+category tabs, and an ACIC opened but not yet filled under neither. (The old Forwarded and
+Completed tabs became Status options.)
+
+**The teller's table** (Deposit Queue) has the same **Search** and a **Status** of its own axis
+— *All*, **Pending · Accepted · Forwarded to LBP · Forwarded to Payee · RTS ·
+Completed** — beside its Type and Forwarded from / to filters, with one **Clear** for all
+(`GET /acics/teller-queue`, `TellerQueueRequest`). They only **narrow** each list: Pending is
+still everyone's, the rest still the viewer's own (an admin sees all), so a teller searching for
+another teller's ACIC finds nothing.
 
 **Assign LDDAP to ACIC** (`LddapAssignModal`, on the LDDAP page beside **Add LDDAP**, and on the
 ACIC page) lists only approved LDDAPs not already on an ACIC, **multi-select** — many share one
@@ -789,12 +928,17 @@ existing open ACIC or that next number, never invented) and ticks records; a **C
 column previews the number each will take, in tick order. See [6c](#6c-lddap-ada-records) for
 the numbering and locking rules.
 
-**Assign cheque to ACIC** is the ACIC page's primary button. It opens `AcicUseModal` on the
-**next number in the sequence**, restricted to a **single** approved cheque (radio, not
-checkboxes). The ACIC itself is only opened when the dialog is submitted — cancelling out leaves
-no empty number behind — after which `POST /acics` and `POST /acics/{acic}/cheques` run back to
-back. The per-row **Use ACIC** action is unchanged and still assigns many cheques at once to an
-ACIC that already exists.
+**Assign cheque to ACIC** is the ACIC page's primary button. It opens `ChequeAssignModal` — the
+same dialog as the Cheques page's — where the user types the **ACIC #** (prefilled with the
+next in the series) and ticks **any number** of For Signature cheques: **many cheques may share
+one ACIC number**. The number must be an existing ACIC that still takes cheques (Open, Used, or
+Approved — a cheque ACIC is approved by its first assignment and keeps accepting cheques until
+it is forwarded) or the **next** in the series, which is opened only on save, so cancelling out
+leaves no empty number behind. Anything else is refused: *"ACIC #N is not open. Enter an
+existing ACIC number, or the next one in the series (#M)."* It writes through
+`POST /cheques/assign-acic` (`AcicService::assignChequesToNumber()`, one transaction; the
+number is resolved by `AcicService::resolveForAssignment()`, which LDDAPs share). The ACIC
+record's own **Use ACIC** action is unchanged and still adds cheques to that ACIC.
 
 #### Approval, re-assignment, forwarding and printing
 
@@ -893,39 +1037,37 @@ on, and what is offered follows the status:
 - Re-assigning a cheque already on *this* ACIC is a harmless no-op.
 - The first assignment moves the record Open → **Used** and stamps **Used By** / used at.
 
-**Forward** (`AcicService::forward()`)
+**Forward — to the tellers** (`POST /acics/{acic}/forward-to-teller`, admin)
 
-- **Admin only.** Records the **Forward Date** and who received it, and moves the record to
-  **Forwarded**, which is terminal.
-- An ACIC with no cheques on it cannot be forwarded, and a forwarded ACIC accepts no further
-  cheques and cannot be forwarded again.
-- The recipient is normally the **teller**, and must then be an **active** user (`received_by`).
-  When the ACIC is handed to someone with **no account** — another agency's teller, a courier —
-  the modal's "Someone else…" option records the typed-in name of whoever accepted it
-  (`received_name`) instead. Exactly **one** of the two is stored; supplying both is rejected.
-- `AcicResource` exposes `forwarded_to`, which resolves to whichever of the two applies, so the
-  ACIC and LDDAP tables render one "Forward To" column without caring which kind it is.
+- **One Forward for both kinds.** A **cheque ACIC** and an **LDDAP ACIC** are forwarded the same
+  way: the admin clicks **Forward** in the View dialog of an **Approved** ACIC and confirms —
+  *"Forward ACIC #N to the tellers? It carries n cheques…"* — **Yes, forward to Teller**. There is
+  nobody to pick.
+- The ACIC is then **Pending** on every table (its teller status; its own status stays
+  Approved underneath). Every teller is notified; each record moves to *Forwarded to Teller*.
+- It **stays Pending until a teller accepts it** — from the ACIC page's **Accept** button (under
+  the Pending badge) or the Deposit Queue. The first teller to accept takes it (a conditional
+  write); the next is told who has it.
+- After that it follows the teller flow: **Forward** (to LBP; a cheque ACIC also to the Payee), then **Action**
+  (Completed / RTS) — see §4, *Branch B*.
+- The Forward button is hidden while the tellers have it, and returns if a teller hands it back
+  to the admin. Nothing can be added to or re-assigned on it while the tellers have it.
+- **Retired:** the old recipient-pick Forward (`POST /acics/{acic}/forward`, a user or a typed-in
+  name → ACIC status *Forwarded*) and the ACIC page's teller **Complete** button
+  (`POST /acics/{acic}/complete`), which skipped Pending and Accept. ACICs that went that way
+  (#30012, #30013) keep their Forwarded / Completed history (`forwarded_at`, `received_by`,
+  `received_name`).
 
-**Complete — the teller step** (`AcicService::complete()`)
+**What the ACIC tables show as Status** (`Acic::displayStatus()`, `display_status` on the
+resource): the ACIC's own status — **Open · Used · Approved** — while it is with the admin; from
+the moment it is forwarded to the tellers, the teller's — **Pending · Accepted by Teller ·
+Forwarded to LBP · Forwarded to Payee · RTS · Completed**. The Status filter offers exactly
+those, and filters on the same thing (`Acic::scopeInDisplayStatus()`).
 
-- **Teller only**, matching the existing rule that confirming receipt is strictly the teller's job.
-  Admin and staff see the status but cannot complete.
-- Only a **Forwarded** ACIC can be completed; an Open or Used one is refused, and a completed one
-  cannot be completed again or take further cheques. **Completed is terminal.**
-- Records **completed at** and **completed by**.
-- **Cheque synchronisation.** Completing stamps the teller's receipt (`received_by` /
-  `received_at`) on every cheque on the ACIC that does not already carry one, in the same
-  transaction — so the cheque records never lag behind the ACIC that represents them. An existing
-  receipt is left alone: it belongs to whoever actually made it.
-
-**Status tabs**
-
-The ACIC page has **All / Forwarded / Completed** tabs, served by `GET /acics?status=`:
-
-- **All** — every record whatever its status, including Open and Used.
-- **Forwarded** — only records awaiting teller action. This is the teller's work queue.
-- **Completed** — records the teller has finished. A record leaves the Forwarded tab and appears
-  here the moment it is completed.
+**What a teller sees.** On the ACIC page a teller sees **only ACICs forwarded to the tellers**
+(or forwarded before that step existed) — never one still with the admin (`Acic::scopeVisibleTo()`;
+opening one by its address is a 404). Admins and staff see every ACIC. The filters only narrow
+that.
 
 Cheques carry `acic_id` rather than a free-text ACIC number, so the cheques table's "ACIC no."
 column and its search read through the link, and `ChequeResource` also reports `acic_status` so a
@@ -988,14 +1130,18 @@ request behind both Register and Edit):
 
 | Field | Column | Notes |
 |---|---|---|
-| LDDAP Number | `lddap_no` | unique across the register |
-| NCA Number · ORB Number · DV Number | `nca_no` · `orb_no` · `dv_no` | the references the disbursement is drawn against |
+| LDDAP Number | `lddap_no` | **format `00-00-00000`** (two digits, two digits, five digits — the box inserts the dashes as the digits are typed); anything else is refused with *"LDDAP Number must be in the format 00-00-00000."* — on register, edit, a staff correction and an admin's direct correction (`App\Support\DashedNumber`); unique across the register |
+| NCA Code | `nca_no` | **format `0000000`** — exactly 7 digits, digits only (the box keeps only digits, up to 7); stored as text so leading zeros stay; anything else is refused with *"NCA Code must be exactly 7 digits."* |
+| OBR Number | `obr_no` | formerly *ORB Number* (column renamed from `orb_no`) |
+| DV Number | `dv_no` | **format `00-00-00000`**, like the LDDAP Number (the box inserts the dashes; *"DV Number must be in the format 00-00-00000."*); **unique** — trimmed, then checked on save (*"DV Number already exists."*) by the form request, again under a lock in the service, and by the `lddaps_dv_no_unique` index |
 | Nature of Payment | `nature_of_payment` | `NatureOfPayment` enum; offered in caps, e.g. **PAYROLL / PERSONAL CLAIMS**, **LOCAL TRAVEL**, **POL** |
 | UACS Object Code | `obj_no` | *optional*; the same column that always held OBJ No. — it is what prints as OBJ CODE on the ACIC |
-| Unit Name | `unit_id` → `units` | select, from the `units` reference table |
+| Unit Name | `unit_name` | required; the [PCG unit dropdown](#6f-pcg-units), saved as the unit's name |
 | Date Issued | `check_date` | `type="date"`, defaults to today |
-| Payee | `payee_id` → `payees` | searchable lookup by name **or account number**; results in a table (Payee · Account Number · **Select**) |
-| Account Number | `payee_account_id` → `payee_accounts` | select of the payee's accounts as `account number – bank`; **auto-picked when there is only one** |
+| Payee | `payee_name` | one search over **Creditors and PCG Personnel** (by name or account number); results show Payee · Account No. · **Type** · Select |
+| Payee Type | `payee_type` | read-only — `creditor` / `pcg_personnel` (*Creditor* / *PCG Personnel*), from the list the payee was picked from |
+| Account Number | `payee_account_no` | read-only — the payee's account number |
+| *(Unit Name)* | `unit_name` | filled from the payee's unit when it is on the PCG list; still a dropdown |
 | ACIC # | `acic_ref` | *optional*; the number written on the form — distinct from `acic_id`, the ACIC it is later put on |
 | Gross Amount | `gross_amount` | `decimal(14,2)` |
 | W/TAX 0.01 · 0.02 · 0.03 · 0.05 | `wtax_1` … `wtax_5` | `decimal(14,2)`, default 0 |
@@ -1021,148 +1167,84 @@ and marks the rate **active**; changing the gross recomputes every active rate i
 Typing in an amount keeps it and drops the rate from the active set, so a manual figure is never
 silently overwritten. Amounts default to 0 and stay editable.
 
-- **The payee is chosen, not typed.** `GET /payees?search=` matches registered payees by name
-  or any of their account numbers (case-insensitive, capped at 15) and returns each with its
-  `accounts` (`account_no`, `bank`, `label`). A payee may hold **several accounts**
-  (`payee_accounts`); the form's Account Number select offers them and picks a lone one
-  automatically, and the server does the same when `payee_account_id` is omitted for a
-  single-account payee. An account that is not the chosen payee's own is refused. On registration
-  the payee's **name, account number and bank are copied** onto the record (`payee_name`,
-  `payee_account_no`, `payee_bank`), so an LDDAP reads the same forever even if the payee or the
-  account is later edited.
-- `GET /lddaps/options` serves the two selects in one call: every nature of payment
-  (`value` + caps `label`) and every unit on file, name order.
-- **Units and payees are reference lists** (`units`, `payees`) with no admin screen yet — they
-  are populated by the seeder (sample entries) or directly. The dialog says so when either is
-  empty. Staff **corrections** still cover the original four fields (LDDAP No., UACS code, payee
+- **The payee is chosen from Creditors and PCG Personnel.** `GET /lddaps/payee-options?search=`
+  (admin/staff, `LddapPayeeSearchRequest`) lists both tables in one name-ordered list, matched
+  by name or account number, each with `type`, `type_label`, `name`, `account_no` and `unit`.
+  Selecting one fills **Payee Type**, **Account Number** and **Unit**; picking another refills
+  them, clearing empties them. The form sends `payee_type` + `payee_ref` (the record's id); the
+  server looks it up (`Rule::exists` on the named table) and **copies** `payee_name`,
+  `payee_type` and `payee_account_no` onto the LDDAP. **Nothing links back**: editing the
+  Creditor or PCG Personnel entry later never changes a past LDDAP. On an edit that does not
+  re-pick the payee, the saved copy is kept. LDDAPs from before this keep their old payee copy
+  and a **blank Payee Type**; the old `payees` / `payee_accounts` tables and `payee_id` /
+  `payee_account_id` / `payee_bank` columns remain only for them.
+- `GET /lddaps/options` serves the nature-of-payment select: every nature (`value` + caps
+  `label`). Units are the shared [PCG unit list](#6f-pcg-units), which the app imports.
+- Staff **corrections** still cover the original four fields (LDDAP No., UACS code, payee
   name, amount); the new references are set at registration.
-- The LDDAP table shows the references stacked in one **References** column (NCA / ORB / DV),
+- The LDDAP table shows the references stacked in one **References** column (NCA / OBR / DV),
   plus **Nature**, **Unit** and **UACS Code**, with the payee's account number beneath the payee
   name; the list search matches all of them.
 
 ### Lifecycle
 
-The LDDAP has **no cheque to inherit a status from**, so it carries its own, mirroring the cheque
-lifecycle step for step.
+The LDDAP has **no cheque to inherit a status from**, so it carries its own. Before an ACIC there
+is one status, **For Signature**; everything after the ACIC is unchanged.
 
 ```mermaid
 stateDiagram-v2
-    ForOut: For Out
-    ReturnedForAcic: Returned for ACIC
-    [*] --> Registered: "Add LDDAP"
-    Registered --> ForOut: Forward
-    ForOut --> ReturnedForAcic: Receive
-    ReturnedForAcic --> Approved: Action · Approved
-    ReturnedForAcic --> RTS: Action · RTS (own form, comment required)
-    RTS --> ForOut: (edit) then Forward again
-    ReturnedForAcic --> Canceled: Action · Cancel (own confirmation, reason required)
-    Approved --> Approved: put on an ACIC — takes the next check number
-    Approved --> [*]: eligible for an ACIC
+    ForSignature: For Signature
+    ApprovedOnAcic: Approved (on the ACIC)
+    [*] --> ForSignature: "Add LDDAP"
+    ForSignature --> ApprovedOnAcic: Assign LDDAP to ACIC — takes the next check number
+    ForSignature --> RTS: RTS (admin · own form, comment required)
+    RTS --> ForSignature: (edit) then Resubmit (comment required, notes optional)
+    ForSignature --> Canceled: Cancel (admin · own confirmation, reason required)
+    ApprovedOnAcic --> ForSignature: taken off the ACIC (re-assign)
+    ApprovedOnAcic --> [*]: Forward to Teller → Accepted → Completed (as before)
     Canceled --> [*]: closed, read-only; LDDAP number stays used
 ```
 
-- **Registered** — created through **Add LDDAP** (`POST /lddaps`, admin/staff): **one record
-  per submission**, no check number. The LDDAP number is unique (`lddaps_lddap_no_unique` at the
-  database, `Rule::unique` in the form request, a locked re-check in `LddapService::register()`),
-  and a duplicate is refused by name.
-- **For Out** — the **Forward** action on a Registered record (`POST /lddaps/{lddap}/forward`,
-  admin/staff): *Forward To*, *Unit Name* (select), *Date Forwarded*, *Note*; *Forwarded By* is
-  the signed-in user. Stored on the record (`forward_to`, `forward_unit_id`, `forwarded_by`,
-  `date_forwarded`) and in the trail.
-- **Returned for ACIC** — the **Receive** action on a For Out record
-  (`POST /lddaps/{lddap}/receive-back`, admin/staff): *From Unit Name* (select), *Date Received*,
-  *Note*; *Received By* is the signed-in user. Stored as `return_unit_id`, `returned_by`,
-  `date_returned`.
-- **Action** — on a Returned for ACIC record, admin only. Above the buttons the dialog shows
-  **the essentials of the record** (`LddapRecordDetails`, `compact`): LDDAP No., DV No., nature
-  of payment, unit, date issued; the payee with account and bank; then the money — gross, only
-  the W/TAX and VAT rates and deductions that actually apply, and **Net payable** as gross −
-  withheld — plus the registration note if any. *Show every registered detail* expands it to
-  the full record in the register form's sections (**LDDAP Details**, **Payee**, **W/TAX** and
-  **VAT** with every rate, **Deductions**, **Net payable**, **Notes**), which is also what the
-  record's detail dialog shows. Three buttons:
-  - **Approved** (`POST /lddaps/{lddap}/approve`) — signed off; now offered by **Assign LDDAP to
-    ACIC**.
-  - **RTS** (`POST /lddaps/{lddap}/rts`) — Return to Sender, a status of its own with an **amber**
-    badge. Taken through its own form: *Date Received*, *Received By*, *RTS Unit* (select), *RTS
-    Date* and a **required Comment**. Not a verdict — nothing is stamped as reviewed. An RTS
-    record **can be edited** (staff correction or admin direct edit — details only, the status
-    stays RTS) and then **forwarded again** with the same Forward fields, back to For Out, on
-    round the routing once more. **Every RTS is its own history row** (`received_by_name`,
-    `received_on`, `unit_id`, `acted_on`, `note`); nothing is overwritten, so a record returned
-    three times keeps all three. The list carries `rts_count`, shown as an **RTS: n** badge
-    beside the status in the table and the record; the record's **RTS History** section lists
-    every return newest first — Date Received · Received By · RTS Unit · RTS Date · Comment —
-    and is hidden when there has been none.
-  - **Cancel** (`POST /lddaps/{lddap}/cancel`) — closed for good, through its own
-    confirmation dialog: *Canceled By* (the signed-in admin, read-only), *Date Canceled*
-    (defaults to today) and a **required Reason**. Stored as `canceled_by`, `date_canceled` and
-    `cancel_reason` (the reason is also the review note, and `reviewed_by` / `reviewed_at` are
-    stamped, so the audit reads the same as any other outcome). The status becomes
-    **Canceled** — its own red badge and its own **Canceled** filter tab. From then on the
-    record is **read-only**: no Edit, Forward, RTS, Approve or Assign is offered, and the server
-    refuses every routing step, any correction (staff request or admin direct edit) and any ACIC
-    assignment — a canceled record is never listed in **Assign LDDAP to ACIC**. **The LDDAP
-    number stays used**: it cannot be registered again. The record shows a **Cancellation
-    Details** section — Canceled By · Date Canceled · Reason — only when canceled.
-- **Only the next valid step is ever allowed.** `LddapStatus::canForward()` (Registered *or*
-  RTS), `canReceive()` and `awaitsAction()` name it, the resource exposes them (`can_forward`, `can_receive`,
-  `awaits_action`), the table offers only that button, and `LddapService::assertStep()` refuses
-  anything else server-side with the record's actual status in the message. A pending correction
-  holds the record at every step.
-- **Every step is a history entry.** `lddap_routing_history` records the action, the statuses
-  either side, the user, the unit and counterparty, the date and the note — appended by
-  `LddapService::trail()` on registration and each step, readable at
-  `GET /lddaps/{lddap}/routing-history`, and shown on the record as its **Routing trail**.
-- **The old "Returned" status is gone**, together with `returned_from_routing` and the legacy
-  `used` / `received`. The migration
-  `2026_09_22_000000_route_lddaps_through_for_out_and_returned_for_acic` remaps every record on
-  those statuses to **Returned for ACIC** — awaiting the admin's action, check numbers intact —
-  through a public `remap()` that the test suite exercises directly. Approving a correction no
-  longer moves a record; the correction path now runs through RTS.
-- **"Cancelled" is spelt `canceled`** since the Cancel rework. The migration
-  `2026_09_22_000200_add_cancellation_details_to_lddaps` adds the three cancellation columns and,
-  through its own public `remap()`, moves every record and history row on the old `cancelled`
-  value to `canceled`, back-filling *Canceled By / Date Canceled / Reason* from the review stamp
-  the old Cancel left.
-- **Assign LDDAP to ACIC** is when the check number arrives. Approved records with no ACIC are
-  listed; the user ticks one or more and names the ACIC number; on save every ticked record
-  goes on that ACIC and the batch takes a **consecutive block** of check numbers:
-  - N records take numbers k … k+N−1 with **no gap** — the first such run in the registered
-    series, searching **up from the lowest unused** number.
-  - A run broken by a used (or never-registered) number is **skipped whole**. With 1 and 2 free
-    and 3 used, three records take 4–6; **1 and 2 stay free** for a later batch of one or two.
-    A batch never straddles the gap between two registered blocks.
-  - Numbers go out **in the order the records were ticked**.
-  - `LddapCheckAllocator::claim()` runs inside the assignment transaction: it first locks the
-    lowest unused row `FOR UPDATE` — every allocator contends for that same row, so two users
-    assigning at once run one after the other — then locks the chosen block and confirms each
-    number is still free. Two users can never receive overlapping numbers.
-  - The dialog **previews the block** (`GET /lddaps/next-numbers?count=N`, refetched as the
-    selection changes) and sends it with the save. If any previewed number has since been taken
-    the save is refused naming that number — *"Check number X is already used. Please refresh
-    and try again."* — and the dialog recomputes and shows the next whole block.
-  - Numbers are never reused: `lddap_checks.check_no` and `lddaps.lddap_check_id` are both
-    unique. Who did it and when is written to the audit log (`used_acic`, naming each record
-    and its number) and to the ACIC's `used_by` / `used_at`.
-- **Check # is read-only everywhere.** No form takes one; the only way a record gets a number
-  is by going on an ACIC. `lddaps.lddap_check_id` is nullable so records before that point stand
-  without one.
-- A record **re-assigned off** an ACIC keeps the number it was issued; the one swapped on takes
-  the next.
-- **Teller receipt** presupposes a check number, i.e. an ACIC; it stamps `received_by` /
-  `received_at` and leaves the status alone.
-- **Teller** confirms receipt (`POST /lddaps/{lddap}/receive`), exactly as for cheques.
-- **Admin** takes the action on a Returned for ACIC record (`POST /lddaps/{lddap}/approve`,
-  `/rts`, `/cancel` — see *Routing* above). Approved and Canceled are final — a record in either
-  state takes no further step.
-- Only **Approved** records may go on an ACIC.
+- **For Signature** — set by **Add LDDAP** (`POST /lddaps`, admin/staff): **one record per
+  submission**, no check number. **No status comes before it.** The LDDAP number is unique
+  (`lddaps_lddap_no_unique` at the database, `Rule::unique` in the form request, a locked
+  re-check in `LddapService::register()`), and a duplicate is refused by name. A For Signature
+  record can be **edited** (Edit LDDAP Record), **assigned to an ACIC**, or — by an admin —
+  **RTS**'d or **Canceled**.
+- **Assign LDDAP to ACIC** — only For Signature records are offered or accepted. Going on the
+  ACIC gives the record its check number and makes it **Approved** — the status now means "on
+  an ACIC, not yet with the tellers" — with an `assigned` trail entry. Taken off again by a
+  re-assign, it goes back to For Signature (`unassigned`).
+- **RTS** (`POST /lddaps/{lddap}/rts`, admin, on a For Signature record) — Return to Sender,
+  with an **amber** badge. Taken through its own form, unchanged: *Date Received*, *Received By*,
+  *RTS Unit* (PCG unit dropdown), *RTS Date* and a **required Comment**. Not a verdict — nothing
+  is stamped as reviewed. An RTS record **can be edited** (Edit LDDAP Record, a staff correction
+  or an admin direct edit — details only, the status stays RTS). **Every RTS is its own history
+  row** (`received_by_name`, `received_on`, `unit_name`, `acted_on`, `note`); the list carries
+  `rts_count`, shown as an **RTS: n** badge, and the record's **RTS History** lists every return.
+- **Resubmit** (`POST /lddaps/{lddap}/resubmit`, admin/staff, on an RTS record,
+  `ResubmitLddapRequest`) — once corrected, back to **For Signature**, with a **required
+  Comment** (what was corrected) and optional **Notes**, both on a `resubmitted` trail entry
+  (`note`, `notes`).
+- **Cancel** (`POST /lddaps/{lddap}/cancel`, admin, on a For Signature record) — its own
+  confirmation, unchanged: *Canceled By* (the signed-in user), *Date Canceled*, a **required
+  Reason**, stored on the record (`canceled_by`, `date_canceled`, `cancel_reason`) and in the trail.
+  Status **Canceled**, read-only from then on; its LDDAP number stays used.
+- **Retired:** *Registered*, *For Out* (Forward), *Returned for ACIC* (Receive) and the Approve
+  sign-off — with their buttons, forms, filters and dashboard tiles. Their saved data
+  (`forward_to`, `forward_unit_name`, `forwarded_by`, `date_forwarded`, `return_unit_name`,
+  `returned_by`, `date_returned`, and the *forwarded* / *received* / *approved* trail rows) stays
+  in the database and is **shown on no page**: the API no longer sends those columns and the
+  routing trail leaves those rows out. Migration
+  `2026_09_28_000200_lddaps_start_at_for_signature` moved any record on a retired status —
+  and any Approved record not on an ACIC — to For Signature.
+- Every step is a `lddap_routing_history` entry (user, date, note) and an audit-log line.
 
 ### Linking to an ACIC
 
-- Only **Approved** LDDAPs can be linked; the picker offers nothing else and the server
-  re-checks under a lock, naming the offending **LDDAP numbers**.
-- **Many approved LDDAPs to one ACIC** is the normal case; the picker is multi-select and can
+- Only **For Signature** LDDAPs can be linked; the picker offers nothing else and the server
+  re-checks under a lock, naming the offending **LDDAP numbers**. Linking makes them **Approved**.
+- **Many LDDAPs to one ACIC** is the normal case; the picker is multi-select and can
   open the next ACIC in the sequence without leaving the modal.
 - Membership lives on `lddaps.acic_id`. An LDDAP already on **another** ACIC is refused — the
   duplicate guard — while re-assigning to the *same* ACIC is a harmless no-op.
@@ -1172,12 +1254,12 @@ stateDiagram-v2
 
 ### Editing a record — "Edit LDDAP Record"
 
-While a record is in the registrant's hands — **Registered**, or **RTS**'d back to them — it is
+While a record is **For Signature** (not yet on an ACIC), or **RTS**'d back, it is
 edited through **the register form itself**. **Edit**, inside the record's detail dialog (from
 View or the LDDAP number), opens the same dialog as *Add LDDAP*, titled **Edit LDDAP Record**, with **every
-field pre-filled** from the saved values: LDDAP, NCA, ORB and DV numbers, nature of payment,
-unit, date issued, the payee and its account (the saved payee is fetched with its accounts —
-`GET /payees/{payee}` — so the picker shows the current choice and can still change it), UACS
+field pre-filled** from the saved values: LDDAP number, NCA Code, OBR and DV numbers, nature of
+payment, unit, date issued, the payee with its type and account number (the copy saved on the
+record — kept unless a new payee is picked), UACS
 object code, gross amount, every W/TAX and VAT amount, retention, liquidated damages, advance
 payment, FWD to LBP, date loaded, note and remarks. The rate buttons recompute from the gross
 exactly as when registering. **Check #** and **ACIC #** are shown read-only — the check number
@@ -1186,8 +1268,8 @@ is only ever set by *Assign LDDAP to ACIC* — and the button reads **Save Chang
 - One form for both: `LddapRegisterModal` (with a `lddap` prop) on the client,
   `LddapDetailsRequest` on the server, and `LddapService::attributes()` building the columns
   for `register()` and `update()` alike — so the two never drift apart.
-- `PUT /lddaps/{lddap}` (admin/staff). **Registered and RTS only** — For Out, Returned for ACIC,
-  Approved and Canceled are refused (*"cannot be edited"*) and get no Edit button
+- `PUT /lddaps/{lddap}` (admin/staff). **For Signature and RTS only** — Approved (on an ACIC)
+  and later statuses, and Canceled, are refused (*"cannot be edited"*) and get no Edit button
   (`LddapResource.can_edit`, `LddapStatus::canEdit()`). Refused while a correction request pends.
 - **The LDDAP number stays unique**, but the record's own number is not a duplicate of itself
   (`Rule::unique()->ignore()` in the request, and the locked re-check skips the record).
@@ -1200,11 +1282,10 @@ is only ever set by *Assign LDDAP to ACIC* — and the button reads **Save Chang
 
 ### Correcting the details
 
-Once a record is **out of the registrant's hands** — For Out, Returned for ACIC, Approved — it is
-not edited. Staff **propose** a correction with a reason, and an admin reviews and applies it —
+Once a record is **on an ACIC** — Approved or later — it is not edited. Staff **propose** a correction with a reason, and an admin reviews and applies it —
 the same request/approve flow the cheque register uses (`LddapUpdateRequestService`) — or an
 admin applies one directly (*Correct details*, reason required). Neither is offered on a
-Registered or RTS record, where Edit applies instead.
+For Signature or RTS record, where Edit applies instead.
 
 ```mermaid
 flowchart LR
@@ -1230,11 +1311,10 @@ flowchart LR
 
 A correction changes the **details only** — it never moves a record in its routing. Approving
 one applies the proposed values and leaves the status exactly where it was. The route back for a
-record that came in wrong is the admin's **RTS** action on a Returned for ACIC record: it becomes
+record that came in wrong is the admin's **RTS** action on a For Signature record: it becomes
 **RTS**, the staff member **edits** it (Edit LDDAP Record — the full form), and once it is right
-it is **forwarded again**. The record carries the whole loop in its routing trail —
-registered, forwarded, received, RTS, forwarded, received, approved — and each RTS in its RTS
-History.
+it is **resubmitted** to For Signature. The record carries the whole loop in its routing trail —
+added, RTS, resubmitted, assigned to ACIC — and each RTS in its RTS History.
 
 A **canceled** record is closed: a correction on it — proposed by staff or applied directly by
 an admin — is refused (*"is canceled and can no longer be edited"*), as are every routing step
@@ -1244,8 +1324,7 @@ and any ACIC assignment.
 
 An admin does not have to send a record back to change it: `PATCH /lddaps/{lddap}` applies the
 correction **immediately**. It is reachable from two places, both admin-only: the detail modal
-(from the LDDAP number), as **Correct details** on a record that is out of the registrant's
-hands (For Out, Returned for ACIC, Approved).
+(from the LDDAP number), as **Correct details** on a record that is on an ACIC (Approved or later).
 
 - **The reason is mandatory.** A change with no second pair of eyes has to say why it was made.
 - It is written into the **same correction history**, flagged `applied_directly`, so a record has
@@ -1277,23 +1356,30 @@ actually next.
 
 | Status | Who | Action |
 |---|---|---|
-| **Registered** | Admin/Staff | **Forward** — Forward To, Unit, Date Forwarded, Note (Edit lives in the record dialog) |
-| **For Out** | Admin/Staff | **Receive** — From Unit, Date Received, Note |
-| **Returned for ACIC** | Admin | **Action** — Approved · RTS (opens the RTS form) · Cancel (opens the cancel confirmation: Canceled By · Date Canceled · Reason) |
-| **RTS** | Admin/Staff | **Forward** — corrected (via Edit in the record dialog), out again with the same Forward fields |
-| **Approved** | Admin/Staff | **Assign** — put it on an ACIC; this is when it takes its check number |
-| Approved (already linked) | — | `On ACIC #n` — forwarding is the ACIC's own step |
+| **For Signature** | Admin/Staff | **Assign to ACIC** — this is when it takes its check number (Edit lives in the record dialog) |
+| **For Signature** | Admin | **RTS** (opens the RTS form) · **Cancel** (opens the cancel confirmation: Canceled By · Date Canceled · Reason) |
+| **RTS** | Admin/Staff | **Resubmit** — once corrected (via Edit in the record dialog): Comment (required) · Notes |
+| **Approved** and on (on an ACIC) | — | nothing on the row — the ACIC No. column says where it is; forwarding is the ACIC's own step |
 | **Canceled** | — | `Canceled <date>` — read-only; nothing is offered |
 
 - The LDDAP number in the first column is itself the link to the full record, so there is no
-  separate View action; the record shows its **Routing trail** and its correction history.
+  separate View action; the record shows its **Timeline** (the routing trail) and its correction history.
+  The Timeline runs from *Added* through *Assigned to ACIC* and on through the ACIC's teller
+  steps — **Forwarded to Teller**, **Accepted by Teller**, **Completed**, **Returned by Bank**,
+  **Returned to Admin** — each written on every LDDAP on the ACIC when the ACIC takes that step
+  (`AcicTellerService`), with who, when and *"ACIC #N"* plus any reason. Older teller rows,
+  written with the generic *forwarded* action, are shown named by the status they moved to;
+  only the retired For Out / Receive / Approve rows stay hidden.
 - The status badge sits in the table's Status column.
-- **Filter bar** above the table — *Search*, *Status* (All · Registered · For Out · Returned for
-  ACIC · Approved · RTS · Canceled), *Nature of Payment* (All plus the register form's list, from
-  `GET /lddaps/options`), then **Filter** and **Clear**. Nothing applies until Filter is pressed
-  (Enter in the search box does the same); Clear resets every field and shows all records. The
+- **Filter bar** above the table — *Search*, *Status* (All · For Signature · RTS · Approved ·
+  Forwarded to Teller · Accepted by Teller · Completed · Canceled), *Nature of Payment* (All plus the register form's list, from
+  `GET /lddaps/options`), *Payee Type* (All · Creditor · PCG Personnel — `lddaps.payee_type`;
+  older records with a blank type show only under All), then **Filter** and **Clear**, together
+  on a row below the fields. **Search applies as you type** (after a 300 ms pause, from page 1);
+  Status, Nature of Payment and Payee Type apply only when Filter is pressed
+  (Enter does the same); Clear resets every field and shows all records. The
   filters **combine (AND)** and are applied **server-side** as the query string of `GET /lddaps`
-  — `?search=&status=&nature=&page=` — which the page keeps in its own URL, so a filtered view
+  — `?search=&status=&nature=&payee_type=&page=` — which the page keeps in its own URL, so a filtered view
   survives a refresh and can be bookmarked, the inputs keep their values after filtering, and
   Prev/Next carry the filters (the paginator's links do too). A line above the table reads
   *Showing 12 records* (or *Showing 51–100 of 120 records* when paged), and *No records found*
@@ -1314,54 +1400,31 @@ actually next.
 Forwarding happens on the **ACIC**, not on the individual LDDAP — see
 [6b · Forward](#6b-acic-records). Every LDDAP on that ACIC shows the same Forward To / Date in
 its row, but the action itself is taken only from the ACIC page's **View** dialog, on an
-approved ACIC. The LDDAP table reports where the record sits; it does not act on the ACIC.
+approved ACIC. (The LDDAP's own old Forward / Receive steps are retired; see *Lifecycle*.) The LDDAP table reports where the record sits; it does not act on the ACIC.
 
 ---
 
 ## 6d. Cheque table — actions by status
 
-The cheque table's action column is driven entirely by the cheque's status, so each row offers
-only the step that is actually next.
+The cheque table's action column is driven by server-computed flags (`can_*`), so each row offers
+only what is next, and only to whoever may take it.
 
 | Status | Who | Action |
 |---|---|---|
 | Available (next in line) | Admin/Staff | **Use** — record the details and put the number into use |
-| Available (next in line) | Teller | `Use from the panel above ↑` |
+| Available (next in line) | Teller | `Use from the panel above` |
 | Available (not next) | — | **Locked** — only the lowest available number may be used |
-| **Used** / Received | Admin | **Review** — the single entry point; nothing else is shown |
-| **Returned** | Staff *(the one it was returned to)* | **Action** — opens the dialog for editing the details |
-| Returned | Any other staff | `Returned to {name}` — read-only; the correction is theirs |
-| Returned (complied) | Staff | Status reads *On Hold*; row reads `Update awaiting admin approval` |
-| Returned (complied) | Admin | Status reads *Complied*; the correction is approved from **Update Requests** |
-| Returned | Admin | **Review** — to finish the cycle once the update is approved |
-| **Approved** | any | **View** — the cheque's face, printable onto Landbank stock |
-| **Approved** | Admin/Staff | **Assign** — put it on an ACIC |
-| Approved (already linked) | — | `On ACIC #n` |
-| Disapproved | — | `Reviewed <date>` |
+| *(no status)* | Preparers | **Edit** · **Print Draft** · Cancel (admin) |
+| **For Checking** | Administrator / Super Admin | **Approve** · **Return** — both open the draft to check |
+| For Checking | Everyone else | `With the admin in charge` |
+| **For Compliance** | Preparers | **Edit** · **Print Draft** — the detail view leads with what to change |
+| **For Final Print** | Preparers | **Final Print** |
+| **For Signature** | Admin | **Assign to ACIC** |
+| **Approved** and on | any | **Print** — reprint the cheque's face; the Branch A/B steps as before |
 
-**Review** (`ChequeReviewModal`, mode `review`) offers all three outcomes in one dialog —
-Approved, Returned, Disapproved. A straight approval needs no note; the other two require
-one, matching `ReviewChequeRequest`. The older `approve` / `disapprove` modes still exist for
-callers that want a narrowed dialog.
-
-**Action** (`ChequeDetailModal`, mode `action`) is the return path, and is **the** staff
-member's to take — the one who used the number:
-
-- **A returned cheque goes back to exactly one person.** `ChequeService::review()` notifies them
-  (`Cheque #n returned to you` — *"…it needs your attention before it can be signed off"*, plus
-  the note), and only they may correct it. Another staff member sees `Returned to {name}` in the
-  Action column and gets no correction form in the detail modal;
-  `UpdateRequestService::create()` refuses their request by name, so the UI and the server agree.
-  The restriction is specific to a returned cheque — proposing an ordinary correction on a used
-  cheque stays open to any staff member.
-- The **review outcome section is hidden** — deciding the outcome is not their call. In its place
-  the dialog leads with the admin's note, which is the instruction they have to act on.
-- The correction CTA reads **Edit Details** rather than "Request an update".
-- Submitting raises an ordinary update request: it goes to the admin for approval, and the cheque
-  **stays Returned** until they approve it. That approval is the sign-off — it applies the
-  details and moves the cheque straight to **Approved**, ready to be assigned to an ACIC.
-- While that request is pending the row reads *Update awaiting admin approval*, and the cheque is
-  on hold for teller receipt and for review as usual.
+The **Status** filter lists every status in flow order, starting with **No Status** (a used cheque
+with no draft yet); see *Filtering the list*. Each cheque's **Timeline** in its detail view lists every step in
+order with who took it, when, and any comment.
 
 **Use** on an *available* cheque (`ChequeUseModal`) is the row entry point for a cheque that has
 just been registered, offered to **admin and staff** — the two roles that put numbers into use:
@@ -1371,31 +1434,150 @@ just been registered, offered to **admin and staff** — the two roles that put 
   server would refuse. Right after a first range is added, that next-in-line cheque *is* the
   newly added one; when a new book is registered above numbers still available in an older one,
   the older number is used first and gets the button.
-- It captures the same details as the next-in-line panel (payee, amount, cheque date) and writes
+- It captures the same details as the next-in-line panel (payee; **Account No.** — optional,
+  text so leading zeros are kept; **Unit** — optional, the [PCG unit dropdown](#6f-pcg-units);
+  amount; cheque date) and writes
   through the same `POST /cheques/use`, so the number is still re-checked against the real
   next-available row **under a lock**. The dialog is a second way in, never a way around the
   sequence.
 - A **teller** gets no button; their next-in-line row still points at the panel above.
 
-**View** (`ChequeViewModal`) exists for an **approved** cheque only — the row shows the button for
-that status alone, and `GET /cheques/{cheque}/print` refuses any other. It shows the cheque's
-face at real size on a white ground, laid out to the Landbank cheque: Check No., Date, Pay to
-the Order of, the amount in figures (`₱185,369.86`) and in words (*"One Hundred Eighty-Five
-Thousand Three Hundred Sixty-Nine Pesos and 86/100 Only"*, from `AmountInWords::cheque()`), the
-account the cheque is drawn on (`config('acic.account_no')`), and a reference line with the ACIC
-# (a cheque carries no LDDAP number; that slot is empty). **Print** outputs only the fields —
-no dialog, buttons or page — at cheque size (`@page cheque { size: 178mm 76mm }`), each field at
-a fixed millimetre position on `.cheque-face` in `app.css`, where **every measurement sits in
-one block** to be tuned after a test print on pre-printed stock. The pre-printed labels are
-drawn faintly on screen and dropped in print. The face is portalled to `<body>` for printing,
-as the ACIC form is.
+**The print view** (`ChequeViewModal`) has four modes, and scrolls within the screen on a phone:
 
-**Assign** is the next step after sign-off. It opens `AcicUseModal` — the same dialog as the ACIC
-page's **Assign cheque to ACIC** button — with the clicked cheque preselected: **one** approved
-cheque, onto the **next number in the sequence**, which is opened only on submit. It writes
-through `POST /acics` then `POST /acics/{acic}/cheques`, the same locked paths the ACIC page uses,
-so the eligibility and duplicate rules in [6b](#6b-acic-records) apply unchanged. Only approved
-cheques not already on an ACIC are listed.
+- **Print Draft** — for a cheque with no status or For Compliance. The face carries a **DRAFT**
+  watermark (`.cheque-draft-mark`, on screen and paper). The button submits the draft first
+  (`POST /cheques/{cheque}/print-draft`) and prints second.
+- **Final Print** — for a For Final Print cheque. Prints clean, then asks *"Did cheque #N print
+  successfully?"*; **Yes, it printed** calls `POST /cheques/{cheque}/final-print` (→ For
+  Signature), *No — print again* stays put.
+- **Check Draft** — for an admin in charge on a For Checking cheque (`can_check_draft`), opened
+  by the row's **Approve** or **Return**. Shows the watermarked draft, a **Comment** box
+  (required to Return — the button stays disabled until there is one — optional to Approve),
+  and **Print**, **Return** and **Approve**.
+- **Print** — a reprint from the row, for a cheque on an ACIC (`can_print`).
+
+`GET /cheques/{cheque}/print` serves all three: `draft: true` while the cheque has no status,
+is For Checking or For Compliance; clean from For Final Print on; refused for a Cancelled,
+Spoiled or Stale cheque. The face is laid out to the Landbank cheque at real size: Check No.,
+Date, Pay to the Order of, the amount in figures (`₱185,369.86`) and in words (*"One Hundred
+Eighty-Five Thousand Three Hundred Sixty-Nine Pesos and 86/100 Only"*, `AmountInWords::cheque()`),
+the account it is drawn on (`config('acic.account_no')`), and the ACIC # once there is one.
+Printing outputs only the fields at cheque size (`@page cheque { size: 178mm 76mm }`), each at a
+fixed millimetre position on `.cheque-face` in `app.css`, tuned in one block after a test print.
+
+**Assign** is the step after Final Print. The row's **Assign to ACIC** button opens
+`ChequeAssignModal` with that cheque ticked; the page header's **Assign Cheque to ACIC** button
+(admin/staff) opens it with nothing ticked. Either way the user types the **ACIC #** (prefilled
+with the next in the series) and may tick **more For Signature cheques — many may share one ACIC
+number**. It writes through `POST /cheques/assign-acic`; the rules are in
+[6b](#6b-acic-records). Only For Signature cheques not already on an ACIC are listed.
+
+---
+
+## 6e. Creditors & PCG personnel
+
+Two reference lists of the same shape, each with its own page — **Creditors** (`/creditors`,
+table `creditors`) and **PCG Personnel** (`/pcg-personnel`, table `pcg_personnel`) — kept by
+**admins and staff** (tellers get neither the nav links nor the endpoints). Neither is linked to
+cheques or LDDAPs yet.
+
+| Column | Stored as | Set by |
+|---|---|---|
+| Creditor Name / Personnel Name | `name` — text, required | the user |
+| Account No. | `account_no` — **text**, required, so leading zeros are kept | the user |
+| Unit | `unit` — optional; the [PCG unit dropdown](#6f-pcg-units), saved as the unit's name | the user |
+| Date Created | `created_at` — date and time | the server, on save |
+| Added By | `created_by` → `users` (null if that user is later deleted) | the server, on save |
+
+Date Created and Added By are never taken from a request and never change afterwards: the
+models (`App\Models\AccountHolder`, the base of `Creditor` and `PcgPersonnel`) leave them out of
+mass assignment and restore them on every update.
+
+Each page lists every entry, newest first, 50 to a page, searchable by name, account number or
+unit and **filterable by unit** (a PCG unit dropdown whose blank first option is *All units*),
+with all five columns. Above the table:
+
+- **Add Creditor / Add Personnel** opens a form with just the name, Account No. and Unit — and
+  **Add another** adds a row, so several entries (up to 100) go in one save. Each row can be
+  removed. **All or nothing:** if any row is wrong nothing is saved, and each problem is shown
+  under its field in its row (the server reports `records.N.field`). One audit entry covers the
+  save.
+- **Batch Upload** takes one **Excel (.xlsx)** or **CSV** file, 5 MB at most.
+
+```mermaid
+flowchart TD
+    F["Upload .xlsx / .csv"] --> R["SpreadsheetReader<br/>first sheet → rows of text"]
+    R --> H{"Header row names<br/>Name and Account No.?"}
+    H -- no --> E1["422 — file error"]
+    H -- yes --> V["Check every row<br/>(blank rows skipped)"]
+    V --> OK{"Any row wrong?"}
+    OK -- yes --> E2["422 — nothing saved<br/>errors listed by row number"]
+    OK -- no --> S["One transaction: insert all rows<br/>created_by = uploader, created_at = now"]
+    S --> L["Audit log: uploaded_creditors /<br/>uploaded_pcg_personnel"]
+```
+
+**Batch Upload rules** (`AccountHolderService::upload()`):
+
+- The **first row is the header**. Columns are found by name, in any order and case, with
+  punctuation ignored: *Name* (or *Creditor Name*, *Personnel Name*), *Account No.* (or *Account
+  Number*), *Unit* (optional column). A header without Name and Account No. is refused.
+- **Unit** may be blank. If given it must be a unit on the [PCG unit list](#6f-pcg-units),
+  matched ignoring capitalization and extra spaces, and the **list's spelling is saved**
+  (`  cg-8   COMPTROLLERSHIP ` → `CG-8 Comptrollership`). Anything else is a row error —
+  `Row 7: unknown unit 'CG8 Comptroller'` — under the same all-or-nothing rule. CSV is read
+  with a real CSV parser, so a quoted unit containing commas stays one value.
+- **Each row below it becomes one record**; fully blank rows are skipped. At most 5,000 rows.
+- **All or nothing.** Every row is checked first — Name required, Account No. required, each at
+  most 255 characters — and if any row fails, **nothing is saved** and each problem comes back
+  as `errors["rows.N"]` = `"Row N: …"`, where N is the row number as the spreadsheet shows it
+  (header = row 1). The page lists them all.
+- **Account No. is read as text.** CSV cells are taken as written (a UTF-8 BOM is stripped;
+  Windows-1252 is converted). From .xlsx (read directly with PHP's zip and DOM extensions — no
+  spreadsheet library): text cells as written; number cells from their stored digits, with
+  scientific notation expanded and a zero-padded number format such as `0000000000` re-applied,
+  so `0012345678` survives either way. An account number that arrives already mangled into
+  scientific notation (`1.23457E+11`, typical of a CSV re-saved by Excel) is rejected for that
+  row, with a hint to format the column as Text.
+- Added one at a time or uploaded, each save is written to the audit log: `added_creditor`,
+  `uploaded_creditors`, `added_pcg_personnel`, `uploaded_pcg_personnel`.
+
+---
+
+## 6f. PCG units
+
+Every **Unit** field in the system is a dropdown of one shared list of PCG units — 38 units under
+four headings (**National Headquarters**, **Technical Services**, **Functional / Operational
+Commands**, **Other Major Commands**), in a fixed order and spelling.
+
+- **Defined once**, in `config/pcg-units.json`. The server reads it through
+  `config/pcg_units.php` (`App\Support\PcgUnits`); the React app imports the same file
+  (`resources/js/lib/pcgUnits.ts`) and renders it with one component, `UnitSelect`. No page or
+  template carries its own copy — to change the list, edit that file.
+- **The dropdown**: a blank *-- Select unit --* first, then each heading as a non-selectable
+  `optgroup` with its units beneath. The unit is saved as its **name, exactly as the list spells
+  it**, in a text column (no units table). The longest name is 80 characters; every unit column
+  is `varchar(255)`.
+- **Validated on the server** too (`PcgUnits::rule()` — an exact `in:` match), so a value the
+  dropdown could not have sent is refused even if the page's HTML is edited.
+- **Edit forms preselect the saved unit.** A unit saved before the list existed, and not on it,
+  shows as a disabled *(not on the unit list — choose another)* option: visible, but it must be
+  replaced before the form will save.
+
+| Where | Field | Column | Rule |
+|---|---|---|---|
+| LDDAP — Register / Edit LDDAP Record | Unit Name | `lddaps.unit_name` | required |
+| LDDAP — RTS | RTS Unit | `lddap_routing_history.unit_name` | required |
+| Cheque — Route for Signature | Unit name | `cheques.forward_unit_name` | optional |
+| Cheque — Mark as Received | From unit name | `cheques.from_unit_name` | optional |
+| Cheque — Use (dialog and Next in line panel) | Unit | `cheques.unit_name` | optional |
+| Creditors / PCG Personnel — Add | Unit | `creditors.unit`, `pcg_personnel.unit` | optional |
+| Creditors / PCG Personnel — Batch Upload | Unit column | same | optional; matched loosely (above) |
+| Creditors / PCG Personnel — list | Unit filter | — | *All units* by default |
+
+LDDAP units used to be ids into a `units` table; migration
+`2026_09_27_000100_store_lddap_units_as_text` copies each record's unit **name** into the new text
+columns unchanged and drops the table. Mapping names from before the list onto it is a separate,
+approved step.
 
 ---
 
@@ -1405,13 +1587,15 @@ Every significant action appends an immutable row to `cheque_logs` via `Activity
 the system takes unprompted — the nightly validity sweep — are recorded with no user id and the
 username `system`.
 Actions (`app/Enums/ChequeAction.php`): `login`, `logout`, `updated_profile`, `changed_password`,
-`routed_for_signature`, `ready_for_acic`, `rts_cheque`, `voided_cheque`, `accepted_by_teller`,
+`printed_draft`, `approved_draft`, `returned_draft`, `printed_final`, `edited_cheque` (the draft
+flow), `routed_for_signature`, `ready_for_acic`, `rts_cheque` (the retired flow's), `voided_cheque` (written before Void became Spoil; read as *Spoiled cheque*), `accepted_by_teller`,
 `released_cheque`, `forwarded_cheque_to_teller`, `deposited_cheque`, `returned_cheque_from_teller`,
 `cancelled_cheque`, `spoiled_cheque`, `staled_cheque`, `replaced_cheque`, `corrected_release`,
 `used_cheque`, `received_cheque`,
 `reviewed_cheque`, `requested_update`, `approved_update`, `rejected_update`, `added_cheque_range`,
-`created_acic`, `used_acic`, `forwarded_acic`, `completed_acic`, `created_user`, `updated_user`,
-`deleted_user`.
+`created_acic`, `used_acic`, `forwarded_acic`, `completed_acic`, `added_creditor`,
+`uploaded_creditors`, `added_pcg_personnel`, `uploaded_pcg_personnel`, `created_user`,
+`updated_user`, `deleted_user`.
 Admins view and filter the log at `GET /api/v1/logs`.
 
 ---
@@ -1427,23 +1611,27 @@ is a link into the matching filtered list (`/cheques?status=`, `/lddaps?status=`
 
   | Role | Item | Counts | Opens |
   |---|---|---|---|
-  | Admin | LDDAPs awaiting your action | Returned for ACIC | `/lddaps?status=returned_for_acic` |
-  | Admin | Cheques awaiting review | Used + Received | `/cheques?status=used` |
-  | Admin | Update requests pending | pending cheque + LDDAP corrections | `/admin/update-requests` |
-  | Admin | ACICs to sign off | ACIC status Used | `/acics?tab=all` |
-  | Staff | Returned to you (RTS) | RTS LDDAPs **registered by them** | `/lddaps?status=rts` |
-  | Staff | Cheques returned to you | Returned cheques **used by them** | `/cheques?status=complies` |
-  | Staff | Registered, not yet forwarded | their Registered LDDAPs | `/lddaps?status=registered` |
-  | Staff | Approved LDDAPs awaiting an ACIC | Approved, no ACIC | `/lddaps?status=approved` |
-  | Teller | Cheques to receive | Used | `/cheques?status=used` |
+  | Admin | LDDAPs For Signature | For Signature, no ACIC — assign, RTS or Cancel | `/lddaps?status=for_signature` |
+  | Admin | Drafts for checking | cheques For Checking | `/cheques?tab=for_checking` |
+  | Admin | Cheques For Compliance | cheques For Compliance | `/cheques?tab=for_compliance` |
+  | Admin | Cheques For Final Print | cheques For Final Print | `/cheques?tab=for_final_print` |
+  | Admin | Cheques For Signature | For Signature, no ACIC | `/cheques?tab=for_signature` |
+  | Admin | Update requests pending | pending LDDAP corrections | `/admin/update-requests` |
+  | Admin | ACICs to sign off | ACIC status Used | `/acics?status=used` |
+  | Staff | Returned to you (RTS) | RTS LDDAPs **registered by them** — correct, then Resubmit | `/lddaps?status=rts` |
+  | Staff | Your cheques For Compliance | theirs, For Compliance | `/cheques?tab=for_compliance` |
+  | Staff | Your cheques For Final Print | theirs, For Final Print | `/cheques?tab=for_final_print` |
+  | Staff | LDDAPs For Signature | For Signature, no ACIC | `/lddaps?status=for_signature` |
+  | Teller | ACICs waiting to be accepted | **Pending** ACICs, cheque and LDDAP | `/acics?status=pending` |
+  | Teller | ACICs you are holding | accepted by them — Accepted, Forwarded, RTS | `/deposit-queue` |
   | Teller | LDDAPs to receive | carrying a check number, not received | `/lddaps?status=approved` |
-  | Teller | ACICs forwarded to you | ACIC status Forwarded | `/acics?tab=forwarded` |
 
-- **Cheques** — the seven status tiles (`ChequeService::counts()`) and, for admin/staff, the
-  **next-in-line cheque** panel, usable from the dashboard as before.
-- **LDDAP-ADA** — a tile per routing status (Registered · For Out · Returned for ACIC · RTS ·
-  Approved · Canceled) and, of the approved, how many await an ACIC vs. sit on one.
-- **ACIC** — a tile per status (Open · Used · Approved · Forwarded · Completed).
+- **Cheques** — the status tiles (`ChequeService::counts()`). The next-in-line cheque is used
+  from the **Cheques** page (its panel and the row's **Use** button), not the dashboard.
+- **LDDAP-ADA** — a tile per status (For Signature · RTS · Approved · Canceled) and how many
+  For Signature records await an ACIC vs. how many sit on one.
+- **ACIC** — a tile per status the table shows (Open · Used · Approved · **Pending** · Completed),
+  counted over the ACICs the viewer may see, each linking to `/acics?status=…`.
 - **Number series** — the cheque book, the LDDAP check numbers and the ACIC numbers: how many are
   **available**, the **next** number each will issue, used-of-registered, and a **Low** flag under
   `DashboardService::LOW_SERIES` (10) free numbers; admins get a *Register more* link to the
@@ -1463,9 +1651,10 @@ an unread badge; the SPA polls every 30s. Opening an item marks it read and navi
 | Event | Raised in | Recipients | `kind` | Links to |
 |---|---|---|---|---|
 | Cheque used | `ChequeService::useNext` | Active admins (except the actor) | `used` | `/admin/logs` |
-| Update requested | `UpdateRequestService::create` | Active admins (except the actor) | `request` | `/admin/update-requests` |
-| Request approved | `UpdateRequestService::approve` | The requester | `approved` | `/cheques` |
-| Request rejected | `UpdateRequestService::reject` | The requester | `rejected` | `/cheques` |
+| Draft submitted (Print Draft) | `ChequeFlowService::printDraft` | Active **Administrators and Super Admins** (except the actor) | `request` | `/cheques` |
+| Draft approved | `ChequeFlowService::approveDraft` | The preparer (who printed the latest draft) | `approved` | `/cheques` |
+| Draft returned | `ChequeFlowService::returnDraft` | The preparer, with the comment | `rejected` | `/cheques` |
+| Cheque spoiled | `ChequeSpoilService::spoil` | Active admins and the cheque's user (except the actor) | `spoiled` | `/cheques` |
 
 Notifications are a **convenience layer only** — the authoritative record of every action remains
 the append-only audit log (section 7). Delivery is best-effort and does not affect the outcome of
@@ -1482,42 +1671,47 @@ the action that raised it.
 | `GET /me` | Auth | Current user |
 | `PUT /me` | Auth | Profile: the signed-in user's own full name and email (`UpdateProfileRequest`) |
 | `PUT /me/password` | Auth | Change own password — current password required, confirmed, session kept (`ChangePasswordRequest`) |
-| `GET /cheques` | Auth | List cheques (`status`, `search`, `tab`, `sort`; includes hold flag) |
+| `GET /cheques` | Auth | List cheques — `search` (number, payee, account no.), `tab` (status, or `expiring`), `unit`, `date_from`/`date_to` (cheque date, inclusive), `sort`; all combine |
 | `GET /cheques/summary` | Auth | Cheque counts + next cheque (the cheque page's header) |
 | `GET /dashboard` | Auth | The dashboard: attention items by role, every register's counts, the series, admin's recent activity |
 | `GET /cheques/next` | Auth | The next usable cheque |
-| `POST /cheques/use` | Auth | Use the next cheque |
+| `POST /cheques/use` | Auth | Use the next cheque: `payee_name`, `amount`, `cheque_date`, optional `account_no` and `unit_name` (a PCG unit) |
 | `GET /cheques/validity-summary` | Auth | Banner counts, the viewer's deposit queue, the tellers, the bank |
 | `GET /cheques/{cheque}/status-history` | Auth | Every step the cheque has taken, oldest first |
-| `POST /cheques/{cheque}/route` | **Admin** | Step 2 — route out for signature (`RouteChequeRequest`) |
-| `POST /cheques/{cheque}/receive` | **Admin** | Step 3 — signed and back; carries on to For ACIC (`ReceiveChequeRequest`) |
+| `PUT /cheques/{cheque}` | Admin/Staff | Edit the details — no status or For Compliance only; each save is an `edited` timeline entry (`UpdateChequeDetailsRequest`) |
+| `POST /cheques/{cheque}/print-draft` | Admin/Staff | Print Draft → For Checking; notifies the Administrators and Super Admins (`ChequePrepareRequest`) |
+| `POST /cheques/{cheque}/approve-draft` | **Admin / Super Admin** | Approve the draft → For Final Print; `comment` optional (`CheckDraftRequest`) |
+| `POST /cheques/{cheque}/return-draft` | **Admin / Super Admin** | Return the draft → For Compliance; `comment` required (`CheckDraftRequest`) |
+| `POST /cheques/{cheque}/final-print` | Admin/Staff | The final print came out right → For Signature (`ChequePrepareRequest`) |
 | `POST /cheques/{cheque}/release` | **Admin** | Branch A — release to the payee (`ReleaseChequeRequest`) |
-| `POST /cheques/{cheque}/rts` · `/cancel` · `/void` | **Admin** | The three ways out, reason required (`ChequeExceptionRequest`) |
+| `POST /cheques/{cheque}/cancel` | **Admin** | Cancel before an ACIC, reason required (`ChequeExceptionRequest`) |
+| `POST /cheques/{cheque}/use-previous-acic` | **Admin/Staff** | A spoiled cheque's For Signature replacement takes its place on the ACIC it came off — only while that ACIC is with the admin (`expected_status` optional) |
+| `POST /cheques/{cheque}/spoil` | **Admin** | Spoil an Approved cheque: `reason` (required), `replacement_number` (the next number the dialog showed); issues the replacement and returns the spoiled cheque with `replaced_by` (`SpoilChequeRequest`) |
+| `GET /cheques/next` | Auth | The lowest available cheque, or null |
 | `POST /cheques/{cheque}/replace` | **Admin** | Issue a replacement for a stale cheque (`ReplaceChequeRequest`) |
-| `POST /acics/{acic}/forward-to-teller` | **Admin** | Branch B — send the whole ACIC to the tellers |
+| `POST /acics/{acic}/teller-forward` | **Accepting teller** | Forward: `to` = `land_bank` \| `payee` |
+| `POST /acics/{acic}/teller-complete` | **Accepting teller** | Action → Completed |
+| `POST /acics/{acic}/forward-to-payee` | **Accepting teller** | Cheque ACICs: `cheque_ids`, `received_by`, `date_received`, `unit` — one, several or all cheques to their payees |
+| `POST /acics/{acic}/teller-rts` | **Accepting teller** | Action → RTS: `reason` (required), `outcomes` = {"cheque:ID": completed \| returned \| cancelled \| stale} |
+| `POST /acics/{acic}/forward-to-teller` | **Admin** | Branch B — send the whole ACIC to the tellers (an LDDAP ACIC's **Forward** button, after a confirm) |
 | `POST /acics/{acic}/accept` | **Teller** | Claim a forwarded ACIC — first one wins |
-| `POST /acics/{acic}/deposit` | **Teller** | Bank it; one deposit date for the whole ACIC |
 | `POST /acics/{acic}/return-to-admin` | **Teller** | Hand it back, reason required |
-| `GET /acics/teller-queue` | Auth | The deposit queue: Pending and Accepted |
-| `POST /cheques/{cheque}/receive` | **Teller** | Confirm receipt (blocked if on hold) |
-| `POST /cheques/{cheque}/update-requests` | **Staff** | Propose a detail correction |
-| `GET /cheques/{cheque}/update-requests` | Auth | A cheque's request history + outcomes |
+| `GET /acics/teller-queue` | Auth | The deposit queue — Pending · Accepted · Forwarded · RTS · Completed; `type`, `from`, `to`, `search`, `status` (teller status) narrow each list |
 | `POST /cheques/add-range` | **Admin** | Register a book by `start_at` / `end_at` serial |
-| `GET /lddaps` | Auth | List LDDAP records — the filter bar's `search`, `status`, `nature`, `page`, `per_page` (`FilterLddapsRequest`) |
+| `GET /lddaps` | Auth | List LDDAP records — the filter bar's `search`, `status`, `nature`, `payee_type` (all · creditor · pcg_personnel), `page`, `per_page` (`FilterLddapsRequest`) |
 | `GET /lddaps/next-numbers` | Auth | The next `count` check numbers in the LDDAP series |
 | `GET /lddaps/series` | Auth | LDDAP check series counts (registered / unused / used) |
-| `GET /lddaps/linkable` | Auth | Completed LDDAPs not yet on an ACIC |
-| `GET /lddaps/options` | any | The natures of payment and the units the register dialog offers |
-| `GET /payees?search=` | any | Registered payees by name or account number, each with its accounts, capped at 15 |
-| `GET /payees/{payee}` | any | One payee with its accounts — pre-fills the picker in Edit LDDAP Record |
-| `POST /lddaps` | **Admin/Staff** | Register **one** LDDAP, without a check number |
-| `PUT /lddaps/{lddap}` | **Admin/Staff** | Edit LDDAP Record — the same form (`LddapDetailsRequest`) on a Registered or RTS record; own number ignored by the unique rule; check number untouched |
+| `GET /lddaps/linkable` | Auth | For Signature LDDAPs not yet on an ACIC |
+| `GET /lddaps/options` | any | The natures of payment the register dialog offers (units come from the shared PCG list) |
+| `GET /lddaps/payee-options?search=` | Admin/staff | The register form's payee search: Creditors and PCG Personnel in one list — type, name, account no., unit |
+| `GET /payees?search=` · `GET /payees/{payee}` | any | Legacy payee register (older LDDAPs only); no longer used by the form |
+| `POST /lddaps` | **Admin/Staff** | Add **one** LDDAP, without a check number — status For Signature |
+| `PUT /lddaps/{lddap}` | **Admin/Staff** | Edit LDDAP Record — the same form (`LddapDetailsRequest`) on a For Signature or RTS record; own number ignored by the unique rule; check number untouched |
 | `GET /lddaps/{lddap}/edit-history` | any | Every edit: user, time, `{field: {from, to}}`, newest first |
-| `POST /lddaps/{lddap}/forward` | **Admin/Staff** | Forward: Registered → For Out |
-| `POST /lddaps/{lddap}/receive-back` | **Admin/Staff** | Receive: For Out → Returned for ACIC |
-| `GET /lddaps/{lddap}/routing-history` | any | The record's routing trail |
-| `POST /lddaps/{lddap}/approve` · `/rts` · `/cancel` | **Admin** | The action on a Returned for ACIC record (`cancel`: `note` required, `date_canceled` optional) |
-| `POST /lddaps/assign-acic` | **Admin/Staff** | Put ticked approved records on a typed ACIC number; each takes the next check number |
+| `GET /lddaps/{lddap}/routing-history` | any | The record's routing trail (retired forward/receive/approve rows left out) |
+| `POST /lddaps/{lddap}/rts` · `/cancel` | **Admin** | RTS or Cancel a For Signature record (`cancel`: `note` required, `date_canceled` optional) |
+| `POST /lddaps/{lddap}/resubmit` | **Admin/Staff** | RTS → For Signature (`comment` required, `notes` optional) |
+| `POST /lddaps/assign-acic` | **Admin/Staff** | Put ticked For Signature records on a typed ACIC number; each takes the next check number |
 | `POST /lddaps/add-range` | **Admin** | Register a block of the LDDAP check series |
 | `POST /lddaps/{lddap}/receive` | **Teller** | Confirm an LDDAP as received |
 | `POST /lddaps/{lddap}/update-requests` | **Staff** | Propose a detail correction |
@@ -1527,21 +1721,20 @@ the action that raised it.
 | `POST /lddap-update-requests/{id}/approve` | **Admin** | Approve (apply proposed values) |
 | `POST /lddap-update-requests/{id}/reject` | **Admin** | Reject (no change) |
 | `POST /acics/{acic}/lddaps` | **Admin/Staff** | Assign approved LDDAPs to an ACIC; each takes the next check number (`expected_check_nos` optional) |
-| `GET /acics` | Auth | List ACIC records (filter by `status`) |
+| `GET /acics` | Auth | List ACIC records — `search` (ACIC no., or the cheque / LDDAP / check / DV no. of anything on it), `status`, `category`; all combine |
 | `GET /acics/next` | Auth | The number the next ACIC will take |
 | `GET /acics/linkable-cheques` | Auth | Approved cheques not yet on an ACIC |
 | `GET /acics/{acic}` | Auth | One ACIC with its cheques |
 | `POST /acics` | **Admin/Staff** | Open the next ACIC |
-| `POST /acics/{acic}/cheques` | **Admin/Staff** | Assign approved cheques to it |
-| `POST /acics/{acic}/forward` | **Admin** | Forward it (date + `received_by` user *or* `received_name`) |
-| `POST /acics/{acic}/complete` | **Teller** | Complete it; stamps receipt on its cheques |
-| `GET /update-requests` | **Admin** | Pending correction requests |
-| `POST /update-requests/{id}/approve` | **Admin** | Approve (apply proposed values) |
-| `POST /update-requests/{id}/reject` | **Admin** | Reject (no change) |
+| `POST /acics/{acic}/cheques` | **Admin/Staff** | Assign For Signature cheques to it |
+| `POST /cheques/assign-acic` | **Admin/Staff** | Assign Cheque to ACIC by number: `acic_no` (an existing ACIC still taking cheques, or the next in the series) + `cheque_ids` — many cheques share one number |
 | `GET /logs` | **Admin** | Audit log |
 | `GET /notifications` | Auth | Current user's feed + unread count |
 | `POST /notifications/{id}/read` | Auth | Mark one notification read |
 | `POST /notifications/read-all` | Auth | Mark all read |
+| `GET /creditors` · `GET /pcg-personnel` | Admin/staff | The list, newest first, 50 a page; `search` matches name, account no. or unit; `unit` filters by one PCG unit |
+| `POST /creditors` · `POST /pcg-personnel` | Admin/staff | Add one or more: `records[]` of `{name, account_no, unit?}` (1–100), all or none; errors as `records.N.field` — Date Created / Added By stamped (`StoreAccountHolderRequest`) |
+| `POST /creditors/batch-upload` · `POST /pcg-personnel/batch-upload` | Admin/staff | Multipart `file` (.xlsx/.csv, ≤ 5 MB): saves every row or none; row errors as `rows.N` (`UploadAccountHoldersRequest`) |
 | `GET/POST/PUT/DELETE /users` | **Admin** | Manage users |
 
 ---
@@ -1561,7 +1754,6 @@ erDiagram
     LDDAPS ||--o{ LDDAP_ROUTING_HISTORY : "trail"
     LDDAPS ||--o{ LDDAP_EDIT_HISTORY : "edits"
     USERS ||--o{ LDDAP_EDIT_HISTORY : "made"
-    UNITS ||--o{ LDDAPS : "drawn for"
     PAYEES ||--o{ LDDAPS : "paid to"
     PAYEES ||--o{ PAYEE_ACCOUNTS : "holds"
     PAYEE_ACCOUNTS ||--o{ LDDAPS : "paid into"
@@ -1569,6 +1761,8 @@ erDiagram
     USERS ||--o{ CHEQUE_LOGS : "acts in"
     CHEQUES ||--o{ CHEQUE_STATUS_HISTORY : "trail"
     USERS ||--o{ NOTIFICATIONS : "notified via"
+    USERS ||--o{ CREDITORS : "added"
+    USERS ||--o{ PCG_PERSONNEL : "added"
 
     USERS {
         string name
@@ -1579,11 +1773,13 @@ erDiagram
     }
     CHEQUES {
         int    cheque_number "unique, sequential"
-        enum   status "available | registered | out_for_signature | received | for_acic | approved | released_to_payee | forwarded_to_teller | accepted_by_teller | deposited | cancelled | voided | stale | replaced"
+        enum   status "available | registered (no status) | for_checking | for_compliance | for_final_print | for_signature | approved | released_to_payee | forwarded_to_teller | accepted_by_teller | deposited | cancelled | spoiled | stale | replaced"
         date   validity_until "cheque_date + 90 days, derived"
         timestamp stale_at
         timestamp expiry_alert_sent_at "the one-time 10-day alert"
         string payee_name
+        string account_no "optional, text — keeps leading zeros"
+        string unit_name "optional, PCG unit"
         decimal amount
         date   cheque_date
         fk     acic_id "the ACIC it sits on"
@@ -1598,16 +1794,23 @@ erDiagram
         timestamp released_at
         text   release_note
         string forward_to_name "step 2: routed for signature"
-        string forward_unit_name
+        string forward_unit_name "PCG unit, optional"
         fk     forwarded_by
         date   date_forwarded
         string received_by_name_in "step 3: signed and back"
         date   date_received_in
-        string from_unit_name
-        text   exception_reason "RTS / cancel / void"
+        string from_unit_name "PCG unit, optional"
+        text   exception_reason "RTS / cancel / spoil"
+        fk     spoiled_by "who marked it Spoiled"
+        timestamp spoiled_at"
         timestamp rts_at
-        fk     replaces_id "the stale cheque this one replaces"
+        fk     replaces_id "the stale or spoiled cheque this one replaces"
         fk     replaced_by_id
+        fk     spoiled_from_acic_id "spoiled: the ACIC it came off"
+        string payee_received_by "no longer written (was: Completed, to the payee)"
+        date   payee_received_on
+        string payee_unit_name "Forward to Payee: the receiver's unit"
+        string rts_status "completed | returned | cancelled | stale"
     }
     CHEQUE_STATUS_HISTORY {
         fk     cheque_id
@@ -1636,9 +1839,6 @@ erDiagram
         enum   status "available | used"
         fk     created_by
     }
-    UNITS {
-        string name "unique"
-    }
     PAYEES {
         string name
     }
@@ -1647,20 +1847,38 @@ erDiagram
         string account_no
         string bank
     }
+    CREDITORS {
+        string name
+        string account_no "text — keeps leading zeros"
+        string unit "nullable, PCG unit name"
+        fk     created_by "Added By — set on create, never edited"
+        datetime created_at "Date Created — set on create, never edited"
+    }
+    PCG_PERSONNEL {
+        string name
+        string account_no "text — keeps leading zeros"
+        string unit "nullable, PCG unit name"
+        fk     created_by "Added By — set on create, never edited"
+        datetime created_at "Date Created — set on create, never edited"
+    }
     LDDAPS {
+        string payee_received_by "teller Completed, to the payee"
+        date   payee_received_on
+        string rts_status "completed | returned | cancelled"
         fk     lddap_check_id "unique, nullable — added once back from routing"
         string lddap_no "unique document serial"
-        string nca_no
-        string orb_no
-        string dv_no
+        string nca_no "0000000 — exactly 7 digits, text"
+        string obr_no "formerly orb_no"
+        string dv_no "unique"
         enum   nature_of_payment
-        fk     unit_id
+        string unit_name "PCG unit, as the list spells it"
         string obj_no "UACS object code — prints as OBJ CODE"
         decimal amount
         fk     payee_id
         fk     payee_account_id
-        string payee_name "copied from the payee at registration"
-        string payee_account_no "copied from the account at registration"
+        string payee_name "copied from the Creditor / PCG Personnel entry"
+        string payee_type "creditor | pcg_personnel — blank on older records"
+        string payee_account_no "copied from the entry"
         string payee_bank "copied from the account at registration"
         string acic_ref "ACIC # written on the form"
         decimal gross_amount
@@ -1674,12 +1892,12 @@ erDiagram
         text   note
         string remarks
         date   check_date "date issued, entered with the record"
-        enum   status "registered | for_out | returned_for_acic | rts | approved | canceled"
+        enum   status "for_signature | rts | approved (on an ACIC) | forwarded_to_teller | accepted_by_teller | completed | canceled — registered / for_out / returned_for_acic retired"
         string forward_to
-        fk     forward_unit_id
+        string forward_unit_name "PCG unit"
         fk     forwarded_by
         date   date_forwarded
-        fk     return_unit_id
+        string return_unit_name "PCG unit"
         fk     returned_by
         date   date_returned
         fk     acic_id "the ACIC it sits on"
@@ -1699,16 +1917,17 @@ erDiagram
     }
     LDDAP_ROUTING_HISTORY {
         fk     lddap_id
-        enum   action "registered | forwarded | received | approved | rts | canceled"
+        enum   action "registered (Added) | rts | resubmitted | assigned | unassigned | canceled | forwarded_to_teller | accepted_by_teller | completed | returned_by_bank | returned_to_admin — forwarded / received / approved retired (for_out rows hidden)"
         enum   from_status
         enum   to_status
         fk     user_id
-        fk     unit_id
+        string unit_name "PCG unit — forwarded to / received from / RTS"
         string counterparty "Forward To"
         string received_by_name "RTS: who received it"
         date   received_on "RTS: when"
-        date   acted_on "forwarded / received / RTS date"
-        text   note
+        date   acted_on "RTS date (older rows: forwarded / received)"
+        text   note "comment"
+        text   notes "Resubmit: optional notes"
     }
     LDDAP_UPDATE_REQUESTS {
         fk     lddap_id
@@ -1734,6 +1953,13 @@ erDiagram
         timestamp completed_at
         fk     completed_by
         fk     created_by
+        enum   teller_status "pending | accepted_by_teller | forwarded_to_land_bank | forwarded_to_payee | rts | completed (returned_by_bank: older rows)"
+        string teller_forwarded_to "land_bank | payee"
+        fk     teller_forwarded_by
+        timestamp teller_forwarded_at
+        fk     teller_action_by "Completed or RTS"
+        timestamp teller_action_at
+        text   rts_reason
     }
     CHEQUE_LOGS {
         fk     user_id

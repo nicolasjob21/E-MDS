@@ -3,6 +3,7 @@ import { Save, UserRound } from 'lucide-react';
 import { AuthApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
 import { PageHeader, Alert } from '../components/ui';
+import { roleLabel } from '../lib/format';
 
 /**
  * The signed-in user's own profile. Username and role are the admin's to set and are shown
@@ -63,7 +64,7 @@ export default function ProfilePage() {
                     </span>
                     <div className="min-w-0">
                         <div className="truncate font-display text-lg font-bold text-fg">{user.name}</div>
-                        <div className="text-xs uppercase tracking-wider text-brandink">{user.role}</div>
+                        <div className="text-xs uppercase tracking-wider text-brandink">{roleLabel(user.role)}</div>
                     </div>
                 </div>
 
@@ -86,8 +87,8 @@ export default function ProfilePage() {
                         </label>
                         <input
                             id="profile-role"
-                            className="field capitalize opacity-70"
-                            value={user.role}
+                            className="field opacity-70"
+                            value={roleLabel(user.role)}
                             readOnly
                             aria-readonly="true"
                         />

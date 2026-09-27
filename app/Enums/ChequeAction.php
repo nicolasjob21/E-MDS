@@ -19,10 +19,18 @@ enum ChequeAction: string
     case RejectedUpdate = 'rejected_update';
     case AddedChequeRange = 'added_cheque_range';
 
+    // The draft-checking flow.
+    case PrintedDraft = 'printed_draft';
+    case ApprovedDraft = 'approved_draft';
+    case ReturnedDraft = 'returned_draft';
+    case PrintedFinal = 'printed_final';
+    case EditedCheque = 'edited_cheque';
+
     // The disposition axis — where a signed cheque physically went, and its 90-day validity.
     case RoutedForSignature = 'routed_for_signature';
     case ReadyForAcic = 'ready_for_acic';
     case RtsCheque = 'rts_cheque';
+    // Written by the Void step before it became Spoil; kept so older log rows still read.
     case VoidedCheque = 'voided_cheque';
     case AcceptedByTeller = 'accepted_by_teller';
     case ReleasedCheque = 'released_cheque';
@@ -45,6 +53,7 @@ enum ChequeAction: string
     case ApprovedLddapUpdate = 'approved_lddap_update';
     case RejectedLddapUpdate = 'rejected_lddap_update';
     case UpdatedLddap = 'updated_lddap';
+    case ResubmittedLddap = 'resubmitted_lddap';
     case AddedAcicRange = 'added_acic_range';
     case CreatedAcic = 'created_acic';
     case UsedAcic = 'used_acic';
@@ -52,6 +61,10 @@ enum ChequeAction: string
     case ReassignedAcic = 'reassigned_acic';
     case ForwardedAcic = 'forwarded_acic';
     case CompletedAcic = 'completed_acic';
+    case AddedCreditor = 'added_creditor';
+    case UploadedCreditors = 'uploaded_creditors';
+    case AddedPcgPersonnel = 'added_pcg_personnel';
+    case UploadedPcgPersonnel = 'uploaded_pcg_personnel';
     case CreatedUser = 'created_user';
     case UpdatedUser = 'updated_user';
     case DeletedUser = 'deleted_user';

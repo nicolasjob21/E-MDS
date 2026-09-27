@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
     LayoutDashboard,
+    Landmark,
     ListChecks,
     FileText,
     PlusSquare,
@@ -12,7 +13,8 @@ import {
     Hash,
     BookOpen,
     ChevronDown,
-    Landmark,
+    Building2,
+    IdCard,
     Menu,
     X,
     ShieldCheck,
@@ -29,6 +31,10 @@ interface NavItem {
     label: string;
     icon: typeof LayoutDashboard;
     adminOnly?: boolean;
+    /** Shown to admins and staff, not tellers. */
+    hideFromTeller?: boolean;
+    /** Shown to tellers only. */
+    tellerOnly?: boolean;
 }
 
 /** A collapsible set of related links, shown as an accordion in the sidebar. */
@@ -51,7 +57,10 @@ const NAV: NavEntry[] = [
     { to: '/cheques', label: 'Cheques', icon: ListChecks },
     { to: '/lddaps', label: 'LDDAP', icon: Receipt },
     { to: '/acics', label: 'ACIC', icon: FileText },
-    { to: '/deposit-queue', label: 'Deposit Queue', icon: Landmark },
+    // The teller's own ACIC table; admins and staff reach it by its address only.
+    { to: '/deposit-queue', label: 'Deposit Queue', icon: Landmark, tellerOnly: true },
+    { to: '/creditors', label: 'Creditors', icon: Building2, hideFromTeller: true },
+    { to: '/pcg-personnel', label: 'PCG Personnel', icon: IdCard, hideFromTeller: true },
     { to: '/admin/update-requests', label: 'Update Requests', icon: ClipboardCheck, adminOnly: true },
     {
         // The three number registers share one job — issuing the numbers everything else draws
@@ -74,7 +83,7 @@ const COLLAPSE_KEY = 'cw-sidebar-collapsed';
 const GROUPS_KEY = 'cw-sidebar-groups';
 
 export default function Layout() {
-    const { isAdmin } = useAuth();
+    const { isAdmin, isTeller } = useAuth();
     const { pathname } = useLocation();
     const [open, setOpen] = useState(false); // mobile drawer
     const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === '1');
@@ -97,7 +106,12 @@ export default function Layout() {
         localStorage.setItem(GROUPS_KEY, JSON.stringify(openGroups));
     }, [openGroups]);
 
-    const items = NAV.filter((item) => !item.adminOnly || isAdmin);
+    const items = NAV.filter(
+        (item) =>
+            (!item.adminOnly || isAdmin) &&
+            !(isTeller && !isGroup(item) && item.hideFromTeller) &&
+            !(!isTeller && !isGroup(item) && item.tellerOnly),
+    );
 
     function toggleGroup(id: string) {
         setOpenGroups((prev) => (prev.includes(id) ? prev.filter((g) => g !== id) : [...prev, id]));

@@ -18,12 +18,13 @@ import {
     ArrowRight,
     Inbox,
     Sparkles,
+    Undo2,
+    Printer,
 } from 'lucide-react';
 import { DashboardApi, toApiError } from '../lib/api';
-import type { AcicStatus, AttentionItem, Dashboard, LddapStatus, SeriesGlance } from '../lib/types';
+import type { AttentionItem, DashboardAcicTile, Dashboard, LddapStatus, SeriesGlance } from '../lib/types';
 import { useAuth } from '../auth/AuthContext';
 import { PageHeader, Spinner, Alert } from '../components/ui';
-import NextChequePanel from '../components/NextChequePanel';
 import { actionLabel, formatRelative } from '../lib/format';
 
 // ---- the tiles ---------------------------------------------------------------------------
@@ -31,29 +32,31 @@ import { actionLabel, formatRelative } from '../lib/format';
 const CHEQUE_TILES = [
     { key: 'total', label: 'Total cheques', icon: Layers, color: 'text-fg', to: '/cheques' },
     { key: 'available', label: 'Available', icon: CircleDot, color: 'text-brandink', to: '/cheques?tab=available' },
-    { key: 'registered', label: 'Registered', icon: FilePlus2, color: 'text-fg', to: '/cheques?tab=registered' },
-    { key: 'out_for_signature', label: 'Out for Signature', icon: Send, color: 'text-accent-400', to: '/cheques?tab=out_for_signature' },
-    { key: 'for_acic', label: 'For ACIC', icon: ListChecks, color: 'text-brandink', to: '/cheques?tab=for_acic' },
+    { key: 'registered', label: 'Used', icon: FilePlus2, color: 'text-fg', to: '/cheques?tab=registered' },
+    { key: 'for_checking', label: 'For Checking', icon: Send, color: 'text-accent-400', to: '/cheques?tab=for_checking' },
+    { key: 'for_compliance', label: 'For Compliance', icon: Undo2, color: 'text-amber-400', to: '/cheques?tab=for_compliance' },
+    { key: 'for_final_print', label: 'For Final Print', icon: Printer, color: 'text-brandink', to: '/cheques?tab=for_final_print' },
+    { key: 'for_signature', label: 'For Signature', icon: ListChecks, color: 'text-brandink', to: '/cheques?tab=for_signature' },
     { key: 'approved', label: 'Approved', icon: BadgeCheck, color: 'text-success-fg', to: '/cheques?tab=approved' },
     { key: 'released_to_payee', label: 'Released', icon: HandCoins, color: 'text-teal-300', to: '/cheques?tab=released_to_payee' },
     { key: 'completed', label: 'Completed', icon: Landmark, color: 'text-blue-300', to: '/cheques?tab=completed' },
 ] as const;
 
 const LDDAP_TILES: { key: LddapStatus; label: string; color: string }[] = [
-    { key: 'registered', label: 'Registered', color: 'text-fg' },
-    { key: 'for_out', label: 'For Out', color: 'text-brandink' },
-    { key: 'returned_for_acic', label: 'Returned for ACIC', color: 'text-accent-400' },
+    { key: 'for_signature', label: 'For Signature', color: 'text-accent-400' },
     { key: 'rts', label: 'RTS', color: 'text-amber-400' },
-    { key: 'approved', label: 'Approved', color: 'text-success-fg' },
+    { key: 'approved', label: 'Approved (on an ACIC)', color: 'text-success-fg' },
+    { key: 'completed', label: 'Completed', color: 'text-brandink' },
     { key: 'canceled', label: 'Canceled', color: 'text-danger-fg' },
 ];
 
-const ACIC_TILES: { key: AcicStatus; label: string; color: string; tab: string }[] = [
-    { key: 'open', label: 'Open', color: 'text-brandink', tab: 'all' },
-    { key: 'used', label: 'Used', color: 'text-fg', tab: 'all' },
-    { key: 'approved', label: 'Approved', color: 'text-success-fg', tab: 'all' },
-    { key: 'forwarded', label: 'Forwarded', color: 'text-accent-400', tab: 'forwarded' },
-    { key: 'completed', label: 'Completed', color: 'text-success-fg', tab: 'completed' },
+/** By the status the ACIC table shows: its own, then the teller's once it is with the tellers. */
+const ACIC_TILES: { key: DashboardAcicTile; label: string; color: string }[] = [
+    { key: 'open', label: 'Open', color: 'text-brandink' },
+    { key: 'used', label: 'Used', color: 'text-fg' },
+    { key: 'approved', label: 'Approved', color: 'text-success-fg' },
+    { key: 'pending', label: 'Pending', color: 'text-accent-400' },
+    { key: 'completed', label: 'Completed', color: 'text-success-fg' },
 ];
 
 const TONE: Record<AttentionItem['tone'], string> = {
@@ -156,12 +159,12 @@ function SeriesCard({
 
 /**
  * The dashboard: what is waiting on the signed-in user first, then every register at a glance
- * — cheques (with the next-in-line number, usable from here), LDDAPs by routing status, ACICs,
+ * — cheques, LDDAPs by routing status, ACICs,
  * the three number series with a low-stock flag, and, for admins, the latest audit activity.
  * Every tile is a link into the matching filtered list.
  */
 export default function DashboardPage() {
-    const { user, isAdmin, isTeller } = useAuth();
+    const { user, isAdmin } = useAuth();
     const [data, setData] = useState<Dashboard | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -239,16 +242,11 @@ export default function DashboardPage() {
                         >
                             Cheques
                         </SectionTitle>
-                        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xs border border-line bg-line sm:grid-cols-4">
+                        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xs border border-line bg-line lg:grid-cols-5">
                             {CHEQUE_TILES.map(({ key, label, icon, color, to }) => (
                                 <Tile key={key} label={label} value={data.cheques.counts[key]} color={color} to={to} icon={icon} />
                             ))}
                         </div>
-                        {!isTeller && (
-                            <div className="mt-4">
-                                <NextChequePanel next={data.cheques.next} onUsed={() => void load()} />
-                            </div>
-                        )}
                     </section>
 
                     {/* ---- LDDAP ---------------------------------------------------------- */}
@@ -263,15 +261,14 @@ export default function DashboardPage() {
                         >
                             LDDAP-ADA
                         </SectionTitle>
-                        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xs border border-line bg-line sm:grid-cols-3 xl:grid-cols-6">
+                        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xs border border-line bg-line lg:grid-cols-5 max-lg:[&>:last-child:nth-child(odd)]:col-span-2">
                             {LDDAP_TILES.map(({ key, label, color }) => (
                                 <Tile key={key} label={label} value={data.lddaps.counts[key]} color={color} to={`/lddaps?status=${key}`} />
                             ))}
                         </div>
                         <p className="mt-2 text-xs text-muted">
-                            Of the approved,{' '}
-                            <Link to="/lddaps?status=approved" className="font-medium text-brandink hover:underline">
-                                {data.lddaps.awaiting_acic.toLocaleString()} awaiting an ACIC
+                            <Link to="/lddaps?status=for_signature" className="font-medium text-brandink hover:underline">
+                                {data.lddaps.awaiting_acic.toLocaleString()} For Signature, awaiting an ACIC
                             </Link>{' '}
                             · {data.lddaps.on_acic.toLocaleString()} on one (with a check number).
                         </p>
@@ -289,11 +286,10 @@ export default function DashboardPage() {
                         >
                             ACIC
                         </SectionTitle>
-                        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xs border border-line bg-line sm:grid-cols-5">
-                            {ACIC_TILES.map(({ key, label, color, tab }) => (
-                                <Tile key={key} label={label} value={data.acics.counts[key]} color={color} to={`/acics?tab=${tab}`} />
+                        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xs border border-line bg-line lg:grid-cols-5 max-lg:[&>:last-child:nth-child(odd)]:col-span-2">
+                            {ACIC_TILES.map(({ key, label, color }) => (
+                                <Tile key={key} label={label} value={data.acics.counts[key]} color={color} to={`/acics?status=${key}`} />
                             ))}
-                            <div className="bg-card sm:hidden" />
                         </div>
                     </section>
 

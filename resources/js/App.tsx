@@ -1,5 +1,5 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
-import { RequireAdmin, RequireAuth } from './components/guards';
+import { RequireAdmin, RequireAdminOrStaff, RequireAuth } from './components/guards';
 import Layout from './components/Layout';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
@@ -13,6 +13,8 @@ import UsersPage from './pages/UsersPage';
 import LogsPage from './pages/LogsPage';
 import UpdateRequestsPage from './pages/UpdateRequestsPage';
 import TellerQueuePage from './pages/TellerQueuePage';
+import CreditorsPage from './pages/CreditorsPage';
+import PcgPersonnelPage from './pages/PcgPersonnelPage';
 import ProfilePage from './pages/ProfilePage';
 import ChangePasswordPage from './pages/ChangePasswordPage';
 
@@ -37,6 +39,23 @@ export default function App() {
                 <Route path="/acics" element={<AcicsPage />} />
                 {/* Branch B's teller dashboard: Pending and Accepted. */}
                 <Route path="/deposit-queue" element={<TellerQueuePage />} />
+                {/* Reference lists kept by admins and staff. */}
+                <Route
+                    path="/creditors"
+                    element={
+                        <RequireAdminOrStaff>
+                            <CreditorsPage />
+                        </RequireAdminOrStaff>
+                    }
+                />
+                <Route
+                    path="/pcg-personnel"
+                    element={
+                        <RequireAdminOrStaff>
+                            <PcgPersonnelPage />
+                        </RequireAdminOrStaff>
+                    }
+                />
                 <Route
                     path="/admin/lddap-series"
                     element={

@@ -10,13 +10,12 @@ use App\Enums\LddapStatus;
 use App\Enums\NatureOfPayment;
 use App\Enums\RequestStatus;
 use App\Models\Acic;
+use App\Models\Creditor;
 use App\Models\Lddap;
 use App\Models\LddapCheck;
 use App\Models\LddapEditHistory;
 use App\Models\LddapRoutingHistory;
-use App\Models\Payee;
-use App\Models\PayeeAccount;
-use App\Models\Unit;
+use App\Models\PcgPersonnel;
 use App\Models\User;
 use App\Notifications\ActivityNotification;
 use App\Support\Money;
@@ -43,8 +42,8 @@ class LddapService
 
     /** Everything a returned record is read through. */
     private const WITH = [
-        'lddapCheck', 'unit', 'usedBy', 'receivedBy', 'reviewedBy', 'acic',
-        'forwardUnit', 'forwardedBy', 'returnUnit', 'returnedBy', 'canceledBy',
+        'lddapCheck', 'usedBy', 'receivedBy', 'reviewedBy', 'acic',
+        'forwardedBy', 'returnedBy', 'canceledBy',
     ];
 
     public function __construct(
@@ -205,21 +204,23 @@ class LddapService
 
             $now = Carbon::now();
             $attributes = $this->attributes($details, $now);
+            $this->assertDvFree($attributes['dv_no']);
 
             $lddap = Lddap::create($attributes + [
                 'lddap_check_id' => null,
-                'status' => LddapStatus::Registered,
+                // Added straight to For Signature — no status comes before it.
+                'status' => LddapStatus::ForSignature,
                 'created_by' => $user->id,
                 // The staff member who registered it is the one it is returned to, and the one
                 // who will add its check number.
                 'used_by' => $user->id,
             ]);
 
-            $this->trail($lddap, LddapRoutingAction::Registered, null, LddapStatus::Registered, $user, [
+            $this->trail($lddap, LddapRoutingAction::Registered, null, LddapStatus::ForSignature, $user, [
                 'acted_on' => $now->toDateString(),
             ]);
 
-            $payee = $attributes['payee_name'];
+            $payee = $attributes['payee_name'] ?? null;
             $this->logger->log(
                 $user,
                 ChequeAction::RegisteredLddap,
@@ -227,7 +228,7 @@ class LddapService
                 "Registered LDDAP {$lddapNo}".($payee ? " ({$payee})" : '').'.',
             );
 
-            return $lddap->load(['unit', 'usedBy', 'payeeAccount']);
+            return $lddap->load(['usedBy', 'payeeAccount']);
         });
     }
 
@@ -267,6 +268,7 @@ class LddapService
             $this->assertNumberFree($lddapNo, except: $lddap);
 
             $attributes = $this->attributes($details, Carbon::now());
+            $this->assertDvFree($attributes['dv_no'], except: $lddap);
             $before = $lddap->only(array_keys($attributes));
 
             $lddap->fill($attributes)->save();
@@ -329,22 +331,16 @@ class LddapService
      */
     private function attributes(array $details, Carbon $now): array
     {
-        $registered = isset($details['payee_id'])
-            ? Payee::query()->with('accounts')->find((int) $details['payee_id'])
-            : null;
-
-        if (isset($details['payee_id']) && $registered === null) {
-            throw ValidationException::withMessages([
-                'payee_id' => 'Choose a payee from the lookup.',
-            ]);
-        }
-
-        // A registered payee wins; otherwise a typed name is kept for callers that still
-        // send one.
-        $payee = $registered?->name
-            ?? (isset($details['payee_name']) ? trim((string) $details['payee_name']) : null);
-
-        $account = $this->resolveAccount($registered, $details['payee_account_id'] ?? null);
+        // The payee is copied, not linked: its name, which list it came from, and its account
+        // number are written onto the record, so later edits to the Creditor or PCG Personnel
+        // entry never change a past LDDAP. No payee chosen (an edit that leaves it alone) keeps
+        // the one already saved.
+        // (A bare `payee_name`, as internal callers and the seeder send, is taken as typed.)
+        $payee = match (true) {
+            isset($details['payee_type']) => $this->payeeCopy((string) $details['payee_type'], (int) ($details['payee_ref'] ?? 0)),
+            isset($details['payee_name']) => ['payee_name' => $this->text($details['payee_name'])],
+            default => [],
+        };
 
         // Gross is the claim; the net payable is what is left once every withholding and
         // deduction comes off — and that net is `amount`, what the ACIC prints and totals.
@@ -354,18 +350,14 @@ class LddapService
         return [
             'lddap_no' => trim((string) $details['lddap_no']),
             'nca_no' => $this->text($details['nca_no'] ?? null),
-            'orb_no' => $this->text($details['orb_no'] ?? null),
+            'obr_no' => $this->text($details['obr_no'] ?? null),
             'dv_no' => $this->text($details['dv_no'] ?? null),
             'nature_of_payment' => isset($details['nature_of_payment'])
                 ? NatureOfPayment::from((string) $details['nature_of_payment'])
                 : null,
-            'unit_id' => isset($details['unit_id']) ? (int) $details['unit_id'] : null,
+            'unit_name' => $this->text($details['unit_name'] ?? null),
             'obj_no' => $this->text($details['obj_no'] ?? null),
-            'payee_id' => $registered?->id,
-            'payee_name' => $payee !== '' ? $payee : null,
-            'payee_account_id' => $account?->id,
-            'payee_account_no' => $account?->account_no,
-            'payee_bank' => $account?->bank,
+            ...$payee,
             'acic_ref' => $this->text($details['acic_ref'] ?? null),
             ...$money,
             // The date of issue, entered with the record; today when a caller omits it.
@@ -415,49 +407,39 @@ class LddapService
     // ---------------------------------------------------------------- routing
 
     /**
-     * Forward a registered LDDAP out for processing: Registered → For Out.
-     *
-     * @param  array{forward_to: string, unit_id: int, date_forwarded: string, note?: string|null}  $details
+     * Resubmit a corrected RTS record: RTS → For Signature, ready to be assigned to an ACIC.
+     * The comment (required) says what was corrected; the notes are optional. Both are kept on
+     * the trail.
      *
      * @throws ValidationException
      */
-    public function forward(User $user, Lddap $lddap, array $details): Lddap
+    public function resubmit(User $user, Lddap $lddap, string $comment, ?string $notes = null): Lddap
     {
-        return DB::transaction(function () use ($user, $lddap, $details) {
+        $comment = $this->text($comment);
+
+        if ($comment === null) {
+            throw ValidationException::withMessages(['comment' => 'Say what was corrected.']);
+        }
+
+        return DB::transaction(function () use ($user, $lddap, $comment, $notes) {
             $lddap = Lddap::query()->whereKey($lddap->getKey())->lockForUpdate()->firstOrFail();
 
-            $this->assertStep($lddap, $lddap->status->canForward(), 'forwarded', 'Only a Registered or RTS record can be forwarded.');
-            $this->assertNotOnHold($lddap, 'forwarded');
+            $this->assertStep($lddap, $lddap->status->canResubmit(), 'resubmitted', 'Only an RTS record can be resubmitted.');
+            $this->assertNotOnHold($lddap, 'resubmitted');
 
-            $from = $lddap->status;
-            $unit = Unit::query()->findOrFail((int) $details['unit_id']);
-            $on = Carbon::parse((string) $details['date_forwarded'])->toDateString();
-            $to = trim((string) $details['forward_to']);
+            $lddap->update(['status' => LddapStatus::ForSignature]);
 
-            $lddap->update([
-                'status' => LddapStatus::ForOut,
-                'forward_to' => $to,
-                'forward_unit_id' => $unit->id,
-                'forwarded_by' => $user->id,
-                'date_forwarded' => $on,
-                // A forward clears the last return; the record is out again.
-                'return_unit_id' => null,
-                'returned_by' => null,
-                'date_returned' => null,
-            ]);
-
-            $this->trail($lddap, LddapRoutingAction::Forwarded, $from, LddapStatus::ForOut, $user, [
-                'unit_id' => $unit->id,
-                'counterparty' => $to,
-                'acted_on' => $on,
-                'note' => $this->text($details['note'] ?? null),
+            $this->trail($lddap, LddapRoutingAction::Resubmitted, LddapStatus::Rts, LddapStatus::ForSignature, $user, [
+                'acted_on' => Carbon::now()->toDateString(),
+                'note' => $comment,
+                'notes' => $this->text($notes),
             ]);
 
             $this->logger->log(
                 $user,
-                ChequeAction::ForwardedLddap,
+                ChequeAction::ResubmittedLddap,
                 null,
-                "Forwarded LDDAP {$lddap->lddap_no} to {$to} ({$unit->name}) on {$on}.",
+                "Resubmitted LDDAP {$lddap->lddap_no} — back to For Signature. Comment: {$comment}",
             );
 
             return $lddap->fresh(self::WITH);
@@ -465,64 +447,11 @@ class LddapService
     }
 
     /**
-     * Receive a forwarded LDDAP back: For Out → Returned for ACIC.
-     *
-     * @param  array{unit_id: int, date_received: string, note?: string|null}  $details
-     *
-     * @throws ValidationException
-     */
-    public function receive(User $user, Lddap $lddap, array $details): Lddap
-    {
-        return DB::transaction(function () use ($user, $lddap, $details) {
-            $lddap = Lddap::query()->whereKey($lddap->getKey())->lockForUpdate()->firstOrFail();
-
-            $this->assertStep($lddap, $lddap->status->canReceive(), 'received', 'Only a record that is For Out can be received.');
-
-            $unit = Unit::query()->findOrFail((int) $details['unit_id']);
-            $on = Carbon::parse((string) $details['date_received'])->toDateString();
-
-            $lddap->update([
-                'status' => LddapStatus::ReturnedForAcic,
-                'return_unit_id' => $unit->id,
-                'returned_by' => $user->id,
-                'date_returned' => $on,
-            ]);
-
-            $this->trail($lddap, LddapRoutingAction::Received, LddapStatus::ForOut, LddapStatus::ReturnedForAcic, $user, [
-                'unit_id' => $unit->id,
-                'acted_on' => $on,
-                'note' => $this->text($details['note'] ?? null),
-            ]);
-
-            $this->logger->log(
-                $user,
-                ChequeAction::ReceivedLddapBack,
-                null,
-                "Received LDDAP {$lddap->lddap_no} back from {$unit->name} on {$on} — returned for ACIC.",
-            );
-
-            return $lddap->fresh(self::WITH);
-        });
-    }
-
-    /**
-     * Sign a returned LDDAP off: Returned for ACIC → Approved. It becomes available to
-     * "Assign LDDAP to ACIC".
-     *
-     * @throws ValidationException
-     */
-    public function approve(User $admin, Lddap $lddap, ?string $note = null): Lddap
-    {
-        return $this->act($admin, $lddap, LddapStatus::Approved, LddapRoutingAction::Approved, $note);
-    }
-
-    /**
-     * Return to sender: Returned for ACIC → RTS. The record can then be corrected and forwarded
-     * again. Taken with its own fields — who received it and when, the RTS unit, the RTS date
+     * Return to sender: For Signature → RTS. The record can then be corrected and resubmitted. Taken with its own fields — who received it and when, the RTS unit, the RTS date
      * and a required comment — and written as its own history row every time, so a record
      * returned more than once keeps every return.
      *
-     * @param  array{received_on: string, received_by: string, unit_id: int, rts_date: string, note: string}  $details
+     * @param  array{received_on: string, received_by: string, unit_name: string, rts_date: string, note: string}  $details
      *
      * @throws ValidationException
      */
@@ -543,11 +472,11 @@ class LddapService
                 $lddap,
                 $lddap->status->awaitsAction(),
                 'returned to sender',
-                'Approve, RTS and Cancel are taken on a record that is Returned for ACIC.',
+                'RTS and Cancel are taken on a record that is For Signature.',
             );
             $this->assertNotOnHold($lddap, 'returned to sender');
 
-            $unit = Unit::query()->findOrFail((int) $details['unit_id']);
+            $unit = (string) $details['unit_name'];
             $receivedOn = Carbon::parse((string) $details['received_on'])->toDateString();
             $rtsDate = Carbon::parse((string) $details['rts_date'])->toDateString();
             $receivedBy = trim((string) $details['received_by']);
@@ -555,8 +484,8 @@ class LddapService
             // Not a verdict: nothing is stamped as reviewed.
             $lddap->update(['status' => LddapStatus::Rts]);
 
-            $this->trail($lddap, LddapRoutingAction::Rts, LddapStatus::ReturnedForAcic, LddapStatus::Rts, $admin, [
-                'unit_id' => $unit->id,
+            $this->trail($lddap, LddapRoutingAction::Rts, LddapStatus::ForSignature, LddapStatus::Rts, $admin, [
+                'unit_name' => $unit,
                 'received_by_name' => $receivedBy,
                 'received_on' => $receivedOn,
                 'acted_on' => $rtsDate,
@@ -567,7 +496,7 @@ class LddapService
                 $admin,
                 ChequeAction::ReviewedLddap,
                 null,
-                "LDDAP {$lddap->lddap_no}: returned to sender ({$unit->name}, {$rtsDate}) by {$admin->name}. Comment: {$note}",
+                "LDDAP {$lddap->lddap_no}: returned to sender ({$unit}, {$rtsDate}) by {$admin->name}. Comment: {$note}",
             );
 
             $lddap->usedBy?->notify(new ActivityNotification(
@@ -607,7 +536,7 @@ class LddapService
                 $lddap,
                 $lddap->status->awaitsAction(),
                 'canceled',
-                'Approve, RTS and Cancel are taken on a record that is Returned for ACIC.',
+                'RTS and Cancel are taken on a record that is For Signature.',
             );
             $this->assertNotOnHold($lddap, 'canceled');
 
@@ -627,7 +556,7 @@ class LddapService
                 'review_note' => $reason,
             ]);
 
-            $this->trail($lddap, LddapRoutingAction::Canceled, LddapStatus::ReturnedForAcic, LddapStatus::Canceled, $admin, [
+            $this->trail($lddap, LddapRoutingAction::Canceled, LddapStatus::ForSignature, LddapStatus::Canceled, $admin, [
                 'acted_on' => $on,
                 'note' => $reason,
             ]);
@@ -643,61 +572,6 @@ class LddapService
                 kind: 'rejected',
                 title: "LDDAP {$lddap->lddap_no} — Canceled",
                 message: "{$admin->name} canceled LDDAP {$lddap->lddap_no}. Reason: {$reason}",
-                url: '/lddaps',
-            ));
-
-            return $lddap->fresh(self::WITH);
-        });
-    }
-
-    /**
-     * The body of Approve — taken from Returned for ACIC and only from there. (RTS and Cancel
-     * are taken from there too, each with its own fields: see `rts()` and `cancel()`.)
-     *
-     * @throws ValidationException
-     */
-    private function act(User $admin, Lddap $lddap, LddapStatus $to, LddapRoutingAction $action, ?string $note): Lddap
-    {
-        return DB::transaction(function () use ($admin, $lddap, $to, $action, $note) {
-            $lddap = Lddap::query()->whereKey($lddap->getKey())->lockForUpdate()->firstOrFail();
-
-            $verb = strtolower($action->label());
-            $this->assertStep(
-                $lddap,
-                $lddap->status->awaitsAction(),
-                $verb,
-                'Approve, RTS and Cancel are taken on a record that is Returned for ACIC.',
-            );
-            $this->assertNotOnHold($lddap, $verb);
-
-            $now = Carbon::now();
-            $note = $this->text($note);
-
-            $lddap->update([
-                'status' => $to,
-                // Approve and Cancel are verdicts and are stamped as such; RTS is not.
-                'reviewed_by' => $to->isReviewOutcome() ? $admin->id : $lddap->reviewed_by,
-                'reviewed_at' => $to->isReviewOutcome() ? $now : $lddap->reviewed_at,
-                'review_note' => $to->isReviewOutcome() ? $note : $lddap->review_note,
-            ]);
-
-            $this->trail($lddap, $action, LddapStatus::ReturnedForAcic, $to, $admin, [
-                'acted_on' => $now->toDateString(),
-                'note' => $note,
-            ]);
-
-            $this->logger->log(
-                $admin,
-                ChequeAction::ReviewedLddap,
-                null,
-                "LDDAP {$lddap->lddap_no}: {$action->label()} by {$admin->name}.".($note ? " Note: {$note}" : ''),
-            );
-
-            // Tell the staff member who registered it.
-            $lddap->usedBy?->notify(new ActivityNotification(
-                kind: $to === LddapStatus::Approved ? 'approved' : 'request',
-                title: "LDDAP {$lddap->lddap_no} — {$action->label()}",
-                message: "{$admin->name} marked LDDAP {$lddap->lddap_no} as {$to->label()}.".($note ? " Note: {$note}" : ''),
                 url: '/lddaps',
             ));
 
@@ -724,7 +598,7 @@ class LddapService
     /**
      * Append one step to the record's routing trail.
      *
-     * @param  array{unit_id?: int|null, counterparty?: string|null, received_by_name?: string|null, received_on?: string|null, acted_on?: string|null, note?: string|null}  $extra
+     * @param  array{unit_name?: string|null, counterparty?: string|null, received_by_name?: string|null, received_on?: string|null, acted_on?: string|null, note?: string|null, notes?: string|null}  $extra
      */
     private function trail(Lddap $lddap, LddapRoutingAction $action, ?LddapStatus $from, LddapStatus $to, User $user, array $extra = []): void
     {
@@ -734,12 +608,13 @@ class LddapService
             'from_status' => $from,
             'to_status' => $to,
             'user_id' => $user->id,
-            'unit_id' => $extra['unit_id'] ?? null,
+            'unit_name' => $extra['unit_name'] ?? null,
             'counterparty' => $extra['counterparty'] ?? null,
             'received_by_name' => $extra['received_by_name'] ?? null,
             'received_on' => $extra['received_on'] ?? null,
             'acted_on' => $extra['acted_on'] ?? null,
             'note' => $extra['note'] ?? null,
+            'notes' => $extra['notes'] ?? null,
         ]);
     }
 
@@ -795,9 +670,9 @@ class LddapService
     public function linkable(): Collection
     {
         return Lddap::query()
-            ->where('status', LddapStatus::Approved)
+            ->where('status', LddapStatus::ForSignature)
             ->whereNull('acic_id')
-            ->with(['lddapCheck', 'usedBy', 'unit'])
+            ->with(['lddapCheck', 'usedBy'])
             // Linkable records have no check number yet, so the order the dialog shows — and
             // hands numbers out in — is registration order.
             ->orderBy('id')
@@ -805,7 +680,7 @@ class LddapService
     }
 
     /**
-     * Put approved LDDAPs on an ACIC. Many approved LDDAPs may share one ACIC number.
+     * Put For Signature LDDAPs on an ACIC, which makes them Approved. Many may share one ACIC.
      *
      * Everything is validated under a lock: the records must exist, be approved, and not
      * already belong to another ACIC. A partial match fails the whole request — nothing is
@@ -831,31 +706,7 @@ class LddapService
     public function assignToAcicNumber(User $user, int $acicNo, array $lddapIds, ?array $expectedCheckNos = null): Acic
     {
         return DB::transaction(function () use ($user, $acicNo, $lddapIds, $expectedCheckNos) {
-            $acic = Acic::query()->where('acic_number', $acicNo)->lockForUpdate()->first();
-
-            if ($acic !== null) {
-                if (! $acic->status->acceptsRecords()) {
-                    throw ValidationException::withMessages([
-                        'acic_no' => "ACIC #{$acicNo} is {$acic->status->label()} and no longer accepts records.",
-                    ]);
-                }
-            } else {
-                $next = $this->acics->nextNumber();
-
-                if ($next === null) {
-                    throw ValidationException::withMessages([
-                        'acic_no' => 'No ACIC numbers are available. An administrator has to register a range first.',
-                    ]);
-                }
-
-                if ($acicNo !== $next) {
-                    throw ValidationException::withMessages([
-                        'acic_no' => "ACIC #{$acicNo} is not open. Enter an existing ACIC number, or the next one in the series (#{$next}).",
-                    ]);
-                }
-
-                $acic = $this->acics->create($user);
-            }
+            $acic = $this->acics->resolveForAssignment($user, $acicNo);
 
             return $this->assignToAcic($user, $acic, $lddapIds, $expectedCheckNos);
         });
@@ -897,14 +748,14 @@ class LddapService
                 ]);
             }
 
-            // Only signed-off LDDAPs may be transmitted.
-            $notApproved = $lddaps->filter(fn (Lddap $l) => ! $l->status->isApproved());
+            // Only For Signature LDDAPs may go on an ACIC (one already on this ACIC is harmless).
+            $notReady = $lddaps->filter(fn (Lddap $l) => ! $l->status->isAcicEligible() && $l->acic_id !== $acic->id);
 
-            if ($notApproved->isNotEmpty()) {
-                $names = $notApproved->pluck('lddap_no')->sort()->implode(', ');
+            if ($notReady->isNotEmpty()) {
+                $names = $notReady->pluck('lddap_no')->sort()->implode(', ');
 
                 throw ValidationException::withMessages([
-                    'lddap_ids' => "Only approved LDDAP records can be linked to an ACIC. Not approved: {$names}.",
+                    'lddap_ids' => "Only For Signature LDDAP records can be linked to an ACIC. Not eligible: {$names}.",
                 ]);
             }
 
@@ -927,6 +778,15 @@ class LddapService
             $this->checks->claim($user, $lddaps, $expectedCheckNos);
 
             Lddap::query()->whereIn('id', $lddapIds)->update(['acic_id' => $acic->id]);
+
+            // On the ACIC: For Signature → Approved, each a step on its own trail.
+            foreach ($lddaps->filter(fn (Lddap $l) => $l->status === LddapStatus::ForSignature) as $lddap) {
+                $lddap->forceFill(['status' => LddapStatus::Approved, 'acic_id' => $acic->id])->save();
+                $this->trail($lddap, LddapRoutingAction::Assigned, LddapStatus::ForSignature, LddapStatus::Approved, $user, [
+                    'acted_on' => Carbon::now()->toDateString(),
+                    'note' => "ACIC #{$acic->acic_number}",
+                ]);
+            }
 
             // Who put what on the ACIC, and when — with the numbers they were given.
             $summary = $lddaps->map(fn (Lddap $l) => $l->lddap_no.' (check #'.$l->fresh('lddapCheck')->lddapCheck?->check_no.')')
@@ -959,42 +819,85 @@ class LddapService
     }
 
     /**
-     * Which of the payee's accounts the payment goes to. Named explicitly, or — when the payee
-     * has exactly one — that one; a payee with several and no choice made is refused.
+     * The payee as the record keeps it — name, type and account number, copied from the
+     * Creditors or PCG Personnel entry chosen. The legacy `payees` link is cleared.
+     *
+     * @return array{payee_name: string, payee_type: string, payee_account_no: string, payee_id: null, payee_account_id: null, payee_bank: null}
      *
      * @throws ValidationException
      */
-    private function resolveAccount(?Payee $payee, mixed $accountId): ?PayeeAccount
+    private function payeeCopy(string $type, int $ref): array
     {
-        if ($payee === null) {
-            return null;
+        $holder = match ($type) {
+            'creditor' => Creditor::query()->find($ref),
+            'pcg_personnel' => PcgPersonnel::query()->find($ref),
+            default => null,
+        };
+
+        if ($holder === null) {
+            throw ValidationException::withMessages(['payee_ref' => 'Choose a payee from the list.']);
         }
 
-        if ($accountId !== null && $accountId !== '') {
-            $account = $payee->accounts->firstWhere('id', (int) $accountId);
+        return [
+            'payee_name' => $holder->name,
+            'payee_type' => $type,
+            'payee_account_no' => $holder->account_no,
+            'payee_id' => null,
+            'payee_account_id' => null,
+            'payee_bank' => null,
+        ];
+    }
 
-            if ($account === null) {
-                throw ValidationException::withMessages([
-                    'payee_account_id' => "That account does not belong to {$payee->name}.",
-                ]);
+    /**
+     * The payee search: every Creditor and PCG Personnel entry in one list, matched on name
+     * or account number, name order.
+     *
+     * @return list<array{type: string, type_label: string, id: int, name: string, account_no: string, unit: string|null}>
+     */
+    public function payeeOptions(?string $term, int $limit = 100): array
+    {
+        $rows = collect();
+        foreach (['creditor' => Creditor::class, 'pcg_personnel' => PcgPersonnel::class] as $type => $model) {
+            $query = $model::query()->orderBy('name')->limit($limit);
+            if ($term !== null && trim($term) !== '') {
+                $like = '%'.strtolower(trim($term)).'%';
+                $query->where(fn ($q) => $q->whereRaw('lower(name) like ?', [$like])
+                    ->orWhereRaw('lower(account_no) like ?', [$like]));
             }
-
-            return $account;
+            $rows = $rows->concat($query->get()->map(fn ($h) => [
+                'type' => $type,
+                'type_label' => $type === 'creditor' ? 'Creditor' : 'PCG Personnel',
+                'id' => $h->id,
+                'name' => $h->name,
+                'account_no' => $h->account_no,
+                'unit' => $h->unit,
+            ]));
         }
 
-        if ($payee->accounts->count() === 1) {
-            return $payee->accounts->first();
+        return $rows->sortBy(fn ($r) => strtolower($r['name']))->take($limit)->values()->all();
+    }
+
+    /**
+     * The DV Number must not be on any other record — checked under a lock, alongside the
+     * form rule and the database's unique index.
+     *
+     * @throws ValidationException
+     */
+    private function assertDvFree(?string $dvNo, ?Lddap $except = null): void
+    {
+        if ($dvNo === null || $dvNo === '') {
+            return;
         }
 
-        if ($payee->accounts->isEmpty()) {
-            throw ValidationException::withMessages([
-                'payee_account_id' => "{$payee->name} has no bank account on file.",
-            ]);
-        }
+        $taken = Lddap::query()
+            ->where('dv_no', $dvNo)
+            ->when($except, fn ($q) => $q->whereKeyNot($except->getKey()))
+            ->lockForUpdate()
+            ->exists();
 
-        throw ValidationException::withMessages([
-            'payee_account_id' => "{$payee->name} has several accounts — choose the one the payment goes to.",
-        ]);
+        if ($taken) {
+            throw ValidationException::withMessages(['dv_no' => 'DV Number already exists.']);
+        }
     }
 
     /**

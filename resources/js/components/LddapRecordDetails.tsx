@@ -132,6 +132,9 @@ export default function LddapRecordDetails({ lddap, compact = false }: Props) {
                         value={
                             <>
                                 {lddap.payee_name ?? '—'}
+                                {lddap.payee_type_label && (
+                                    <span className="mt-0.5 block text-xs text-subtle">{lddap.payee_type_label}</span>
+                                )}
                                 {lddap.payee_account_no && (
                                     <span className="mt-0.5 block font-mono text-xs text-muted">
                                         {lddap.payee_account_no}
@@ -168,8 +171,8 @@ export default function LddapRecordDetails({ lddap, compact = false }: Props) {
             {/* ---- Details ------------------------------------------------------- */}
             <Section title="LDDAP Details">
                 <Row label="LDDAP No." value={<span className="font-display font-bold">{lddap.lddap_no}</span>} />
-                <Row label="NCA No." value={lddap.nca_no ?? '—'} />
-                <Row label="ORB No." value={lddap.orb_no ?? '—'} />
+                <Row label="NCA Code" value={<span className="font-mono">{lddap.nca_no ?? '—'}</span>} />
+                <Row label="OBR No." value={lddap.obr_no ?? '—'} />
                 <Row label="DV No." value={lddap.dv_no ?? '—'} />
                 <Row label="Nature of payment" value={lddap.nature_of_payment_label ?? '—'} />
                 <Row label="UACS object code" value={<span className="font-mono">{lddap.obj_no ?? '—'}</span>} />
@@ -187,6 +190,7 @@ export default function LddapRecordDetails({ lddap, compact = false }: Props) {
             {/* ---- Payee --------------------------------------------------------- */}
             <Section title="Payee">
                 <Row label="Payee name" value={lddap.payee_name ?? '—'} />
+                <Row label="Payee Type" value={lddap.payee_type_label ?? '—'} />
                 <Row label="Account No." value={<span className="font-mono">{lddap.payee_account_no ?? '—'}</span>} />
                 <Row label="Bank" value={lddap.payee_bank ?? '—'} />
                 <Row label="Gross amount" value={<span className="font-mono">{formatMoney(gross)}</span>} />

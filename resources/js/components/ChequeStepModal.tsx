@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { X, Send, Inbox, HandCoins, Undo2, Ban, Slash } from 'lucide-react';
+import { X, HandCoins, Ban, Slash } from 'lucide-react';
 import { ChequeApi, toApiError } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
 import type { Cheque } from '../lib/types';
@@ -7,7 +7,7 @@ import { formatDate, formatMoney } from '../lib/format';
 import { Alert, StatusBadge, ValidityBadge } from './ui';
 
 /** Which step of the flow the dialog is taking. */
-export type ChequeStep = 'route' | 'receive' | 'release' | 'rts' | 'cancel' | 'void';
+export type ChequeStep = 'release' | 'cancel' | 'spoil';
 
 interface Props {
     cheque: Cheque;
@@ -33,17 +33,13 @@ function Field({ label, htmlFor, optional = false, children }: { label: string; 
 }
 
 const TITLES: Record<ChequeStep, string> = {
-    route: 'Route for Signature',
-    receive: 'Mark as Received',
     release: 'Release to Payee',
-    rts: 'Return to Sender',
     cancel: 'Cancel Cheque',
-    void: 'Void Cheque',
+    spoil: 'Mark as Spoiled',
 };
 
 /**
- * Every step a cheque takes, in one dialog: routed out for signature, marked received, released
- * to the payee, or taken out of the flow by RTS, Cancel or Void.
+ * The cheque steps that need a form, in one dialog: releasing to the payee, or taking the cheque out of the flow by Cancel or Spoil.
  *
  * Each one opens on the cheque itself — number, payee, amount, date and how long it has left —
  * so the decision is made against the cheque rather than from memory. The status the page was
@@ -57,14 +53,27 @@ export default function ChequeStepModal({ cheque, step, onClose, onDone }: Props
     const [fieldErrors, setFieldErrors] = useState<Record<string, string[]>>({});
     const [confirming, setConfirming] = useState(false);
 
-    const [forwardTo, setForwardTo] = useState('');
-    const [unit, setUnit] = useState('');
     const [date, setDate] = useState(today());
     const [receivedBy, setReceivedBy] = useState(
         step === 'release' ? (cheque.payee_name ?? '') : (user?.name ?? ''),
     );
     const [note, setNote] = useState('');
     const [reason, setReason] = useState('');
+    // Spoil only: the number the replacement will take — shown before saving, and sent so the
+    // step is refused if someone else takes it first.
+    const [replacementNo, setReplacementNo] = useState<number | null | undefined>(undefined);
+
+    async function loadReplacementNo() {
+        try {
+            setReplacementNo(await ChequeApi.nextNumber());
+        } catch (err) {
+            setError(toApiError(err).message);
+        }
+    }
+
+    useEffect(() => {
+        if (step === 'spoil') void loadReplacementNo();
+    }, [step]);
 
     useEffect(() => {
         function onKey(e: KeyboardEvent) {
@@ -76,18 +85,22 @@ export default function ChequeStepModal({ cheque, step, onClose, onDone }: Props
 
     const expected = cheque.status;
 
-    async function run(what: string, call: () => Promise<Cheque>) {
+    /** `what` finishes the page's "Cheque #N …" notice; it may read from the saved cheque. */
+    async function run(what: string | ((saved: Cheque) => string), call: () => Promise<Cheque>) {
         setBusy(true);
         setError('');
         setFieldErrors({});
         try {
-            onDone(await call(), what);
+            const saved = await call();
+            onDone(saved, typeof what === 'string' ? what : what(saved));
         } catch (err) {
             const apiErr = toApiError(err);
             setFieldErrors(apiErr.errors);
             setError(Object.values(apiErr.errors)[0]?.[0] ?? apiErr.message);
             setConfirming(false);
             setBusy(false);
+            // The previewed number went to someone else: show the one it would take now.
+            if (step === 'spoil' && apiErr.errors.replacement_number) void loadReplacementNo();
         }
     }
 
@@ -96,27 +109,7 @@ export default function ChequeStepModal({ cheque, step, onClose, onDone }: Props
     function submit(e: FormEvent) {
         e.preventDefault();
 
-        if (step === 'route') {
-            void run('routed for signature', () =>
-                ChequeApi.routeForSignature(cheque.id, {
-                    forward_to_name: forwardTo.trim(),
-                    forward_unit_name: unit.trim() || undefined,
-                    date_forwarded: date,
-                    note: note.trim() || undefined,
-                    expected_status: expected,
-                }),
-            );
-        } else if (step === 'receive') {
-            void run('received — now For ACIC', () =>
-                ChequeApi.markAsReceived(cheque.id, {
-                    received_by_name: receivedBy.trim() || undefined,
-                    date_received: date,
-                    from_unit_name: unit.trim() || undefined,
-                    note: note.trim() || undefined,
-                    expected_status: expected,
-                }),
-            );
-        } else if (step === 'release') {
+        if (step === 'release') {
             // The last word before something that cannot be undone.
             if (!confirming) {
                 setConfirming(true);
@@ -130,15 +123,27 @@ export default function ChequeStepModal({ cheque, step, onClose, onDone }: Props
                     expected_status: expected,
                 }),
             );
+        } else if (step === 'spoil') {
+            // The number is used up for good: one more look before it goes.
+            if (!confirming) {
+                setConfirming(true);
+                return;
+            }
+            void run(
+                (spoiled) =>
+                    spoiled.replaced_by
+                        ? `spoiled — the payment moves to Cheque #${spoiled.replaced_by.cheque_number}`
+                        : 'spoiled',
+                () => ChequeApi.spoil(cheque.id, reason.trim(), replacementNo ?? null, expected),
+            );
         } else {
-            const verb = { rts: 'returned to sender', cancel: 'cancelled', void: 'voided' }[step];
-            void run(verb, () => ChequeApi.except(cheque.id, step, reason.trim(), expected));
+            void run('cancelled', () => ChequeApi.except(cheque.id, 'cancel', reason.trim(), expected));
         }
     }
 
-    const needsReason = step === 'rts' || step === 'cancel' || step === 'void';
-    const destructive = step === 'cancel' || step === 'void';
-    const Icon = { route: Send, receive: Inbox, release: HandCoins, rts: Undo2, cancel: Ban, void: Slash }[step];
+    const needsReason = step === 'cancel' || step === 'spoil';
+    const destructive = step === 'cancel' || step === 'spoil';
+    const Icon = { release: HandCoins, cancel: Ban, spoil: Slash }[step];
 
     return (
         <div
@@ -190,7 +195,24 @@ export default function ChequeStepModal({ cheque, step, onClose, onDone }: Props
                     </div>
                 )}
 
-                {confirming ? (
+                {confirming && step === 'spoil' ? (
+                    <div className="space-y-4">
+                        <div className="rounded-xs border border-danger/40 bg-danger/10 p-3 text-sm text-fg">
+                            Mark cheque #{cheque.cheque_number} as <span className="font-semibold">Spoiled</span>? Its number is
+                            used up for good, and the payment moves to{' '}
+                            <span className="font-semibold">Cheque #{replacementNo}</span>. This cannot be undone.
+                        </div>
+                        <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+                            <button type="button" className="btn btn-ghost" onClick={() => setConfirming(false)} disabled={busy}>
+                                Back
+                            </button>
+                            <button type="button" className="btn btn-primary !bg-danger hover:!bg-danger/80" onClick={submit} disabled={busy} autoFocus>
+                                <Slash className="h-4 w-4" />
+                                {busy ? 'Saving…' : 'Confirm Spoiled'}
+                            </button>
+                        </div>
+                    </div>
+                ) : confirming ? (
                     <div className="space-y-4">
                         <div className="rounded-xs border border-accent-400/50 bg-accent-400/10 p-3 text-sm text-fg">
                             Release cheque #{cheque.cheque_number} to{' '}
@@ -208,49 +230,6 @@ export default function ChequeStepModal({ cheque, step, onClose, onDone }: Props
                     </div>
                 ) : (
                     <form onSubmit={submit} className="space-y-3">
-                        {step === 'route' && (
-                            <>
-                                <Field label="Forward to" htmlFor="st-to">
-                                    <input
-                                        id="st-to"
-                                        className="field !py-1.5"
-                                        value={forwardTo}
-                                        onChange={(e) => setForwardTo(e.target.value)}
-                                        placeholder="Signatory or office"
-                                        maxLength={255}
-                                        required
-                                        autoFocus
-                                    />
-                                    {fieldError('forward_to_name') && <p className="mt-1 text-xs text-danger-fg">{fieldError('forward_to_name')}</p>}
-                                </Field>
-                                <Field label="Unit name" htmlFor="st-unit" optional>
-                                    <input id="st-unit" className="field !py-1.5" value={unit} onChange={(e) => setUnit(e.target.value)} maxLength={255} />
-                                </Field>
-                                <Field label="Forwarded by" htmlFor="st-by">
-                                    <input id="st-by" className="field !py-1.5" value={user?.name ?? ''} disabled readOnly />
-                                </Field>
-                            </>
-                        )}
-
-                        {step === 'receive' && (
-                            <>
-                                <Field label="Received by" htmlFor="st-recv">
-                                    <input
-                                        id="st-recv"
-                                        className="field !py-1.5"
-                                        value={receivedBy}
-                                        onChange={(e) => setReceivedBy(e.target.value)}
-                                        maxLength={255}
-                                        autoFocus
-                                    />
-                                </Field>
-                                <Field label="From unit name" htmlFor="st-unit" optional>
-                                    <input id="st-unit" className="field !py-1.5" value={unit} onChange={(e) => setUnit(e.target.value)} maxLength={255} />
-                                </Field>
-                                <p className="text-xs text-subtle">On save the cheque becomes <strong>For ACIC</strong>.</p>
-                            </>
-                        )}
-
                         {step === 'release' && (
                             <Field label="Received by" htmlFor="st-recv">
                                 <input
@@ -270,8 +249,8 @@ export default function ChequeStepModal({ cheque, step, onClose, onDone }: Props
                             </Field>
                         )}
 
-                        {!needsReason && (
-                            <Field label={step === 'route' ? 'Date forwarded' : 'Date received'} htmlFor="st-date">
+                        {step === 'release' && (
+                            <Field label="Date received" htmlFor="st-date">
                                 <input
                                     id="st-date"
                                     type="date"
@@ -290,12 +269,27 @@ export default function ChequeStepModal({ cheque, step, onClose, onDone }: Props
                         {needsReason ? (
                             <>
                                 <div className={`rounded-xs border p-3 text-sm ${destructive ? 'border-danger/40 bg-danger/10 text-danger-fg' : 'border-amber-400/50 bg-amber-400/10 text-fg'}`}>
-                                    {step === 'rts'
-                                        ? 'The cheque goes back to Registered, ready to be corrected and routed again.'
-                                        : step === 'cancel'
+                                    {step === 'cancel'
                                           ? 'This closes the cheque for good, before it ever reaches an ACIC.'
-                                          : 'This voids the cheque. Its number stays used and is never reassigned.'}
+                                          : 'The cheque is spoiled: its number stays used and is never assigned again. The payment moves to a new cheque on the next available number, with the same payee and amount, dated today.'}
                                 </div>
+                                {step === 'spoil' && (
+                                    <div className="flex items-center justify-between gap-4 rounded-xs border border-line bg-well p-3 text-sm">
+                                        <span className="text-subtle">Replacement cheque</span>
+                                        <span className="font-display font-bold text-brandink" aria-live="polite">
+                                            {replacementNo === undefined
+                                                ? 'Checking…'
+                                                : replacementNo === null
+                                                  ? 'No numbers left'
+                                                  : `#${replacementNo}`}
+                                        </span>
+                                    </div>
+                                )}
+                                {step === 'spoil' && replacementNo === null && (
+                                    <p className="text-xs text-danger-fg">
+                                        There are no available cheque numbers for the replacement. Ask an admin to add a new range first.
+                                    </p>
+                                )}
                                 <Field label="Reason" htmlFor="st-reason">
                                     <textarea
                                         id="st-reason"
@@ -307,7 +301,9 @@ export default function ChequeStepModal({ cheque, step, onClose, onDone }: Props
                                         required
                                         autoFocus
                                     />
-                                    {fieldError('reason') && <p className="mt-1 text-xs text-danger-fg">{fieldError('reason')}</p>}
+                                    {(fieldError('reason') ?? fieldError('comment')) && (
+                                        <p className="mt-1 text-xs text-danger-fg">{fieldError('reason') ?? fieldError('comment')}</p>
+                                    )}
                                 </Field>
                             </>
                         ) : (
@@ -323,7 +319,7 @@ export default function ChequeStepModal({ cheque, step, onClose, onDone }: Props
                             <button
                                 type="submit"
                                 className={`btn btn-primary ${destructive ? '!bg-danger hover:!bg-danger/80' : ''}`}
-                                disabled={busy || (needsReason && reason.trim().length < 3)}
+                                disabled={busy || (needsReason && reason.trim().length < 3) || (step === 'spoil' && !replacementNo)}
                             >
                                 <Icon className="h-4 w-4" />
                                 {busy ? 'Saving…' : TITLES[step]}

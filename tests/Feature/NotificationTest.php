@@ -2,11 +2,9 @@
 
 namespace Tests\Feature;
 
-use App\Models\Cheque;
-use App\Models\ChequeUpdateRequest;
 use App\Models\User;
+use App\Services\ChequeFlowService;
 use App\Services\ChequeService;
-use App\Services\UpdateRequestService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -51,56 +49,48 @@ class NotificationTest extends TestCase
         $this->assertSame(0, $admin->fresh()->unreadNotifications()->count());
     }
 
-    public function test_the_update_request_lifecycle_notifies_the_right_people(): void
+    public function test_a_draft_goes_to_the_admins_and_the_verdict_back_to_the_preparer(): void
     {
         $admin = User::factory()->admin()->create();
+        $super = User::factory()->superAdmin()->create();
         $staff = User::factory()->create();
         $this->seedRange($admin);
 
-        $cheques = app(ChequeService::class);
-        $cheques->useNext($staff, 1, ['payee_name' => 'Acme Co', 'amount' => 1000, 'cheque_date' => '2026-07-19']);
-        $cheque = Cheque::where('cheque_number', 1)->first();
+        $cheque = app(ChequeService::class)->useNext($staff, 1, ['payee_name' => 'Acme Co', 'amount' => 1000, 'cheque_date' => '2026-07-19']);
 
-        // Clear the "used" notification so we assert only on the request lifecycle.
+        // Clear the "used" notifications so we assert only on the draft.
         $admin->notifications()->delete();
+        $super->notifications()->delete();
 
-        $requests = app(UpdateRequestService::class);
-        $request = $requests->create($staff, $cheque, [
-            'payee_name' => 'Acme Corporation',
-            'amount' => 1250.50,
-            'cheque_date' => '2026-07-20',
-        ], 'Payee misspelled.');
+        $flow = app(ChequeFlowService::class);
+        $flow->printDraft($staff, $cheque);
 
-        // Admin is notified of the pending request.
+        // Every admin in charge — Administrator and Super Admin — is asked to check it.
+        $this->assertSame('request', $super->notifications()->first()->data['kind']);
         $this->assertSame('request', $admin->notifications()->first()->data['kind']);
-        $this->assertSame(0, $staff->fresh()->unreadNotifications()->count());
+        $this->assertSame(0, $staff->notifications()->count());
 
-        $requests->approve($admin, ChequeUpdateRequest::find($request->id), 'Looks right.');
+        $flow->approveDraft($super, $cheque->fresh(), 'Looks right.');
 
-        // The requester is notified of the approval.
+        // The preparer hears the verdict.
         $this->assertSame('approved', $staff->notifications()->first()->data['kind']);
     }
 
-    public function test_a_rejection_notifies_the_requester(): void
+    public function test_a_returned_draft_tells_the_preparer_what_to_change(): void
     {
         $admin = User::factory()->admin()->create();
+        $super = User::factory()->superAdmin()->create();
         $staff = User::factory()->create();
         $this->seedRange($admin);
 
-        $cheques = app(ChequeService::class);
-        $cheques->useNext($staff, 1, ['payee_name' => 'Acme Co', 'amount' => 1000, 'cheque_date' => '2026-07-19']);
-        $cheque = Cheque::where('cheque_number', 1)->first();
+        $cheque = app(ChequeService::class)->useNext($staff, 1, ['payee_name' => 'Acme Co', 'amount' => 1000, 'cheque_date' => '2026-07-19']);
+        $flow = app(ChequeFlowService::class);
+        $flow->printDraft($staff, $cheque);
+        $flow->returnDraft($super, $cheque->fresh(), 'Amount in words is wrong.');
 
-        $requests = app(UpdateRequestService::class);
-        $request = $requests->create($staff, $cheque, [
-            'payee_name' => 'Acme Corporation',
-            'amount' => 1250.50,
-            'cheque_date' => '2026-07-20',
-        ], 'Payee misspelled.');
-
-        $requests->reject($admin, ChequeUpdateRequest::find($request->id), 'Not enough detail.');
-
-        $this->assertSame('rejected', $staff->notifications()->latest()->first()->data['kind']);
+        $note = $staff->notifications()->latest()->first()->data;
+        $this->assertSame('rejected', $note['kind']);
+        $this->assertStringContainsString('Amount in words is wrong.', $note['message']);
     }
 
     public function test_the_feed_endpoint_returns_notifications_and_unread_count(): void

@@ -38,6 +38,8 @@ class UserController extends Controller
 
     public function update(UpdateUserRequest $request, User $user): JsonResponse
     {
+        $this->assertMayManage($request->user(), $user);
+
         $data = $request->validated();
 
         // Don't overwrite the password with a blank when it's left empty on edit.
@@ -59,6 +61,8 @@ class UserController extends Controller
 
     public function destroy(Request $request, User $user): JsonResponse
     {
+        $this->assertMayManage($request->user(), $user);
+
         if ($user->id === $request->user()->id) {
             throw ValidationException::withMessages([
                 'user' => 'You cannot delete your own account.',
@@ -76,5 +80,15 @@ class UserController extends Controller
         );
 
         return response()->json(['data' => ['message' => 'User deleted.']]);
+    }
+
+    /** A Super Admin is changed or removed only by a Super Admin. */
+    private function assertMayManage(User $actor, User $target): void
+    {
+        if ($target->isSuperAdmin() && ! $actor->isSuperAdmin()) {
+            throw ValidationException::withMessages([
+                'user' => 'Only a Super Admin can change or delete a Super Admin.',
+            ]);
+        }
     }
 }

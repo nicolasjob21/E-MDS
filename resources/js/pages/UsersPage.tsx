@@ -2,11 +2,14 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { UserPlus, Trash2 } from 'lucide-react';
 import { UserApi, toApiError } from '../lib/api';
 import type { Role, User } from '../lib/types';
+import { roleLabel } from '../lib/format';
 import { useAuth } from '../auth/AuthContext';
 import { PageHeader, Spinner, Alert, EmptyState } from '../components/ui';
 
 export default function UsersPage() {
-    const { user: currentUser } = useAuth();
+    const { user: currentUser, isSuperAdmin } = useAuth();
+    // Only a Super Admin may give someone the Super Admin role.
+    const roleOptions: Role[] = isSuperAdmin ? ['staff', 'teller', 'admin', 'super_admin'] : ['staff', 'teller', 'admin'];
     const [users, setUsers] = useState<User[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -152,8 +155,11 @@ export default function UsersPage() {
                                 value={role}
                                 onChange={(e) => setRole(e.target.value as Role)}
                             >
-                                <option value="staff">Staff</option>
-                                <option value="admin">Administrator</option>
+                                {roleOptions.map((r) => (
+                                    <option key={r} value={r}>
+                                        {roleLabel(r)}
+                                    </option>
+                                ))}
                             </select>
                         </div>
                     </div>
@@ -188,6 +194,8 @@ export default function UsersPage() {
                             <tbody>
                                 {users.map((u) => {
                                     const isSelf = u.id === currentUser?.id;
+                                    // A Super Admin is changed or removed only by a Super Admin.
+                                    const locked = isSelf || (u.role === 'super_admin' && !isSuperAdmin);
                                     return (
                                         <tr key={u.id} className="border-b border-line/60 last:border-0">
                                             <td className="px-4 py-3 text-fg">
@@ -199,11 +207,15 @@ export default function UsersPage() {
                                                 <select
                                                     className="field !py-1 !text-xs"
                                                     value={u.role}
-                                                    disabled={isSelf}
+                                                    disabled={locked}
                                                     onChange={(e) => void patch(u, { role: e.target.value })}
+                                                    aria-label={`Role of ${u.username}`}
                                                 >
-                                                    <option value="staff">Staff</option>
-                                                    <option value="admin">Administrator</option>
+                                                    {(u.role === 'super_admin' && !isSuperAdmin ? ['super_admin' as Role] : roleOptions).map((r) => (
+                                                        <option key={r} value={r}>
+                                                            {roleLabel(r)}
+                                                        </option>
+                                                    ))}
                                                 </select>
                                             </td>
                                             <td className="px-4 py-3">
@@ -213,7 +225,7 @@ export default function UsersPage() {
                                                             ? 'border-brand-400/40 bg-brand-500/10 text-brandink'
                                                             : 'border-slate-600/50 bg-slate-500/10 text-muted'
                                                     }`}
-                                                    disabled={isSelf}
+                                                    disabled={locked}
                                                     onClick={() => void patch(u, { is_active: !u.is_active })}
                                                 >
                                                     {u.is_active ? 'Active' : 'Inactive'}
@@ -222,7 +234,7 @@ export default function UsersPage() {
                                             <td className="px-4 py-3 text-right">
                                                 <button
                                                     className="btn btn-ghost !px-2 text-red-300"
-                                                    disabled={isSelf}
+                                                    disabled={locked}
                                                     onClick={() => void remove(u)}
                                                     aria-label={`Delete ${u.username}`}
                                                 >
